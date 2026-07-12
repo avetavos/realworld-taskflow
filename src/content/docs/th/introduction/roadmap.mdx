@@ -1,0 +1,51 @@
+---
+title: แผนงาน Real-World Projects
+description: TaskFlow คือโปรเจกต์ที่ 1 ของซีรีส์ 6 โปรเจกต์ที่นำเนื้อหาทั้งหมดใน Learn Hub มาปรับเป็นแอปพลิเคชันจริง นี่คือสิ่งที่กำลังจะตามมา
+sidebar:
+  order: 4
+---
+
+## TaskFlow อยู่ตรงไหนของภาพรวม
+
+TaskFlow คือ **โปรเจกต์ที่ 1** ของซีรีส์ **Real-World Projects** ทั้งหมด 6 โปรเจกต์ แต่ละโปรเจกต์หยิบแอปพลิเคชันจริงคนละแบบมาสร้างใหม่ตั้งแต่ repo เปล่า ๆ โดยตั้งใจดึงเนื้อหาจากคอร์สใน Learn Hub คนละส่วนกัน — เพื่อว่าเมื่อรวมทั้ง 6 โปรเจกต์เข้าด้วยกันแล้วจะครอบคลุมคอร์สเกือบทั้งหมดในแคตตาล็อก TaskFlow ให้คุณได้ backend ด้วย Rust, PostgreSQL, Redis, เลเยอร์เรียลไทม์ด้วย WebSocket, ฟรอนต์เอนด์ด้วย Astro และ Docker Compose ส่วนโปรเจกต์ด้านล่างจะพาคุณไปยังส่วนที่เหลือของแผนที่: ภาษาอื่น ๆ, ฐานข้อมูลแบบอื่น, message queue, มือถือ, เว็บแบบ offline และโครงสร้างพื้นฐานบนคลาวด์จริง
+
+ห้าโปรเจกต์ด้านล่างกำลังจะตามมา ตอนนี้ถือเป็นแผนงานไว้ก่อน — เริ่มที่ TaskFlow ซึ่งเสร็จสมบูรณ์และพร้อมให้ลงมือสร้างได้แล้ววันนี้
+
+## DevBlog — headless CMS + บล็อก
+
+แพลตฟอร์มคอนเทนต์: ผู้เขียนเขียนโพสต์ใน headless CMS และเว็บบล็อกสาธารณะที่โหลดเร็วจะเรนเดอร์ออกมา คุณจะได้ออกแบบโมเดลของคอนเทนต์ เปิดให้เข้าถึงผ่าน API แบบ **GraphQL** และเรนเดอร์ด้วย server-side rendering กับ incremental static regeneration
+
+- **Stack:** Node/NestJS + MongoDB + GraphQL + Next.js
+- **ปรับใช้จาก:** Node.js Deep Dive, MongoDB, GraphQL, Next.js, React, Design Patterns, Refactoring
+
+## ShopMicro — e-commerce microservices
+
+ร้านค้าออนไลน์ที่แยกออกเป็นหลายเซอร์วิสอิสระ (แคตตาล็อก, ออเดอร์, ชำระเงิน, แจ้งเตือน) ที่สื่อสารกันผ่าน **gRPC** และประสานงานกระบวนการสั่งซื้อผ่าน **event streaming** คุณจะได้แยกโดเมนออกเป็นเซอร์วิสและรันบน Kubernetes
+
+- **Stack:** Go + gRPC + PostgreSQL + Kafka + RabbitMQ + Kubernetes
+- **ปรับใช้จาก:** Go Deep Dive, Go for TypeScript Developers, gRPC, Microservices, Kafka, RabbitMQ, Kubernetes
+
+## FitTrack — แอปฟิตเนสแบบ mobile-first
+
+แอปติดตามการออกกำลังกายที่มีทั้งแอปมือถือแบบเนทีฟและเว็บคู่กัน โดยมี Python API กับแพลตฟอร์ม Postgres/auth แบบ managed อยู่เบื้องหลัง คุณจะได้สร้างผลิตภัณฑ์เดียวกันสำหรับสองไคลเอนต์โดยใช้ backend ร่วมกัน
+
+- **Stack:** Python/FastAPI + Supabase + Flutter + Svelte
+- **ปรับใช้จาก:** Python Deep Dive, Python for TypeScript Developers, Supabase, Flutter (×2), Svelte
+
+## OfflineNotes — PWA แบบ offline-first
+
+แอปจดโน้ตที่ทำงานได้แม้ไม่มีเน็ตเลย: โน้ตเก็บอยู่ในเบราว์เซอร์และจะ sync เมื่อกลับมาออนไลน์ คุณจะได้สร้าง **Web Components** ที่นำกลับมาใช้ซ้ำได้ เก็บข้อมูลใน **IndexedDB** เร่งความเร็วเส้นทางที่ร้อนแรงด้วย **WebAssembly** และส่งมอบเป็น PWA ที่ติดตั้งได้
+
+- **Stack:** TypeScript + Web Components + IndexedDB + WebAssembly + Astro
+- **ปรับใช้จาก:** TypeScript, Web Components, Browser Storage, PWA, WebAssembly, Web for Designers
+
+## CloudDeploy — โปรเจกต์ปิดท้ายด้านโครงสร้างพื้นฐาน
+
+โปรเจกต์ปิดท้าย: นำโปรเจกต์ที่ 1–5 มา **deploy จริง** คุณจะได้ provision โครงสร้างพื้นฐานบนคลาวด์แบบ infrastructure as code ข้ามสามคลาวด์ รันบน Kubernetes เพิ่มระบบ authentication, feature flag และ observability
+
+- **Stack:** Terraform/Terragrunt (AWS/GCP/Azure) + Kubernetes + Datadog + Keycloak + GrowthBook
+- **ปรับใช้จาก:** Terraform (×3), Kubernetes, Datadog, Keycloak, GrowthBook
+
+## เริ่มที่นี่
+
+ห้าโปรเจกต์นี้กำลังจะตามมา วันนี้โปรเจกต์ที่ควรลงมือสร้างคือ **TaskFlow** — ไปที่หน้า [ภาพรวม](/taskflow/th/introduction/overview/) แล้วเริ่มจาก repo เปล่า ๆ ได้เลย

@@ -1,0 +1,51 @@
+---
+title: Real-World Projects Roadmap
+description: TaskFlow is project #1 of a six-project series that adapts the whole Learn Hub catalog into real applications. Here's what's coming next.
+sidebar:
+  order: 4
+---
+
+## Where TaskFlow fits
+
+TaskFlow is **project #1** of a six-project **Real-World Projects** series. Each project takes a different real application and rebuilds it from an empty repo, deliberately drawing on a different slice of the Learn Hub courses — so that, taken together, the six cover almost the entire catalog. TaskFlow gives you a Rust backend, PostgreSQL, Redis, a WebSocket realtime layer, an Astro front end, and Docker Compose. The projects below take you across the rest of the map: other languages, other databases, message queues, mobile, the offline web, and real cloud infrastructure.
+
+The five projects below are on the way. For now, they're a roadmap — start with TaskFlow, which is complete and ready to build today.
+
+## DevBlog — headless CMS + blog
+
+A content platform: authors write posts in a headless CMS, and a fast public blog renders them. You'll model content, expose it over a **GraphQL** API, and render it with server-side rendering and incremental static regeneration.
+
+- **Stack:** Node/NestJS + MongoDB + GraphQL + Next.js
+- **Adapts:** Node.js Deep Dive, MongoDB, GraphQL, Next.js, React, Design Patterns, Refactoring
+
+## ShopMicro — e-commerce microservices
+
+An online store split into independent services (catalog, orders, payments, notifications) that talk over **gRPC** and coordinate an order flow through **event streaming**. You'll decompose a domain into services and run them on Kubernetes.
+
+- **Stack:** Go + gRPC + PostgreSQL + Kafka + RabbitMQ + Kubernetes
+- **Adapts:** Go Deep Dive, Go for TypeScript Developers, gRPC, Microservices, Kafka, RabbitMQ, Kubernetes
+
+## FitTrack — mobile-first fitness app
+
+A workout tracker with a native mobile app and a web companion, backed by a Python API and a managed Postgres/auth platform. You'll build the same product for two clients and share one backend.
+
+- **Stack:** Python/FastAPI + Supabase + Flutter + Svelte
+- **Adapts:** Python Deep Dive, Python for TypeScript Developers, Supabase, Flutter (×2), Svelte
+
+## OfflineNotes — offline-first PWA
+
+A note-taking app that works with no network at all: notes live in the browser and sync when you come back online. You'll build reusable **Web Components**, store data in **IndexedDB**, speed up a hot path with **WebAssembly**, and ship it as an installable PWA.
+
+- **Stack:** TypeScript + Web Components + IndexedDB + WebAssembly + Astro
+- **Adapts:** TypeScript, Web Components, Browser Storage, PWA, WebAssembly, Web for Designers
+
+## CloudDeploy — infra capstone
+
+The capstone: take projects 1–5 and **deploy them for real**. You'll provision cloud infrastructure as code across three clouds, run it on Kubernetes, add authentication, feature flags, and observability.
+
+- **Stack:** Terraform/Terragrunt (AWS/GCP/Azure) + Kubernetes + Datadog + Keycloak + GrowthBook
+- **Adapts:** Terraform (×3), Kubernetes, Datadog, Keycloak, GrowthBook
+
+## Start here
+
+These five are coming next. Today, the one to build is **TaskFlow** — head to the [Overview](/taskflow/en/introduction/overview/) and start from an empty repo.
