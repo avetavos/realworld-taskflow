@@ -1,0 +1,131 @@
+---
+title: Centralized Error Handling
+description: Define AppError with thiserror, implement IntoResponse so every handler can use the ? operator, and return a consistent JSON error body without leaking internal details.
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+A single `AppError` enum, defined in `error.rs`, that represents every way a handler in TaskFlow can fail — not found, unauthorized, forbidden, a conflicting write, a validation failure, a database error, or an unexpected internal error. Alongside it, a type alias `AppResult<T> = Result<T, AppError>` and an `impl IntoResponse for AppError` that turns any `AppError` into a consistent JSON body: `{ "error": "<code>", "message": "<text>" }` with the right HTTP status code.
+
+From this lesson on, every handler we write in the REST API module returns `AppResult<Json<...>>` and uses the `?` operator freely — a database failure, a missing row, or a bad request all turn into the correct HTTP response automatically, with zero manual `match` blocks in handler code.
+
+## Why
+
+Without a shared error type, every handler ends up hand-rolling its own `match` over every failure mode it can hit, deciding the status code and JSON shape inline, every time. That duplicates the same logic dozens of times across the REST API module and guarantees the JSON error shape drifts between endpoints — one handler returns `{"error": "..."}`, another returns `{"message": "..."}`, and frontend code has to handle both.
+
+`AppError` fixes this by pushing the "how do failures become HTTP responses" decision into exactly one `impl IntoResponse` block, written once. Every handler's job shrinks to "return the right `AppError` variant (or propagate one with `?`)" — the conversion to an HTTP response is no longer the handler's concern at all.
+
+## Pros & cons
+
+**A closed `AppError` enum with `thiserror` (what we're using) vs. `anyhow::Error` everywhere**
+
+- Pros: each variant carries intent — `AppError::NotFound` unambiguously means "404," `AppError::Forbidden` means "403" — and the `impl IntoResponse` maps that intent to a status code exhaustively, so the compiler flags a missing case if we add a variant and forget to handle it. `thiserror`'s `#[derive(Error)]` generates `Display` and `std::error::Error` from the `#[error("...")]` attributes, with zero hand-written boilerplate.
+- Cons: every new failure mode a handler can produce means touching this shared enum — more central coordination than "just `bail!()` with any message" via `anyhow`. That's an acceptable trade here: TaskFlow's failure modes (not found, unauthorized, forbidden, conflict, validation, DB, internal) are a small, stable set that covers a REST API.
+
+**`#[from]` auto-conversion (what we're using) vs. manual `.map_err(...)` at every call site**
+
+- Pros: `#[error(transparent)] Db(#[from] sqlx::Error)` means any `sqlx::Error` returned by a `?` inside a handler is automatically wrapped into `AppError::Db` — no `.map_err(AppError::Db)` needed at every query call site. Same for `Internal(#[from] anyhow::Error)`, which is why we added `anyhow = "1"` to `api/Cargo.toml` back in the [config-tracing](/taskflow/en/backend-foundations/config-tracing/) lesson — it now does double duty as `Config::from_env()`'s error type *and* the catch-all wrapped by `AppError::Internal`.
+- Cons: `#[from]` collapses every `sqlx::Error` — a unique-constraint violation, a connection timeout, a syntax error in a query — into the same `AppError::Db` variant. If a handler needs to react differently to a duplicate-key error versus a dropped connection, it has to pattern-match `sqlx::Error` itself *before* the `?` fires, rather than relying on `#[from]` to do it.
+
+**Never leaking the real error text for `Db`/`Internal` (what we're using) vs. returning `err.to_string()` in the body**
+
+- Pros: a raw `sqlx::Error` can contain table names, column names, or fragments of the failing SQL — handing that to an API client is an information-disclosure risk (it maps your schema for an attacker) and often outright leaks connection details. Returning a fixed `"internal error"` message for both variants closes that off entirely.
+- Cons: you can no longer diagnose a `500` from the HTTP response alone — that's exactly why `into_response` calls `tracing::error!(error = %err, ...)` *before* discarding the real error from the body. The real error goes to structured logs (which we wired up in the previous lesson), where an operator can find it; the client only ever sees `"internal error"`.
+
+## Build it
+
+Create `taskflow/backend/api/src/error.rs`:
+
+```rust
+use axum::{http::StatusCode, response::IntoResponse, response::Response, Json};
+use serde_json::json;
+
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("not found")]
+    NotFound,
+    #[error("unauthorized")]
+    Unauthorized,
+    #[error("forbidden")]
+    Forbidden,
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Validation(String),
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+    #[error("internal error")]
+    Internal(#[from] anyhow::Error),
+}
+
+pub type AppResult<T> = Result<T, AppError>;
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            AppError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+            AppError::Db(err) => {
+                tracing::error!(error = %err, "database error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            }
+            AppError::Internal(err) => {
+                tracing::error!(error = %err, "internal error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            }
+        };
+
+        let message = match &self {
+            AppError::Db(_) | AppError::Internal(_) => "internal error".to_string(),
+            _ => self.to_string(),
+        };
+
+        (status, Json(json!({ "error": code, "message": message }))).into_response()
+    }
+}
+
+/// Example: the `?` operator automatically converts a `sqlx::Error`
+/// into `AppError::Db` via the `#[from]` attribute, and `ok_or` turns
+/// a missing row into a domain-level `AppError::NotFound`.
+#[allow(dead_code)]
+async fn find_board_title(pool: &sqlx::PgPool, id: uuid::Uuid) -> AppResult<String> {
+    let title: Option<String> = sqlx::query_scalar("SELECT title FROM boards WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+
+    title.ok_or(AppError::NotFound)
+}
+```
+
+A few details worth calling out:
+
+- `#[error(transparent)] Db(#[from] sqlx::Error)` means `AppError::Db`'s `Display` output is exactly `sqlx::Error`'s own message — we never construct our own text for it, since it never reaches the client anyway.
+- `impl IntoResponse for AppError` is what lets a handler return `AppResult<T>` directly as an Axum response: Axum calls `.into_response()` on any `Err` variant automatically when a handler returns a `Result<T, E>` where both `T: IntoResponse` and `E: IntoResponse`.
+- `find_board_title` is a preview of the pattern every REST handler follows once the database module exists: `sqlx::query_scalar(...).fetch_optional(pool).await?` propagates any `sqlx::Error` as `AppError::Db` automatically, and `.ok_or(AppError::NotFound)` turns "no row" into a proper 404 — two failure modes, zero manual `match` statements.
+
+### Add `mod error;` to `main.rs`
+
+```rust
+mod config;
+mod error;
+```
+
+We don't call anything from `error` in `main` yet — no handler returns `AppResult` until the REST API module — but the module needs to be declared so `cargo check` compiles it.
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+Expected: it compiles with a handful of `dead_code`/`never constructed` warnings (for `AppError` variants and `find_board_title`, since nothing calls them yet) and no errors. That's expected at this stage — the same "warnings about unused dependencies are expected" note from [backend-init](/taskflow/en/setup/backend-init/) applies here: this module is scaffolding for handlers we haven't written yet.
+
+## Recap
+
+You centralized error handling into one `AppError` enum with `thiserror`, one `AppResult<T>` alias, and one `impl IntoResponse` that maps every variant to a status code and a safe, consistent JSON body — `{ "error": "<code>", "message": "<text>" }`. `#[from]` conversions mean the `?` operator does the work of turning a `sqlx::Error` or `anyhow::Error` into the right `AppError` variant automatically, and `Db`/`Internal` never leak their real error text to the client — only to structured logs via `tracing::error!`. Next, we build the actual database and Redis connection pools this error type will guard in [db-pool](/taskflow/en/backend-foundations/db-pool/).

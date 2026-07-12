@@ -1,0 +1,163 @@
+---
+title: Config และ Tracing
+description: อ่านตัวแปร environment ทุกตัวเข้าไปใน struct Config ที่มี type ชัดเจนด้วย anyhow และแทนที่ println! ด้วยการ log แบบมีโครงสร้างผ่าน tracing_subscriber ที่ควบคุมด้วย RUST_LOG
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+โมดูล `config.rs` ที่มี struct `Config` และ constructor `Config::from_env()` ที่อ่านและ parse `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, `APP_PORT` และ `FRONTEND_ORIGIN` ครั้งเดียวตอนเริ่มต้น — แทนที่การเรียก `std::env::var(...).unwrap_or_else(...)` กระจัดกระจายจากบทเรียนก่อนหน้า ควบคู่กันไป เราจะตั้งค่า `tracing_subscriber` เพื่อให้ server log ข้อความแบบมีโครงสร้างและมีระดับความสำคัญ แทนที่ `println!` โดยความละเอียดของ log ควบคุมได้ผ่านตัวแปร environment `RUST_LOG`
+
+## Why
+
+นี่คือหลักการ config ของ [12-factor app](https://12factor.net/config) ในทางปฏิบัติ: **เก็บ config ไว้ใน environment** ไม่ใช่ในโค้ด และไม่ผสม config กับ secret ที่ commit เข้า git struct `Config` ที่มี type ชัดเจนและอ่านครั้งเดียวตอนบูต ให้สิ่งที่การเรียก `env::var` กระจัดกระจายทุกครั้งที่ต้องใช้ค่าไม่มีให้สองอย่าง:
+
+- **ล้มเร็ว (fail fast)** ถ้า `DATABASE_URL` หายไป เราอยากให้ process ปฏิเสธที่จะเริ่มทำงานพร้อมข้อความชัดเจน — ไม่ใช่ล่มไปสามคำขอถัดมาตอนที่ handler ไหนสักตัวบังเอิญไปแตะฐานข้อมูลเข้า
+- **แหล่งความจริงเดียว** ทุกโมดูลอื่น ๆ (`db.rs`, JWT middleware ในโมดูล Authentication) รับ `&Config` หรือ `Arc<Config>` แทนที่จะเรียก `std::env::var` เอง มีแค่จุดเดียวเท่านั้นที่รู้ว่า config ถูกโหลดมาอย่างไร
+
+การ log แบบมีโครงสร้างก็สำคัญด้วยเหตุผลเดียวกับ `Config` ที่มี type ชัดเจน: ตอนตีสองระหว่างเกิดเหตุฉุกเฉิน `println!("error: {e}")` ที่กระจายอยู่ทั่วโค้ดเบส ให้คุณแค่ noise ที่ไม่มีโครงสร้าง ไม่มีทาง filter ตาม severity หรือ module ได้ `tracing` ให้ทุกบรรทัด log มีระดับ (`info`, `warn`, `error`, ...) และให้คุณเพิ่มความละเอียดของ module ใดโมดูลหนึ่งได้ (`RUST_LOG=taskflow_api=debug,tower_http=debug`) โดยไม่ต้อง compile ใหม่
+
+## Pros & cons
+
+**struct `Config` ที่มี type ชัดเจน อ่านครั้งเดียว (ตัวที่เราใช้) เทียบกับ `std::env::var` กระจัดกระจายทั่วโค้ด**
+
+- ข้อดี: ตัวแปรที่จำเป็นทุกตัวถูก validate ในฟังก์ชันเดียว จุดเดียว มี error path เดียวที่ชัดเจน; โค้ดที่อยู่ปลายน้ำรับ `&Config` ซึ่ง mock ได้ง่ายในเทสต์ทีหลัง; การเพิ่มตัวแปรใหม่หมายถึงแตะ struct เดียว ไม่ใช่ grep หา `env::var` ทั้ง crate
+- ข้อเสีย: มี type อีกตัวที่ต้อง thread ผ่านทั้งแอป (`AppState` จะแบกมันไว้ อย่างที่จะเห็นในโมดูลถัดไป); อะไรก็ตามที่ต้องการตัวแปร environment *ใหม่* ต้องเพิ่ม field ใน `Config` และ deploy struct ใหม่ ไม่ใช่แค่เรียก `env::var` บรรทัดเดียวตรงไหนก็ได้ที่สะดวก
+
+**`anyhow::Result<Config>` (ตัวที่เราใช้) เทียบกับ enum `ConfigError` เฉพาะทาง**
+
+- ข้อดี: `Config::from_env()` รันแค่ครั้งเดียวตอนเริ่มต้น และทุก failure คือ fatal — process จะออกไม่ว่ากรณีไหน `?` ของ `anyhow` บวกกับ `.context("...")` ให้ error message ที่อ่านง่าย เชื่อมโยงกันได้ ("DATABASE_URL must be set") โดยแทบไม่มี boilerplate
+- ข้อเสีย: `anyhow::Error` ลบ type ของ error ต้นตอทิ้งไป ทำให้โค้ดที่เรียกใช้ `match` ไม่ได้ว่าตัวแปรไหนหายไปเพื่อตอบสนองต่างกัน ตรงนี้ไม่เป็นปัญหาเพราะไม่มีอะไร (และไม่ควรมีอะไร) พยายามกู้คืนจาก config ที่ขาดตอนเริ่มต้น — แต่มันคือตัวเลือกที่ผิดสำหรับ error ที่ผู้เรียกใช้ต้องแยกกรณี ซึ่งเป็นเหตุผลว่าทำไมบทเรียนถัดไป `AppError` ถึงใช้ variant ที่มี type ชัดเจนจาก `thiserror` แทน
+
+**`tracing` (ตัวที่เราใช้) เทียบกับ crate `log` ธรรมดา**
+
+- ข้อดี: field แบบ key-value มีโครงสร้าง (`tracing::info!(port = %port, "listening")`) แทนที่จะ interpolate string อย่างเดียว; span เชื่อมโยง log หลายบรรทัดเข้ากับ request หรือ task เดียวกัน ซึ่งสำคัญเมื่อ handler เป็น async และสลับกันทำงาน; ecosystem ที่กว้างกว่า (`TraceLayer` ของ `tower-http`, การ log query ของ `sqlx`) สร้างอยู่บน `tracing` ทำให้เราได้ log ของ request/response และ query มาฟรี ๆ ทีหลัง
+- ข้อเสีย: ต้องตั้งค่ามากกว่า `log::info!("...")` — ต้องมี subscriber ไม่ใช่แค่เรียก macro logging เฉย ๆ — และ API ของ structured field มี learning curve สูงกว่าการ format string ธรรมดา
+
+## Build it
+
+### 1. เพิ่ม dependency `anyhow`
+
+`Config::from_env()` คืนค่า `anyhow::Result<Config>` ดังนั้นเพิ่ม `anyhow` เข้าไปใน `api/Cargo.toml`:
+
+```bash
+cd taskflow/backend
+cargo add anyhow -p api
+```
+
+คำสั่งนี้เพิ่ม `anyhow = "1"` ไว้ใต้ `[dependencies]` ใน `api/Cargo.toml`
+
+### 2. `config.rs`
+
+สร้าง `taskflow/backend/api/src/config.rs`:
+
+```rust
+use anyhow::Context;
+
+pub struct Config {
+    pub database_url: String,
+    pub redis_url: String,
+    pub jwt_secret: String,
+    pub app_port: u16,
+    pub frontend_origin: String,
+}
+
+impl Config {
+    pub fn from_env() -> anyhow::Result<Self> {
+        Ok(Self {
+            database_url: std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?,
+            redis_url: std::env::var("REDIS_URL").context("REDIS_URL must be set")?,
+            jwt_secret: std::env::var("JWT_SECRET").context("JWT_SECRET must be set")?,
+            app_port: std::env::var("APP_PORT")
+                .unwrap_or_else(|_| "8080".to_string())
+                .parse()
+                .context("APP_PORT must be a valid port number")?,
+            frontend_origin: std::env::var("FRONTEND_ORIGIN")
+                .context("FRONTEND_ORIGIN must be set")?,
+        })
+    }
+}
+```
+
+`.context("...")` (จาก `anyhow::Context` ที่ import ไว้ด้านบน) แปะข้อความที่มนุษย์อ่านได้เข้ากับ `std::env::VarError` หรือ `std::num::ParseIntError` ดังนั้น `DATABASE_URL` ที่หายไปจะ fail ด้วย `Error: DATABASE_URL must be set` แทนที่จะเป็น `environment variable not found` ที่ช่วยอะไรน้อยกว่ามาก ทุก field ยกเว้น `app_port` เป็น required ไม่มีค่า fallback — `app_port` คือตัวแปรเดียวที่มีค่า default ที่สมเหตุสมผลสำหรับใช้ในเครื่อง (`8080` ตรงกับ `.env.example`) เราจึงใช้ `unwrap_or_else` ก่อน parse
+
+### 3. เชื่อมเข้ากับ `main.rs`
+
+แทนที่ `taskflow/backend/api/src/main.rs` ด้วย:
+
+```rust
+mod config;
+
+use axum::{routing::get, Json, Router};
+use config::Config;
+use tower_http::cors::CorsLayer;
+use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let config = Config::from_env()?;
+
+    let cors = CorsLayer::new().allow_origin(
+        config
+            .frontend_origin
+            .parse::<axum::http::HeaderValue>()
+            .expect("FRONTEND_ORIGIN must be a valid header value"),
+    );
+
+    let app = Router::new().route("/health", get(health)).layer(cors);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", config.app_port)).await?;
+    tracing::info!("listening on {}", listener.local_addr()?);
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+```
+
+มีสามจุดที่เปลี่ยนจากบทเรียนก่อนหน้า: `main` ตอนนี้คืนค่า `anyhow::Result<()>` ดังนั้นทุกขั้นตอนที่ fail ได้จะใช้ `?` แทน `.unwrap()`/`.expect()`; `Config::from_env()` แทนที่การเรียก `std::env::var` แบบเฉพาะกิจทุกจุด; และ `tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).init()` ตั้งค่า subscriber ที่พิมพ์บรรทัด log แบบจัดรูปแบบและเคารพค่า `RUST_LOG` โดยเรียกครั้งเดียวก่อนอย่างอื่นทั้งหมดจะทำงาน `tracing::info!` แทนที่ `println!` สำหรับข้อความตอนเริ่มต้น
+
+## Verify
+
+รันด้วยค่า default (ไม่ตั้ง `RUST_LOG` จะ default เป็นระดับ `error` เท่านั้น — คุณอาจไม่เห็น output อะไรเลย):
+
+```bash
+cargo run -p api
+```
+
+ทีนี้รันด้วย `RUST_LOG=info` เพื่อดูข้อความตอนเริ่มต้น:
+
+```bash
+RUST_LOG=info cargo run -p api
+```
+
+ผลลัพธ์ที่ควรได้ควรมีบรรทัดแบบมีโครงสร้างคล้ายกับ:
+
+```
+2026-07-13T10:00:00.123456Z  INFO api: listening on 0.0.0.0:8080
+```
+
+ยืนยันว่า `/health` ยังทำงานเหมือนเดิมทุกอย่าง:
+
+```bash
+curl -s http://localhost:8080/health
+```
+
+```json
+{"status":"ok"}
+```
+
+สุดท้าย ยืนยันพฤติกรรม fail-fast: ลอง comment หรือเปลี่ยนชื่อ `JWT_SECRET` ใน `.env` ชั่วคราว รัน `cargo run -p api` อีกครั้ง แล้วยืนยันว่า process ออกทันทีพร้อม error ที่พูดถึง `JWT_SECRET must be set` แทนที่จะเริ่มทำงานแล้วค่อยพังทีหลัง อย่าลืมคืนค่า `.env` กลับหลังจากนั้น
+
+## Recap
+
+คุณแทนที่การเรียก `std::env::var` กระจัดกระจายด้วย `Config::from_env()` ตัวเดียวที่อ่าน `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, `APP_PORT` และ `FRONTEND_ORIGIN` ครั้งเดียวตอนเริ่มต้น พร้อมล้มเร็วด้วย error message ที่ชัดเจนจาก `anyhow` ถ้ามีอะไรที่จำเป็นหายไป คุณยังสลับ `println!` เป็น `tracing_subscriber` ด้วย ทำให้ทุกบรรทัด log มีระดับ severity ที่ควบคุมได้ตอน runtime ผ่าน `RUST_LOG` ต่อไปเราจะรวมศูนย์วิธีที่ server แปลง failure เป็น HTTP response ใน [error-handling](/taskflow/th/backend-foundations/error-handling/)

@@ -1,0 +1,178 @@
+---
+title: Database & Redis Pools
+description: Build the PgPool and Redis pool, assemble them into AppState, and wire config → pools → state → router with .with_state so /health still responds.
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+`db.rs`, with two functions: `create_pg_pool` (a `sqlx::PgPool` built via `PgPoolOptions`) and `create_redis_pool` (a `deadpool_redis::Pool`). `state.rs`, with the `AppState` struct that bundles both pools plus the `Config` behind an `Arc`. And an updated `main.rs` that wires everything together in order — config, then pools, then state, then the router — and hands `AppState` to Axum with `.with_state(state)`.
+
+By the end of this lesson, `/health` still returns `{"status":"ok"}`, but the server now boots a real, pooled connection to both PostgreSQL and Redis before it starts accepting requests, and every future handler gets access to both through `State<AppState>`.
+
+## Why
+
+Opening a new database connection per request is slow — a TCP handshake, TLS negotiation, and Postgres authentication all happen before the first query even runs — and it doesn't scale, since Postgres itself has a hard cap on concurrent connections (`max_connections`, `100` by default). A **connection pool** solves both problems: it opens a small number of connections once, hands them out to whichever request needs one, and returns them to the pool when the request is done. `sqlx::PgPool` and `deadpool_redis::Pool` are exactly that for Postgres and Redis respectively.
+
+`AppState` exists because Axum needs one typed value to hand every handler that needs shared resources — the pools, and the config (for things like `jwt_secret` in the Authentication module). `.with_state(state)` registers it once on the `Router`; individual handlers opt in with the `State<AppState>` extractor.
+
+## Pros & cons
+
+**`max_connections(5)` (what we're using) vs. a large pool**
+
+- Pros: a small pool has a small footprint — five connections easily fits alongside Postgres's default `max_connections = 100`, even with several other services or a few `psql` sessions open locally. It's also enough to prevent one slow query from starving every other request, since Axum's async handlers queue for a pool connection instead of failing outright.
+- Cons: under real load, five concurrent in-flight queries is a low ceiling — requests beyond that queue for a free connection instead of running immediately. This is a number we'll revisit before any production deployment; for local development and the traffic this course generates, it's the right size.
+
+**Eager connect — `PgPoolOptions::connect()` opens a connection immediately (what we're using) vs. lazy connect**
+
+- Pros: the server fails to start at all if the database is unreachable, instead of starting successfully and only discovering the problem on the first request that touches it. Combined with the fail-fast `Config::from_env()` from two lessons ago, a broken environment is caught at boot, not in production traffic.
+- Cons: startup now blocks on database (and Redis) latency — a slow or temporarily unavailable database delays or prevents the whole server from starting, with no retry built in. We accept this for local development; the Docker Compose module's `depends_on` healthchecks are what make this safe in a multi-container startup sequence, so the API container doesn't even attempt to boot until `db` reports healthy.
+
+**`AppState` holding `Arc<Config>` (what we're using) vs. cloning individual `String` fields into `AppState` directly**
+
+- Pros: `AppState` derives `Clone`, and Axum clones it (cheaply) for every request. Cloning an `Arc<Config>` is a single atomic pointer-count bump; cloning five separate `String` fields (some of which, like `jwt_secret`, we'd rather not copy around more than necessary) would allocate on every single request.
+- Cons: any handler that needs just one field — say, `jwt_secret` — still goes through `state.config.jwt_secret`, one more level of indirection than a flat field would be. A small, worthwhile cost for the cheaper clone.
+
+## Build it
+
+### 1. `db.rs` — the two pool constructors
+
+Create `taskflow/backend/api/src/db.rs`:
+
+```rust
+pub async fn create_pg_pool(database_url: &str) -> anyhow::Result<sqlx::PgPool> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(database_url)
+        .await?;
+
+    Ok(pool)
+}
+
+pub fn create_redis_pool(redis_url: &str) -> anyhow::Result<deadpool_redis::Pool> {
+    let cfg = deadpool_redis::Config::from_url(redis_url);
+    let pool = cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
+
+    Ok(pool)
+}
+```
+
+`create_pg_pool` is `async` because `PgPoolOptions::connect` opens a real network connection and awaits the handshake. `create_redis_pool` is not `async` — `deadpool_redis::Config::create_pool` only builds the pool structure and validates the URL; it doesn't open a connection until the first `pool.get().await` call, which we don't make here.
+
+### 2. `state.rs` — bundle everything into `AppState`
+
+Create `taskflow/backend/api/src/state.rs`:
+
+```rust
+#[derive(Clone)]
+pub struct AppState {
+    pub db: sqlx::PgPool,
+    pub redis: deadpool_redis::Pool,
+    pub config: std::sync::Arc<crate::config::Config>,
+}
+```
+
+`sqlx::PgPool` and `deadpool_redis::Pool` are themselves cheap to clone — they're internally `Arc`-backed handles to a shared pool, not the pool's actual connections — so `#[derive(Clone)]` on `AppState` is inexpensive even without wrapping `db`/`redis` in an `Arc` explicitly. `config` is wrapped because `Config` is a handful of `String` fields.
+
+### 3. Wire it all together in `main.rs`
+
+Replace `taskflow/backend/api/src/main.rs` with:
+
+```rust
+mod config;
+mod db;
+mod error;
+mod state;
+
+use axum::{routing::get, Json, Router};
+use config::Config;
+use state::AppState;
+use std::sync::Arc;
+use tower_http::cors::CorsLayer;
+use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let config = Config::from_env()?;
+
+    let db = db::create_pg_pool(&config.database_url).await?;
+    let redis = db::create_redis_pool(&config.redis_url)?;
+
+    let state = AppState {
+        db,
+        redis,
+        config: Arc::new(config),
+    };
+
+    let cors = CorsLayer::new().allow_origin(
+        state
+            .config
+            .frontend_origin
+            .parse::<axum::http::HeaderValue>()
+            .expect("FRONTEND_ORIGIN must be a valid header value"),
+    );
+
+    let app_port = state.config.app_port;
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .layer(cors)
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{app_port}")).await?;
+    tracing::info!("listening on {}", listener.local_addr()?);
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+```
+
+The order in `main` now is exactly **config → pools → state → router**: `Config::from_env()` first (fail fast on bad env), then both pools built from that config, then `AppState` assembled from the pools plus the config wrapped in `Arc`, then the `Router` built with `.with_state(state)` last. `health` still takes no `State<AppState>` extractor — it doesn't need the database or Redis — but `.with_state(state)` is required regardless, because it's what fixes the router's state type to `AppState` so any *future* handler can request `State<AppState>`.
+
+## Verify
+
+Bring up Postgres and Redis (from the [compose-skeleton](/taskflow/en/setup/compose-skeleton/) lesson):
+
+```bash
+cd taskflow/infra
+docker compose up -d db redis
+```
+
+Then run the API:
+
+```bash
+cd ../backend
+RUST_LOG=info cargo run -p api
+```
+
+Expected output — the server boots only after both pools connect successfully:
+
+```
+2026-07-13T10:00:00.123456Z  INFO api: listening on 0.0.0.0:8080
+```
+
+Confirm `/health` still responds:
+
+```bash
+curl -s http://localhost:8080/health
+```
+
+```json
+{"status":"ok"}
+```
+
+Finally, confirm the fail-fast behavior on the database side too: stop the database (`docker compose stop db`), run `cargo run -p api` again, and confirm it exits with a connection error instead of starting. Bring `db` back up (`docker compose start db`) afterward.
+
+## Recap
+
+You built `create_pg_pool` and `create_redis_pool` in `db.rs`, bundled both pools plus `Arc<Config>` into `AppState` in `state.rs`, and rewired `main.rs` to assemble them in order — config, then pools, then state, then router — before handing `AppState` to Axum with `.with_state(state)`. The server now fails fast if either data store is unreachable at boot, exactly like it already did for missing environment variables. That closes out Module 3: `taskflow-api` has a real router, typed config, structured logging, centralized error handling, and pooled connections to both its data stores. Next, we build on top of all of it in Module 4 — Authentication.

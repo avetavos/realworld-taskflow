@@ -1,0 +1,178 @@
+---
+title: Database และ Redis Pool
+description: สร้าง PgPool และ Redis pool ประกอบเข้าเป็น AppState แล้วเชื่อม config → pools → state → router ด้วย .with_state เพื่อให้ /health ยังตอบสนองได้เหมือนเดิม
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+`db.rs` มีสองฟังก์ชัน: `create_pg_pool` (สร้าง `sqlx::PgPool` ผ่าน `PgPoolOptions`) และ `create_redis_pool` (สร้าง `deadpool_redis::Pool`) `state.rs` มี struct `AppState` ที่รวม pool ทั้งสองตัวพร้อมกับ `Config` ที่ห่อด้วย `Arc` และ `main.rs` ฉบับใหม่ที่เชื่อมทุกอย่างเข้าด้วยกันตามลำดับ — config, แล้วก็ pools, แล้วก็ state, แล้วก็ router — แล้วส่ง `AppState` ให้ Axum ผ่าน `.with_state(state)`
+
+เมื่อจบบทเรียนนี้ `/health` ยังคืนค่า `{"status":"ok"}` เหมือนเดิม แต่ตอนนี้ server จะเปิด connection แบบ pooled ตัวจริงไปยังทั้ง PostgreSQL และ Redis ก่อนที่จะเริ่มรับ request และทุก handler ในอนาคตจะเข้าถึงทั้งสองอย่างได้ผ่าน `State<AppState>`
+
+## Why
+
+การเปิด database connection ใหม่ทุกครั้งต่อหนึ่ง request นั้นช้า — TCP handshake, การเจรจา TLS และการ authenticate กับ Postgres ต้องเกิดขึ้นทั้งหมดก่อนที่ query แรกจะรันด้วยซ้ำ — และมันไม่ scale เพราะ Postgres เองมีเพดานจำนวน connection พร้อมกันตายตัว (`max_connections` ค่า default คือ `100`) **connection pool** แก้ปัญหาทั้งสองอย่างนี้: มันเปิด connection จำนวนน้อยไว้ครั้งเดียว แจกจ่ายให้ request ไหนก็ตามที่ต้องการ แล้วรับคืนกลับเข้า pool เมื่อ request เสร็จ `sqlx::PgPool` และ `deadpool_redis::Pool` ก็คือสิ่งนี้แหละสำหรับ Postgres และ Redis ตามลำดับ
+
+`AppState` มีอยู่เพราะ Axum ต้องการค่าที่มี type ชัดเจนตัวเดียวส่งให้ทุก handler ที่ต้องการ resource ที่ใช้ร่วมกัน — pools และ config (สำหรับสิ่งอย่าง `jwt_secret` ในโมดูล Authentication) `.with_state(state)` ลงทะเบียนมันครั้งเดียวบน `Router`; handler แต่ละตัวเลือกใช้ได้ผ่าน extractor `State<AppState>`
+
+## Pros & cons
+
+**`max_connections(5)` (ตัวที่เราใช้) เทียบกับ pool ขนาดใหญ่**
+
+- ข้อดี: pool เล็ก ๆ มี footprint เล็ก — ห้า connection พอดีกับ `max_connections = 100` ค่า default ของ Postgres สบาย ๆ แม้จะมีเซอร์วิสอื่นหรือ session `psql` เปิดอยู่บ้างในเครื่อง มันยังเพียงพอที่จะกัน query ช้า ๆ ตัวเดียวไม่ให้ทำให้ request อื่นทุกตัวอดตาย เพราะ handler แบบ async ของ Axum จะเข้าคิวรอ connection ว่างแทนที่จะ fail ไปเลย
+- ข้อเสีย: ภายใต้ load จริง ห้า query ที่รันพร้อมกันคือเพดานที่ต่ำ — request ที่เกินจากนั้นต้องเข้าคิวรอ connection ว่างแทนที่จะรันได้ทันที นี่คือตัวเลขที่เราจะกลับมาทบทวนก่อน deploy จริง สำหรับการพัฒนาในเครื่องและ traffic ที่คอร์สนี้สร้างขึ้น มันคือขนาดที่เหมาะสมแล้ว
+
+**Eager connect — `PgPoolOptions::connect()` เปิด connection ทันที (ตัวที่เราใช้) เทียบกับ lazy connect**
+
+- ข้อดี: server จะเริ่มทำงานไม่ได้เลยถ้าเข้าถึง database ไม่ได้ แทนที่จะเริ่มสำเร็จแล้วมาเจอปัญหาตอน request แรกที่แตะมันเท่านั้น รวมกับ `Config::from_env()` แบบ fail-fast จากสองบทเรียนก่อน environment ที่พังจะถูกจับได้ตอนบูต ไม่ใช่ตอนมี traffic จริงใน production
+- ข้อเสีย: การเริ่มต้นตอนนี้ต้องรอ latency ของ database (และ Redis) — database ที่ช้าหรือใช้งานไม่ได้ชั่วคราวจะทำให้ server เริ่มช้าลงหรือเริ่มไม่ได้เลย โดยไม่มี retry สร้างไว้ให้ เรายอมรับตรงนี้สำหรับการพัฒนาในเครื่อง; healthcheck ของ `depends_on` ในโมดูล Docker Compose คือสิ่งที่ทำให้มันปลอดภัยในลำดับการเริ่มต้นแบบหลายคอนเทนเนอร์ container ของ API จะไม่พยายามบูตด้วยซ้ำจนกว่า `db` จะรายงานว่า healthy
+
+**`AppState` ที่ถือ `Arc<Config>` (ตัวที่เราใช้) เทียบกับ clone field `String` แต่ละตัวเข้าไปใน `AppState` ตรง ๆ**
+
+- ข้อดี: `AppState` derive `Clone` และ Axum clone มัน (แบบถูกมาก) ทุก request การ clone `Arc<Config>` คือการเพิ่มตัวนับ pointer แบบ atomic ครั้งเดียว การ clone field `String` ห้าตัวแยกกัน (บางตัวอย่าง `jwt_secret` เราไม่อยากให้ถูก copy ไปมาโดยไม่จำเป็น) จะต้อง allocate ทุก ๆ request
+- ข้อเสีย: handler ตัวไหนที่ต้องการแค่ field เดียว — เช่น `jwt_secret` — ก็ยังต้องผ่าน `state.config.jwt_secret` ซึ่งอ้อมกว่า field แบบแบนหนึ่งชั้น เป็นต้นทุนเล็ก ๆ ที่คุ้มค่าแลกกับการ clone ที่ถูกลง
+
+## Build it
+
+### 1. `db.rs` — ตัวสร้าง pool ทั้งสอง
+
+สร้าง `taskflow/backend/api/src/db.rs`:
+
+```rust
+pub async fn create_pg_pool(database_url: &str) -> anyhow::Result<sqlx::PgPool> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(database_url)
+        .await?;
+
+    Ok(pool)
+}
+
+pub fn create_redis_pool(redis_url: &str) -> anyhow::Result<deadpool_redis::Pool> {
+    let cfg = deadpool_redis::Config::from_url(redis_url);
+    let pool = cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
+
+    Ok(pool)
+}
+```
+
+`create_pg_pool` เป็น `async` เพราะ `PgPoolOptions::connect` เปิด network connection จริงและ await handshake `create_redis_pool` ไม่ใช่ `async` — `deadpool_redis::Config::create_pool` แค่สร้างโครงสร้างของ pool และตรวจสอบ URL เท่านั้น มันจะไม่เปิด connection จนกว่าจะมีการเรียก `pool.get().await` ครั้งแรก ซึ่งเราไม่ได้เรียกที่นี่
+
+### 2. `state.rs` — รวมทุกอย่างเข้า `AppState`
+
+สร้าง `taskflow/backend/api/src/state.rs`:
+
+```rust
+#[derive(Clone)]
+pub struct AppState {
+    pub db: sqlx::PgPool,
+    pub redis: deadpool_redis::Pool,
+    pub config: std::sync::Arc<crate::config::Config>,
+}
+```
+
+`sqlx::PgPool` และ `deadpool_redis::Pool` เอง clone ได้ถูกมากอยู่แล้ว — มันคือ handle ที่ backed ด้วย `Arc` ภายในไปยัง pool ที่ใช้ร่วมกัน ไม่ใช่ connection จริง ๆ ของ pool — ดังนั้น `#[derive(Clone)]` บน `AppState` จึงไม่แพงแม้จะไม่ได้ห่อ `db`/`redis` ด้วย `Arc` ตรง ๆ ส่วน `config` ถูกห่อไว้เพราะ `Config` คือ field `String` หลายตัว
+
+### 3. เชื่อมทุกอย่างเข้าด้วยกันใน `main.rs`
+
+แทนที่ `taskflow/backend/api/src/main.rs` ด้วย:
+
+```rust
+mod config;
+mod db;
+mod error;
+mod state;
+
+use axum::{routing::get, Json, Router};
+use config::Config;
+use state::AppState;
+use std::sync::Arc;
+use tower_http::cors::CorsLayer;
+use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let config = Config::from_env()?;
+
+    let db = db::create_pg_pool(&config.database_url).await?;
+    let redis = db::create_redis_pool(&config.redis_url)?;
+
+    let state = AppState {
+        db,
+        redis,
+        config: Arc::new(config),
+    };
+
+    let cors = CorsLayer::new().allow_origin(
+        state
+            .config
+            .frontend_origin
+            .parse::<axum::http::HeaderValue>()
+            .expect("FRONTEND_ORIGIN must be a valid header value"),
+    );
+
+    let app_port = state.config.app_port;
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .layer(cors)
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{app_port}")).await?;
+    tracing::info!("listening on {}", listener.local_addr()?);
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+```
+
+ลำดับใน `main` ตอนนี้คือ **config → pools → state → router** เป๊ะ ๆ: `Config::from_env()` ก่อน (ล้มเร็วถ้า env ไม่ถูกต้อง) แล้วสร้าง pool ทั้งสองจาก config นั้น แล้วประกอบ `AppState` จาก pool บวก config ที่ห่อด้วย `Arc` แล้วสร้าง `Router` ด้วย `.with_state(state)` เป็นขั้นสุดท้าย `health` ยังไม่รับ extractor `State<AppState>` — มันไม่ต้องการ database หรือ Redis — แต่ `.with_state(state)` ยังจำเป็นอยู่ดี เพราะมันคือสิ่งที่ fix type ของ state ใน router ให้เป็น `AppState` เพื่อให้ handler ตัวไหน *ในอนาคต* ขอ `State<AppState>` ได้
+
+## Verify
+
+เปิด Postgres และ Redis (จากบทเรียน [compose-skeleton](/taskflow/en/setup/compose-skeleton/)):
+
+```bash
+cd taskflow/infra
+docker compose up -d db redis
+```
+
+จากนั้นรัน API:
+
+```bash
+cd ../backend
+RUST_LOG=info cargo run -p api
+```
+
+ผลลัพธ์ที่ควรได้ — server จะบูตสำเร็จก็ต่อเมื่อ pool ทั้งสองเชื่อมต่อสำเร็จเท่านั้น:
+
+```
+2026-07-13T10:00:00.123456Z  INFO api: listening on 0.0.0.0:8080
+```
+
+ยืนยันว่า `/health` ยังตอบสนองอยู่:
+
+```bash
+curl -s http://localhost:8080/health
+```
+
+```json
+{"status":"ok"}
+```
+
+สุดท้าย ยืนยันพฤติกรรม fail-fast ฝั่ง database ด้วย: หยุด database (`docker compose stop db`) รัน `cargo run -p api` อีกครั้ง แล้วยืนยันว่ามันออกพร้อม connection error แทนที่จะเริ่มทำงาน เปิด `db` กลับมา (`docker compose start db`) หลังจากนั้น
+
+## Recap
+
+คุณสร้าง `create_pg_pool` และ `create_redis_pool` ใน `db.rs` รวม pool ทั้งสองพร้อม `Arc<Config>` เข้าเป็น `AppState` ใน `state.rs` และปรับ `main.rs` ใหม่ให้ประกอบทุกอย่างตามลำดับ — config, แล้วก็ pools, แล้วก็ state, แล้วก็ router — ก่อนส่ง `AppState` ให้ Axum ผ่าน `.with_state(state)` ตอนนี้ server ล้มเร็วถ้า data store ตัวไหนตัวหนึ่งเข้าถึงไม่ได้ตอนบูต เหมือนกับที่มันทำไปแล้วสำหรับตัวแปร environment ที่หายไป นี่คือการปิดจบโมดูล 3: `taskflow-api` มี router ตัวจริง, config ที่มี type ชัดเจน, การ log แบบมีโครงสร้าง, การจัดการ error แบบรวมศูนย์ และ connection แบบ pooled ไปยัง data store ทั้งสองตัว ต่อไปเราจะต่อยอดจากทั้งหมดนี้ในโมดูล 4 — Authentication

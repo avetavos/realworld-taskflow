@@ -1,0 +1,131 @@
+---
+title: การจัดการ Error แบบรวมศูนย์
+description: นิยาม AppError ด้วย thiserror implement IntoResponse เพื่อให้ทุก handler ใช้ operator ? ได้ และคืน JSON error body ที่สม่ำเสมอโดยไม่รั่วรายละเอียดภายใน
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+enum `AppError` ตัวเดียว นิยามไว้ใน `error.rs` ที่แทนทุกวิธีที่ handler ใน TaskFlow จะ fail ได้ — not found, unauthorized, forbidden, การเขียนที่ขัดแย้งกัน, validation ที่ล้มเหลว, database error หรือ internal error ที่ไม่คาดคิด ควบคู่กันไปคือ type alias `AppResult<T> = Result<T, AppError>` และ `impl IntoResponse for AppError` ที่แปลง `AppError` ตัวไหนก็ตามให้เป็น JSON body ที่สม่ำเสมอ: `{ "error": "<code>", "message": "<text>" }` พร้อม HTTP status code ที่ถูกต้อง
+
+ตั้งแต่บทเรียนนี้เป็นต้นไป ทุก handler ที่เราเขียนในโมดูล REST API จะคืนค่า `AppResult<Json<...>>` และใช้ operator `?` ได้อย่างอิสระ — database ที่ fail, แถวที่หายไป หรือ request ที่ไม่ถูกต้อง จะกลายเป็น HTTP response ที่ถูกต้องโดยอัตโนมัติ โดยไม่มี `match` block ที่เขียนมือใน handler เลย
+
+## Why
+
+ถ้าไม่มี error type ร่วมกัน ทุก handler จะจบลงด้วยการเขียน `match` ของตัวเองสำหรับทุก failure mode ที่มันเจอได้ ตัดสินใจ status code และรูปแบบ JSON แบบ inline ทุกครั้งไป สิ่งนี้ทำให้ logic เดิมซ้ำกันหลายสิบครั้งทั่วโมดูล REST API และรับประกันว่ารูปแบบ JSON error จะ drift ไปคนละทางระหว่าง endpoint — handler หนึ่งคืน `{"error": "..."}` อีกตัวคืน `{"message": "..."}` แล้วโค้ด frontend ก็ต้องรองรับทั้งสองแบบ
+
+`AppError` แก้ปัญหานี้ด้วยการผลักการตัดสินใจว่า "failure กลายเป็น HTTP response ยังไง" ไปไว้ที่ `impl IntoResponse` บล็อกเดียว เขียนครั้งเดียว งานของทุก handler เหลือแค่ "คืนค่า `AppError` variant ที่ถูกต้อง (หรือส่งต่อด้วย `?`)" — การแปลงเป็น HTTP response ไม่ใช่หน้าที่ของ handler อีกต่อไปแล้ว
+
+## Pros & cons
+
+**enum `AppError` แบบปิดด้วย `thiserror` (ตัวที่เราใช้) เทียบกับ `anyhow::Error` ทุกที่**
+
+- ข้อดี: แต่ละ variant สื่อความตั้งใจชัดเจน — `AppError::NotFound` หมายถึง "404" ไม่กำกวม, `AppError::Forbidden` หมายถึง "403" — และ `impl IntoResponse` แปลงความตั้งใจนั้นเป็น status code แบบครบทุกกรณี ทำให้ compiler เตือนถ้าเราเพิ่ม variant แล้วลืมจัดการ `thiserror`'s `#[derive(Error)]` สร้าง `Display` และ `std::error::Error` จาก attribute `#[error("...")]` ให้โดยไม่ต้องเขียน boilerplate เอง
+- ข้อเสีย: ทุก failure mode ใหม่ที่ handler สร้างได้ ต้องแตะ enum ร่วมนี้ — ต้องประสานงานส่วนกลางมากกว่า "แค่ `bail!()` ด้วย message อะไรก็ได้" ผ่าน `anyhow` แต่นี่เป็น trade-off ที่ยอมรับได้ที่นี่: failure mode ของ TaskFlow (not found, unauthorized, forbidden, conflict, validation, DB, internal) เป็นเซตเล็ก ๆ ที่นิ่งและครอบคลุม REST API ได้
+
+**การแปลงอัตโนมัติด้วย `#[from]` (ตัวที่เราใช้) เทียบกับ `.map_err(...)` มือที่ทุกจุดเรียก**
+
+- ข้อดี: `#[error(transparent)] Db(#[from] sqlx::Error)` หมายความว่า `sqlx::Error` ตัวไหนก็ตามที่คืนจาก `?` ใน handler จะถูกห่อเข้า `AppError::Db` โดยอัตโนมัติ — ไม่ต้อง `.map_err(AppError::Db)` ทุกจุดที่เรียก query เหมือนกันกับ `Internal(#[from] anyhow::Error)` ซึ่งเป็นเหตุผลว่าทำไมเราถึงเพิ่ม `anyhow = "1"` เข้าไปใน `api/Cargo.toml` ตั้งแต่บทเรียน [config-tracing](/taskflow/th/backend-foundations/config-tracing/) — ตอนนี้มันทำหน้าที่สองอย่าง ทั้งเป็น error type ของ `Config::from_env()` *และ* เป็นตัวรับทุกอย่างที่ห่อด้วย `AppError::Internal`
+- ข้อเสีย: `#[from]` ยุบ `sqlx::Error` ทุกแบบ — unique-constraint violation, connection timeout, syntax error ใน query — ให้กลายเป็น `AppError::Db` variant เดียวกันหมด ถ้า handler ต้องตอบสนองต่างกันระหว่าง duplicate-key error กับ connection ที่หลุด มันต้อง pattern-match `sqlx::Error` เอง *ก่อน* ที่ `?` จะทำงาน แทนที่จะพึ่ง `#[from]` ให้ทำแทน
+
+**ไม่รั่ว error text จริงสำหรับ `Db`/`Internal` (ตัวที่เราใช้) เทียบกับคืน `err.to_string()` ใน body**
+
+- ข้อดี: `sqlx::Error` ดิบ ๆ อาจมีชื่อ table, ชื่อ column หรือชิ้นส่วนของ SQL ที่ fail อยู่ในนั้น การส่งสิ่งนี้ให้ client ของ API คือความเสี่ยงด้าน information disclosure (มันวาด schema ของคุณให้ผู้โจมตีเห็น) และมักรั่วรายละเอียด connection ตรง ๆ ด้วยซ้ำ การคืนข้อความ `"internal error"` คงที่สำหรับทั้งสอง variant ปิดช่องนี้ไปเลย
+- ข้อเสีย: คุณวินิจฉัย `500` จาก HTTP response อย่างเดียวไม่ได้อีกต่อไป — นี่คือเหตุผลที่ `into_response` เรียก `tracing::error!(error = %err, ...)` *ก่อน* ที่จะทิ้ง error จริงออกจาก body error จริงไปที่ structured log (ที่เราตั้งค่าไว้ในบทเรียนก่อนหน้า) ที่ operator หาเจอได้ ส่วน client เห็นแค่ `"internal error"` เท่านั้น
+
+## Build it
+
+สร้าง `taskflow/backend/api/src/error.rs`:
+
+```rust
+use axum::{http::StatusCode, response::IntoResponse, response::Response, Json};
+use serde_json::json;
+
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("not found")]
+    NotFound,
+    #[error("unauthorized")]
+    Unauthorized,
+    #[error("forbidden")]
+    Forbidden,
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Validation(String),
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+    #[error("internal error")]
+    Internal(#[from] anyhow::Error),
+}
+
+pub type AppResult<T> = Result<T, AppError>;
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            AppError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+            AppError::Db(err) => {
+                tracing::error!(error = %err, "database error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            }
+            AppError::Internal(err) => {
+                tracing::error!(error = %err, "internal error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            }
+        };
+
+        let message = match &self {
+            AppError::Db(_) | AppError::Internal(_) => "internal error".to_string(),
+            _ => self.to_string(),
+        };
+
+        (status, Json(json!({ "error": code, "message": message }))).into_response()
+    }
+}
+
+/// Example: the `?` operator automatically converts a `sqlx::Error`
+/// into `AppError::Db` via the `#[from]` attribute, and `ok_or` turns
+/// a missing row into a domain-level `AppError::NotFound`.
+#[allow(dead_code)]
+async fn find_board_title(pool: &sqlx::PgPool, id: uuid::Uuid) -> AppResult<String> {
+    let title: Option<String> = sqlx::query_scalar("SELECT title FROM boards WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+
+    title.ok_or(AppError::NotFound)
+}
+```
+
+มีรายละเอียดสองสามอย่างที่ควรพูดถึง:
+
+- `#[error(transparent)] Db(#[from] sqlx::Error)` หมายความว่า output ของ `Display` ของ `AppError::Db` คือข้อความของ `sqlx::Error` เองเป๊ะ ๆ — เราไม่เคยสร้างข้อความของตัวเองสำหรับมัน เพราะยังไงมันก็ไม่ไปถึง client อยู่แล้ว
+- `impl IntoResponse for AppError` คือสิ่งที่ทำให้ handler คืน `AppResult<T>` ตรง ๆ เป็น Axum response ได้: Axum เรียก `.into_response()` บน `Err` variant ใดก็ตามโดยอัตโนมัติ เมื่อ handler คืนค่า `Result<T, E>` ที่ทั้ง `T: IntoResponse` และ `E: IntoResponse`
+- `find_board_title` คือตัวอย่างล่วงหน้าของ pattern ที่ REST handler ทุกตัวจะใช้เมื่อโมดูล database มีจริงแล้ว: `sqlx::query_scalar(...).fetch_optional(pool).await?` ส่งต่อ `sqlx::Error` ใดก็ตามเป็น `AppError::Db` โดยอัตโนมัติ และ `.ok_or(AppError::NotFound)` แปลง "ไม่มีแถว" ให้เป็น 404 ที่ถูกต้อง — สอง failure mode โดยไม่มี `match` statement เขียนมือเลย
+
+### เพิ่ม `mod error;` ใน `main.rs`
+
+```rust
+mod config;
+mod error;
+```
+
+เรายังไม่เรียกอะไรจาก `error` ใน `main` — ยังไม่มี handler ตัวไหนคืน `AppResult` จนกว่าจะถึงโมดูล REST API — แต่ module ต้องถูกประกาศไว้ก่อน `cargo check` ถึงจะ compile มันได้
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+ผลลัพธ์ที่ควรได้: compile ผ่านพร้อม warning ประเภท `dead_code`/`never constructed` อยู่บ้าง (สำหรับ `AppError` variant และ `find_board_title` เพราะยังไม่มีใครเรียกมัน) และไม่มี error เลย นี่เป็นเรื่องปกติในขั้นนี้ — เหมือนกับข้อสังเกต "warning เรื่อง dependency ที่ยังไม่ได้ใช้เป็นเรื่องปกติ" จาก [backend-init](/taskflow/en/setup/backend-init/) ที่ใช้ได้กับที่นี่เช่นกัน: โมดูลนี้คือโครงเตรียมไว้สำหรับ handler ที่เรายังไม่ได้เขียน
+
+## Recap
+
+คุณรวมศูนย์การจัดการ error ไว้ที่ enum `AppError` ตัวเดียวด้วย `thiserror`, alias `AppResult<T>` ตัวเดียว และ `impl IntoResponse` ตัวเดียวที่แปลงทุก variant เป็น status code และ JSON body ที่ปลอดภัยและสม่ำเสมอ — `{ "error": "<code>", "message": "<text>" }` การแปลงด้วย `#[from]` หมายความว่า operator `?` ทำหน้าที่แปลง `sqlx::Error` หรือ `anyhow::Error` เป็น `AppError` variant ที่ถูกต้องให้โดยอัตโนมัติ และ `Db`/`Internal` ไม่เคยรั่ว error text จริงให้ client เห็น — มีแค่ structured log ผ่าน `tracing::error!` เท่านั้นที่เห็น ต่อไปเราจะสร้าง database และ Redis connection pool ตัวจริงที่ error type นี้คอยคุ้มกันอยู่ ใน [db-pool](/taskflow/th/backend-foundations/db-pool/)

@@ -1,0 +1,124 @@
+---
+title: App Skeleton
+description: Turn the placeholder taskflow-api crate into a real Axum server — a Router with GET /health, a tower-http CORS layer for FRONTEND_ORIGIN, and a TcpListener bound with axum::serve.
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+The `main.rs` we left at the end of [backend-init](/taskflow/en/setup/backend-init/) does nothing but `println!("TaskFlow API")`. This lesson replaces it with a real, running HTTP server:
+
+- an `axum::Router` with one route, `GET /health`, that returns `{"status":"ok"}`;
+- a `tower_http` CORS layer that allows requests from `FRONTEND_ORIGIN`;
+- a `tokio::net::TcpListener` bound to `0.0.0.0:{APP_PORT}`, served with `axum::serve`.
+
+By the end, `cargo run -p api` starts a server you can hit with `curl` from another terminal.
+
+## Why
+
+Every later module — authentication, the REST API, the realtime WebSocket layer — adds routes to this same `Router`. Getting the skeleton right now means every future lesson is "add a route," not "restructure the server."
+
+The `/health` endpoint isn't just a demo — it's the endpoint Docker Compose's `healthcheck` and any load balancer in front of the API will poll in the Docker module later. A server that can't answer `GET /health` correctly is a server nothing else should route traffic to.
+
+CORS matters from lesson one because the frontend and the API run on **different origins** during local development: the Astro dev server is `http://localhost:4321`, the API is `http://localhost:8080`. Browsers enforce the same-origin policy — without an explicit `Access-Control-Allow-Origin` header from the API, `fetch()` calls from the frontend are blocked by the browser before a single Rust line runs. `FRONTEND_ORIGIN` in `.env` is exactly this origin, and we read it here for the first time.
+
+## Pros & cons
+
+**`axum::serve` (what we're using)**
+
+- Pros: built directly on `tokio::net::TcpListener`, no separate `hyper::Server` setup; the API is small — bind a listener, call `axum::serve(listener, app)`; graceful shutdown hooks (`with_graceful_shutdown`) attach cleanly later without restructuring.
+- Cons: it's Axum-specific — there's no framework-agnostic abstraction here, so swapping web frameworks later means rewriting this file, not just a config change.
+
+**`CorsLayer::new().allow_origin(<exact origin>)` (what we're using) vs. `allow_origin(Any)`**
+
+- Pros of an exact origin: only the real frontend can call the API from a browser; this is a prerequisite for ever sending cookies or `Authorization` headers cross-origin, because browsers refuse to honor `Access-Control-Allow-Origin: *` on credentialed requests.
+- Cons of an exact origin: it's one more environment variable to keep in sync — deploy the frontend to a new domain and forget to update `FRONTEND_ORIGIN`, and CORS silently blocks it.
+- `allow_origin(Any)` is faster to wire up for a throwaway prototype, but every browser client on the internet can then call the API, and it forecloses ever using cookie-based auth. We don't use it here because the Authentication module adds exactly that kind of credentialed request.
+
+## Build it
+
+Replace `taskflow/backend/api/src/main.rs` with:
+
+```rust
+use axum::{routing::get, Json, Router};
+use tower_http::cors::CorsLayer;
+
+#[tokio::main]
+async fn main() {
+    let frontend_origin =
+        std::env::var("FRONTEND_ORIGIN").unwrap_or_else(|_| "http://localhost:4321".to_string());
+
+    let cors = CorsLayer::new().allow_origin(
+        frontend_origin
+            .parse::<axum::http::HeaderValue>()
+            .expect("FRONTEND_ORIGIN must be a valid header value"),
+    );
+
+    let app = Router::new().route("/health", get(health)).layer(cors);
+
+    let app_port = std::env::var("APP_PORT").unwrap_or_else(|_| "8080".to_string());
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{app_port}"))
+        .await
+        .expect("failed to bind port");
+
+    println!("listening on {}", listener.local_addr().unwrap());
+
+    axum::serve(listener, app).await.unwrap();
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+```
+
+Walking through it:
+
+- `Router::new().route("/health", get(health))` registers `health` as the handler for `GET /health`. `health` takes no extractors and returns `Json<serde_json::Value>` — Axum turns that into a `200 OK` response with `Content-Type: application/json`.
+- `CorsLayer::new().allow_origin(...)` needs a `http::HeaderValue`, not a plain `String`, so `frontend_origin.parse::<HeaderValue>()` converts it. `.layer(cors)` wraps every route in the router with the CORS middleware.
+- We bind `0.0.0.0`, not `127.0.0.1`. `127.0.0.1` only accepts connections from inside the same machine — that breaks the moment this server runs inside a Docker container (Module 11), where the health check and any other container reach it over the Docker network, not `localhost`. `0.0.0.0` accepts connections on every network interface, which is what a containerized server needs.
+- `axum::serve(listener, app)` takes ownership of both and runs the accept loop until the process is killed. `.await.unwrap()` panics if the server ever returns an `Err` — acceptable for now; later modules add graceful shutdown.
+
+## Verify
+
+Start the server:
+
+```bash
+cargo run -p api
+```
+
+Expected output:
+
+```
+listening on 0.0.0.0:8080
+```
+
+In a second terminal, hit the health endpoint:
+
+```bash
+curl -s http://localhost:8080/health
+```
+
+Expected output:
+
+```json
+{"status":"ok"}
+```
+
+Then confirm CORS is actually configured, by sending the `Origin` header the browser would send and checking the response echoes it back:
+
+```bash
+curl -s -I -H "Origin: http://localhost:4321" http://localhost:8080/health | grep -i access-control-allow-origin
+```
+
+Expected output:
+
+```
+access-control-allow-origin: http://localhost:4321
+```
+
+If that header is missing, double-check `FRONTEND_ORIGIN` in your `.env` matches exactly (scheme, host, and port) what you're sending as `Origin`.
+
+## Recap
+
+`taskflow-api` now runs a real Axum server: a `Router` with `GET /health`, a `tower_http` `CorsLayer` restricted to `FRONTEND_ORIGIN`, and a `TcpListener` bound to `0.0.0.0:{APP_PORT}` served with `axum::serve`. You saw why `0.0.0.0` (not `127.0.0.1`) matters for containers, and why an exact-origin CORS policy is the right default once credentialed requests join the picture. Next, we replace the ad hoc `std::env::var` calls with a typed `Config` struct and add structured logging in [config-tracing](/taskflow/en/backend-foundations/config-tracing/).

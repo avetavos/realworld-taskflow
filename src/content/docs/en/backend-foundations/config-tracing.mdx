@@ -1,0 +1,163 @@
+---
+title: Config & Tracing
+description: Read every environment variable into a typed Config struct with anyhow, and replace println! with structured tracing_subscriber logging controlled by RUST_LOG.
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+A `config.rs` module with a `Config` struct and a `Config::from_env()` constructor that reads and parses `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, `APP_PORT`, and `FRONTEND_ORIGIN` once, at startup — replacing the scattered `std::env::var(...).unwrap_or_else(...)` calls from the previous lesson. Alongside it, we initialize `tracing_subscriber` so the server logs structured, leveled messages instead of `println!`, with verbosity controlled by the `RUST_LOG` environment variable.
+
+## Why
+
+This is the [12-factor app](https://12factor.net/config) config principle in practice: **store config in the environment**, not in code, and never mix config with secrets checked into git. A typed `Config` struct read once at boot gives us two things a scattered `env::var` call every time you need a value doesn't:
+
+- **Fail fast.** If `DATABASE_URL` is missing, we want the process to refuse to start with a clear message — not crash three requests later the first time a handler happens to touch the database.
+- **One source of truth.** Every other module (`db.rs`, the JWT middleware in Authentication) takes a `&Config` or `Arc<Config>` instead of calling `std::env::var` itself. There's exactly one place that knows how configuration is loaded.
+
+Structured logging matters for the same reason a typed `Config` does: at 2am during an incident, `println!("error: {e}")` scattered across the codebase gives you unstructured noise with no way to filter by severity or module. `tracing` gives every log line a level (`info`, `warn`, `error`, ...) and lets you turn up verbosity for one module (`RUST_LOG=taskflow_api=debug,tower_http=debug`) without recompiling.
+
+## Pros & cons
+
+**Typed `Config` struct, read once (what we're using) vs. `std::env::var` scattered through the code**
+
+- Pros: every required variable is validated in one function, at one moment, with one clear error path; downstream code takes `&Config`, which is easy to mock in tests later; adding a new variable means touching one struct instead of grepping the whole crate for `env::var`.
+- Cons: one more type to thread through the app (`AppState` carries it, as we'll see in the next module); anything that needs a *new* environment variable requires a `Config` field addition and a redeploy of the struct, not just a one-line `env::var` call somewhere convenient.
+
+**`anyhow::Result<Config>` (what we're using) vs. a dedicated `ConfigError` enum**
+
+- Pros: `Config::from_env()` only runs once, at startup, and every failure is fatal — the process exits either way. `anyhow`'s `?` plus `.context("...")` gives a readable, chained error message ("DATABASE_URL must be set") with almost no boilerplate.
+- Cons: `anyhow::Error` erases the underlying error type, so calling code can't `match` on *which* variable was missing to react differently. That's fine here — nothing does, or should, try to recover from missing startup config — but it's the wrong choice for errors a caller needs to branch on, which is exactly why the next lesson's `AppError` uses `thiserror` typed variants instead.
+
+**`tracing` (what we're using) vs. the plain `log` crate**
+
+- Pros: structured key-value fields (`tracing::info!(port = %port, "listening")`) instead of string interpolation only; spans correlate multiple log lines to one request or task, which matters once handlers are async and interleaved; the wider ecosystem (`tower-http`'s `TraceLayer`, `sqlx`'s query logging) is built on `tracing`, so we get request/response and query logs for free later.
+- Cons: more setup ceremony than `log::info!("...")` — you need a subscriber, not just a logging macro call — and the structured-field API has a steeper learning curve than plain string formatting.
+
+## Build it
+
+### 1. Add the `anyhow` dependency
+
+`Config::from_env()` returns `anyhow::Result<Config>`, so add `anyhow` to `api/Cargo.toml`:
+
+```bash
+cd taskflow/backend
+cargo add anyhow -p api
+```
+
+This adds `anyhow = "1"` under `[dependencies]` in `api/Cargo.toml`.
+
+### 2. `config.rs`
+
+Create `taskflow/backend/api/src/config.rs`:
+
+```rust
+use anyhow::Context;
+
+pub struct Config {
+    pub database_url: String,
+    pub redis_url: String,
+    pub jwt_secret: String,
+    pub app_port: u16,
+    pub frontend_origin: String,
+}
+
+impl Config {
+    pub fn from_env() -> anyhow::Result<Self> {
+        Ok(Self {
+            database_url: std::env::var("DATABASE_URL").context("DATABASE_URL must be set")?,
+            redis_url: std::env::var("REDIS_URL").context("REDIS_URL must be set")?,
+            jwt_secret: std::env::var("JWT_SECRET").context("JWT_SECRET must be set")?,
+            app_port: std::env::var("APP_PORT")
+                .unwrap_or_else(|_| "8080".to_string())
+                .parse()
+                .context("APP_PORT must be a valid port number")?,
+            frontend_origin: std::env::var("FRONTEND_ORIGIN")
+                .context("FRONTEND_ORIGIN must be set")?,
+        })
+    }
+}
+```
+
+`.context("...")` (from `anyhow::Context`, imported at the top) attaches a human-readable message to a `std::env::VarError` or `std::num::ParseIntError`, so a missing `DATABASE_URL` fails with `Error: DATABASE_URL must be set` instead of the far less helpful `environment variable not found`. Every field except `app_port` is required with no fallback — `app_port` is the one variable with a sane local default (`8080`, matching `.env.example`), so we fall back to it with `unwrap_or_else` before parsing.
+
+### 3. Wire it into `main.rs`
+
+Replace `taskflow/backend/api/src/main.rs` with:
+
+```rust
+mod config;
+
+use axum::{routing::get, Json, Router};
+use config::Config;
+use tower_http::cors::CorsLayer;
+use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let config = Config::from_env()?;
+
+    let cors = CorsLayer::new().allow_origin(
+        config
+            .frontend_origin
+            .parse::<axum::http::HeaderValue>()
+            .expect("FRONTEND_ORIGIN must be a valid header value"),
+    );
+
+    let app = Router::new().route("/health", get(health)).layer(cors);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", config.app_port)).await?;
+    tracing::info!("listening on {}", listener.local_addr()?);
+
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+```
+
+Three changes from the previous lesson: `main` now returns `anyhow::Result<()>`, so every fallible step uses `?` instead of `.unwrap()`/`.expect()`; `Config::from_env()` replaces every ad hoc `std::env::var` call; and `tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).init()` sets up a subscriber that prints formatted log lines and respects `RUST_LOG`, called once before anything else runs. `tracing::info!` replaces `println!` for the startup message.
+
+## Verify
+
+Run with the default (no `RUST_LOG` set, defaults to `error`-level only — you may see no output at all):
+
+```bash
+cargo run -p api
+```
+
+Now run with `RUST_LOG=info` to see the startup message:
+
+```bash
+RUST_LOG=info cargo run -p api
+```
+
+Expected output includes a structured line similar to:
+
+```
+2026-07-13T10:00:00.123456Z  INFO api: listening on 0.0.0.0:8080
+```
+
+Confirm `/health` still works exactly as before:
+
+```bash
+curl -s http://localhost:8080/health
+```
+
+```json
+{"status":"ok"}
+```
+
+Finally, confirm the fail-fast behavior: temporarily rename or comment out `JWT_SECRET` in your `.env`, run `cargo run -p api` again, and confirm the process exits immediately with an error mentioning `JWT_SECRET must be set` instead of starting and failing later. Restore `.env` afterward.
+
+## Recap
+
+You replaced scattered `std::env::var` calls with a single `Config::from_env()` that reads `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, `APP_PORT`, and `FRONTEND_ORIGIN` once at startup, failing fast with a clear `anyhow` error message if anything required is missing. You also swapped `println!` for `tracing_subscriber`, giving every log line a severity level controllable at runtime via `RUST_LOG`. Next, we centralize how the server turns failures into HTTP responses in [error-handling](/taskflow/en/backend-foundations/error-handling/).
