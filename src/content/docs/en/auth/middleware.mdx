@@ -1,0 +1,135 @@
+---
+title: Auth Middleware
+description: Build the AuthUser extractor with Axum's FromRequestParts, understand how Axum extractors work, and see the Redis allowlist check that makes token revocation possible.
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`middleware.rs`, with an `AuthUser(pub uuid::Uuid)` extractor implementing Axum's `FromRequestParts<AppState>`. Adding `AuthUser` as an argument to any handler automatically requires a valid, non-revoked `Authorization: Bearer <token>` header on the request — Axum runs the extraction before the handler body ever executes, and a failed extraction short-circuits straight to an HTTP response, no manual `if` check inside the handler.
+
+Under the hood, `AuthUser` does three things in order: pull the bearer token out of the `Authorization` header, verify its signature and expiry with `jwt::verify` from the previous lesson, then confirm its `jti` is still present in the Redis allowlist (`auth:token:{jti}`) before trusting it.
+
+## Why
+
+Every protected route in the REST API module needs the same three checks — is there a token, is it a validly signed and unexpired JWT, and has it been revoked — and none of that logic belongs duplicated inside every handler. Axum's extractor system exists exactly for this: a type that implements `FromRequestParts` can be added as a handler argument, and Axum runs its extraction logic automatically, before the handler's own code runs, using nothing but the request's `Parts` (method, URI, headers — everything except the body) and the shared `AppState`.
+
+That turns "this route requires a logged-in user" into a type signature. Compare `async fn get_board(State(state): State<AppState>, Path(id): Path<Uuid>)` (no auth required) to `async fn get_board(State(state): State<AppState>, AuthUser(user_id): AuthUser, Path(id): Path<Uuid>)` (auth required) — the second version can't be called without a valid token making it past `AuthUser::from_request_parts` first, and the compiler enforces that every handler that needs `user_id` actually asks for it.
+
+## Pros & cons
+
+**A custom `FromRequestParts` extractor (what we're using) vs. a `tower` middleware layer**
+
+- Pros: `AuthUser` is opt-in per route, at the type level — a handler either asks for `AuthUser` in its signature or it doesn't, and public routes (`register`, `login`, `/health`) simply don't include it. A `tower::Layer` wraps an entire `Router` or a whole group of routes uniformly, which means either building a second router just for public routes or threading "is this path exempt" logic into the layer itself. For a route set where most — but not all — endpoints need auth, an extractor keeps the "does this need a login" decision local and readable at each handler's signature.
+- Cons: an extractor only runs for the specific handler it's added to — there's no single place to see "every route under `/boards` requires auth" the way a `.route_layer()` applied to a nested router gives you. If TaskFlow later has a large block of uniformly protected routes, a `tower` layer wrapping just that sub-router (still built on the same `AuthUser` extractor internally) is worth revisiting.
+
+**`type Rejection = AppError` (what we're using) vs. a dedicated rejection type**
+
+- Pros: `AppError` already implements `IntoResponse` — every variant maps to a status code and the same `{ "error": "<code>", "message": "<text>" }` shape every handler's own errors produce. Reusing it means an expired token, a revoked token, and a missing header all fail with the exact same `401 unauthorized` JSON body a handler's own `Err(AppError::Unauthorized)` would produce — one error shape, everywhere in the API, auth included.
+- Cons: `AppError` carries variants (`NotFound`, `Conflict`, ...) that make no sense as an extraction failure — `AuthUser` only ever produces `Unauthorized` or `Internal`, so the type is wider than strictly necessary here. That's an acceptable trade for not maintaining a second `IntoResponse` impl just for this one extractor.
+
+## Build it
+
+Create `taskflow/backend/api/src/auth/middleware.rs`:
+
+```rust
+use axum::{
+    async_trait,
+    extract::FromRequestParts,
+    http::{header::AUTHORIZATION, request::Parts, HeaderMap},
+};
+use deadpool_redis::redis::AsyncCommands;
+use uuid::Uuid;
+
+use crate::{auth::jwt, error::AppError, state::AppState};
+
+/// The authenticated user's id, extracted from a valid, non-revoked bearer token.
+///
+/// Any handler that adds `AuthUser` as an argument automatically requires
+/// a valid `Authorization: Bearer <token>` header — Axum runs the extractor
+/// before the handler body, and a failed extraction short-circuits straight
+/// to the `AppError::Unauthorized` response.
+pub struct AuthUser(pub Uuid);
+
+/// Pulls the bearer token out of the `Authorization` header.
+///
+/// Shared by the `AuthUser` extractor and the `logout` handler, which both
+/// need the raw token — the extractor to validate it, `logout` to know which
+/// `jti` to revoke.
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
+    let header = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(AppError::Unauthorized)?;
+
+    header.strip_prefix("Bearer ").ok_or(AppError::Unauthorized)
+}
+
+#[async_trait]
+impl FromRequestParts<AppState> for AuthUser {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = bearer_token(&parts.headers)?;
+
+        let claims =
+            jwt::verify(token, &state.config.jwt_secret).map_err(|_| AppError::Unauthorized)?;
+
+        let mut conn = state
+            .redis
+            .get()
+            .await
+            .map_err(|err| AppError::Internal(err.into()))?;
+
+        let session: Option<String> = conn
+            .get(format!("auth:token:{}", claims.jti))
+            .await
+            .map_err(|err| AppError::Internal(err.into()))?;
+
+        if session.is_none() {
+            return Err(AppError::Unauthorized);
+        }
+
+        let user_id = claims
+            .sub
+            .parse::<Uuid>()
+            .map_err(|_| AppError::Unauthorized)?;
+
+        Ok(AuthUser(user_id))
+    }
+}
+```
+
+A few details worth calling out:
+
+- `FromRequestParts<AppState>` — not the generic `FromRequestParts<S>` shown in Axum's own docs — because `AuthUser` needs `state.config.jwt_secret` and `state.redis` specifically; tying the impl to our concrete `AppState` (rather than staying generic over any `S`) is exactly right for an app-specific extractor like this one, as opposed to a reusable library extractor.
+- `#[async_trait]` is required here: Axum 0.7's `FromRequestParts` trait itself is defined using the `async_trait` macro, so any manual `impl` (as opposed to using `#[derive(FromRequestParts)]`-style helpers, which don't apply to a hand-written extractor like this) needs the same macro to produce a matching signature.
+- `bearer_token` is a small standalone function, not inlined into `from_request_parts` — [handlers](/taskflow/en/auth/handlers/) reuses it verbatim in `logout`, which needs the raw token for the same reason (to recover its `jti`) without duplicating the header-parsing logic.
+- The Redis check queries `auth:token:{jti}` — the exact key `register` and `login` will write in the next lesson — and treats a missing key as `Unauthorized`, not as "fail open." A token can have a perfectly valid signature and still be rejected here, which is the whole point: this is the revocation check a bare JWT can't provide on its own.
+- `state.redis.get()` returns a pooled `deadpool_redis::Connection`; note the import is `deadpool_redis::redis::AsyncCommands`, not a separately-versioned top-level `redis` crate — `deadpool-redis` re-exports the exact `redis` version its `Connection` type implements, so pulling the command traits from anywhere else silently fails to satisfy the trait bounds.
+
+### Add `middleware` to the `auth` module
+
+Update `taskflow/backend/api/src/auth/mod.rs`:
+
+```rust
+pub mod jwt;
+pub mod middleware;
+pub mod password;
+```
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+Expected: it compiles with a handful of `dead_code`/`never constructed` warnings — `AuthUser` isn't used as a handler argument until [handlers](/taskflow/en/auth/handlers/) wires up `logout`. That's expected at this stage, same as every earlier scaffolding module.
+
+## Recap
+
+You built the `AuthUser` extractor in `middleware.rs`, implementing `FromRequestParts<AppState>` to turn "this route needs a logged-in user" into a type-level requirement instead of a manual check inside every handler. `AuthUser::from_request_parts` chains three checks — bearer token present, JWT signature and expiry valid, `jti` still in the Redis allowlist — and fails closed to `AppError::Unauthorized` at the first one that doesn't hold. Next, we write the `register`, `login`, and `logout` handlers that issue tokens, populate the allowlist, and finally put `AuthUser` to use in [handlers](/taskflow/en/auth/handlers/).

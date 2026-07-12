@@ -1,0 +1,323 @@
+---
+title: Register, Login & Logout
+description: Write the register/login/logout handlers with their request and response DTOs and SQLx queries, expose them as a Router from auth/mod.rs, and mount /auth in main.rs.
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+`handlers.rs`, with three handlers — `register`, `login`, `logout` — plus the `serde` request/response structs each one needs, and the `sqlx` queries that back `register` and `login`. Then `auth/mod.rs` grows a `pub fn routes() -> Router<AppState>` that wires all three into `POST /register`, `POST /login`, and `POST /logout`, and `main.rs` mounts that router under `/auth` with `.nest`.
+
+This is the lesson where everything from Module 4 comes together: `password::hash_password`/`verify_password`, `jwt::issue`/`verify`, the Redis allowlist pattern from `middleware.rs`, and the `AuthUser` extractor all get used for the first time, by real handlers, against the real `users` table.
+
+## Why
+
+`register` and `login` both end with the exact same two steps — issue a JWT, store its `jti` in the Redis allowlist — so that logic lives in one `issue_and_store` helper both handlers call, rather than being copy-pasted twice. `logout` is the one handler in this module that *requires* `AuthUser`: it can't revoke a token without first proving the caller already holds a valid one, which is exactly what `AuthUser` guarantees before `logout`'s body ever runs.
+
+Keeping the request/response shapes as their own `serde` structs — rather than serializing `UserRow` (the internal `users` table row, `password_hash` included) directly — means the wire format is a conscious decision, not an accident of whatever columns happen to be in the table. `UserResponse` simply has no `password_hash` field to leak, by construction, not by remembering to skip it at every call site.
+
+## Pros & cons
+
+**Dedicated request/response DTOs (what we're using) vs. serializing the `users` row directly**
+
+- Pros: `UserResponse { id, email, display_name }` can never accidentally leak `password_hash` in a JSON body, because the field doesn't exist on that type — there's no `#[serde(skip)]` to forget on a new column added to `users` next year. The request DTOs (`RegisterRequest`, `LoginRequest`) are equally deliberate: they accept exactly `{ email, password, display_name }`, nothing more, nothing the database schema doesn't need mapped one-to-one from client JSON.
+- Cons: one more struct to keep in sync by hand whenever `users` changes — add a column, and both `UserRow` (the SQL-facing struct) and `UserResponse` (the client-facing one) may need updating, where serializing the row directly would need only one edit. That's the correct trade for auth specifically, where the row contains a secret the response must never carry.
+
+**Attempt the `INSERT`, check for a unique-violation error (what we're using) vs. `SELECT` for an existing email first, then `INSERT`**
+
+- Pros: one round trip to Postgres instead of two, and — more importantly — no race condition: two concurrent `register` requests for the same email can't both pass a "does this email exist" check and then both successfully `INSERT`, because Postgres's own `unique` constraint on `users.email` is the single source of truth, checked atomically by the database itself. This is the exact scenario the [error-handling](/taskflow/en/backend-foundations/error-handling/) lesson's `#[from]` "cons" flagged in advance: *"if a handler needs to react differently to a duplicate-key error... it has to pattern-match `sqlx::Error` itself before the `?` fires"* — that's precisely what `register` does here, matching `sqlx::Error::Database(db_err)` and checking `db_err.is_unique_violation()` before letting `?` convert anything else to `AppError::Db`.
+- Cons: the duplicate-check logic lives inside the handler instead of being a single reusable "does this email exist" query — acceptable here since `register` is the only place that needs it.
+
+**`logout` re-extracts the bearer token to get its `jti` (what we're using) vs. `AuthUser` carrying the `jti` itself**
+
+- Pros: `AuthUser`'s single field stays exactly `Uuid` — the user id, which is all *every other* protected handler actually needs. `logout` is the one handler that additionally needs to know *which token* to revoke, and it gets that by calling the same `bearer_token` helper `AuthUser::from_request_parts` already used, on the same `Authorization` header, then handing the token to `jwt::verify` a second time to recover `claims.jti`.
+- Cons: `logout` does pay for a second signature verification that `AuthUser`'s own extraction already performed once on the same request. That's a deliberate, cheap trade (one extra HMAC check, no extra I/O) against widening `AuthUser` with a field only one handler in the whole API needs.
+
+## Build it
+
+### 1. Request and response DTOs, plus the `UserRow` SQL projection
+
+These live at the top of `handlers.rs` — see the full file below. `RegisterRequest` and `LoginRequest` are what `Json<...>` deserializes the request body into; `UserResponse` and `AuthResponse` are what handlers return; `UserRow` is a private, `#[derive(sqlx::FromRow)]` struct used only to pull columns out of a `users` row.
+
+### 2. `handlers.rs`
+
+Create `taskflow/backend/api/src/auth/handlers.rs`:
+
+```rust
+use axum::{extract::State, http::HeaderMap, http::StatusCode, Json};
+use deadpool_redis::redis::AsyncCommands;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{
+    auth::{jwt, middleware, middleware::AuthUser, password},
+    error::{AppError, AppResult},
+    state::AppState,
+};
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterRequest {
+    pub email: String,
+    pub password: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserResponse {
+    pub id: Uuid,
+    pub email: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthResponse {
+    pub token: String,
+    pub user: UserResponse,
+}
+
+#[derive(sqlx::FromRow)]
+struct UserRow {
+    id: Uuid,
+    email: String,
+    password_hash: String,
+    display_name: String,
+}
+
+/// Issues a fresh JWT for `user_id` and stores its `jti` in the Redis
+/// allowlist with a 24h TTL, matching the token's own expiry.
+async fn issue_and_store(state: &AppState, user_id: Uuid) -> AppResult<String> {
+    let (token, jti) = jwt::issue(user_id, &state.config.jwt_secret).map_err(AppError::Internal)?;
+
+    let mut conn = state
+        .redis
+        .get()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    let key = format!("auth:token:{jti}");
+    let _: () = conn
+        .set_ex(&key, user_id.to_string(), 86_400)
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    Ok(token)
+}
+
+pub async fn register(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterRequest>,
+) -> AppResult<Json<AuthResponse>> {
+    let password_hash = password::hash_password(&body.password).map_err(AppError::Internal)?;
+    let user_id = Uuid::new_v4();
+
+    let insert = sqlx::query(
+        "INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(user_id)
+    .bind(&body.email)
+    .bind(&password_hash)
+    .bind(&body.display_name)
+    .execute(&state.db)
+    .await;
+
+    if let Err(sqlx::Error::Database(db_err)) = &insert {
+        if db_err.is_unique_violation() {
+            return Err(AppError::Conflict("email already registered".to_string()));
+        }
+    }
+    insert?;
+
+    let token = issue_and_store(&state, user_id).await?;
+
+    Ok(Json(AuthResponse {
+        token,
+        user: UserResponse {
+            id: user_id,
+            email: body.email,
+            display_name: body.display_name,
+        },
+    }))
+}
+
+pub async fn login(
+    State(state): State<AppState>,
+    Json(body): Json<LoginRequest>,
+) -> AppResult<Json<AuthResponse>> {
+    let user = sqlx::query_as::<_, UserRow>(
+        "SELECT id, email, password_hash, display_name FROM users WHERE email = $1",
+    )
+    .bind(&body.email)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::Unauthorized)?;
+
+    if !password::verify_password(&body.password, &user.password_hash) {
+        return Err(AppError::Unauthorized);
+    }
+
+    let token = issue_and_store(&state, user.id).await?;
+
+    Ok(Json(AuthResponse {
+        token,
+        user: UserResponse {
+            id: user.id,
+            email: user.email,
+            display_name: user.display_name,
+        },
+    }))
+}
+
+pub async fn logout(
+    State(state): State<AppState>,
+    AuthUser(_user_id): AuthUser,
+    headers: HeaderMap,
+) -> AppResult<StatusCode> {
+    // `AuthUser` already proved the token is valid and not yet revoked;
+    // re-extract it here only to recover the `jti` this specific token
+    // carries, so we delete exactly one session instead of every session
+    // belonging to the user.
+    let token = middleware::bearer_token(&headers)?;
+    let claims =
+        jwt::verify(token, &state.config.jwt_secret).map_err(|_| AppError::Unauthorized)?;
+
+    let mut conn = state
+        .redis
+        .get()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    let _: () = conn
+        .del(format!("auth:token:{}", claims.jti))
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+A few details worth calling out:
+
+- `login`'s "wrong email" and "wrong password" cases both return the exact same `AppError::Unauthorized` — never `AppError::NotFound` for an unrecognized email. Distinguishing the two in the response would hand an attacker a free "which emails are registered" oracle; from the client's perspective, both failures should look identical.
+- `sqlx::query(...)` and `sqlx::query_as::<_, UserRow>(...)` are the same *runtime*, non-compile-time-checked query style used by `find_board_title` back in [error-handling](/taskflow/en/backend-foundations/error-handling/) — not the `query!`/`query_as!` macros, which need a live `DATABASE_URL` (or cached offline metadata) at `cargo build` time.
+- `issue_and_store`'s Redis TTL is `86_400` seconds — 24 hours — deliberately matching `jwt::issue`'s own `exp`. If the two ever drift, the *shorter* one wins in practice: either the JWT expires first (harmless — `verify` already rejects it) or the Redis key expires first (the token still has a valid signature but is now treated as revoked). Keeping both TTLs equal avoids reasoning about that gap at all.
+
+### 3. Expose the routes from `auth/mod.rs`
+
+Replace `taskflow/backend/api/src/auth/mod.rs` with:
+
+```rust
+pub mod handlers;
+pub mod jwt;
+pub mod middleware;
+pub mod password;
+
+use axum::{routing::post, Router};
+
+use crate::state::AppState;
+
+/// All `/auth/*` routes: register, login, logout.
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/register", post(handlers::register))
+        .route("/login", post(handlers::login))
+        .route("/logout", post(handlers::logout))
+}
+```
+
+### 4. Mount `/auth` in `main.rs`
+
+Update the `Router::new()` chain in `taskflow/backend/api/src/main.rs`:
+
+```rust
+let app = Router::new()
+    .route("/health", get(health))
+    .nest("/auth", auth::routes())
+    .layer(cors)
+    .with_state(state);
+```
+
+`Router::nest("/auth", auth::routes())` prefixes every route `auth::routes()` defines with `/auth`, so `POST /register` inside that router becomes `POST /auth/register` on the running server. `auth::routes()` returns `Router<AppState>` — the same state type the outer router already carries — so `.nest` composes them without any extra wiring.
+
+## Verify
+
+Bring up Postgres and Redis, then run the API:
+
+```bash
+cd taskflow/infra && docker compose up -d db redis
+cd ../backend && RUST_LOG=info cargo run -p api
+```
+
+Register a user:
+
+```bash
+curl -s -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"correct horse battery staple","display_name":"Ada"}'
+```
+
+```json
+{"token":"eyJ...","user":{"id":"...","email":"ada@example.com","display_name":"Ada"}}
+```
+
+Registering the same email again correctly fails:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"anything","display_name":"Ada"}'
+```
+
+```
+409
+```
+
+Log in and save the token:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"correct horse battery staple"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+```
+
+Call a protected route with it — there's no board route yet, but `/auth/logout` itself requires `AuthUser`, so it doubles as the protected-route check:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/auth/logout \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```
+204
+```
+
+Confirm the token is now revoked — calling `/auth/logout` again with the same token fails, because its `jti` no longer exists in Redis:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/auth/logout \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```
+401
+```
+
+And a request with no `Authorization` header at all fails the same way, before ever reaching the handler body:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/auth/logout
+```
+
+```
+401
+```
+
+## Recap
+
+You wrote `register`, `login`, and `logout` in `handlers.rs`, backed by dedicated request/response DTOs that keep `password_hash` out of every JSON response by construction, and by `sqlx` queries that let Postgres's own `unique` constraint on `email` resolve duplicate-registration races atomically. `auth::routes()` in `auth/mod.rs` wires all three into a `Router<AppState>`, and `main.rs` mounts it with `.nest("/auth", auth::routes())`. That closes out Module 4: TaskFlow now has real user accounts, Argon2 password hashing, signed and revocable JWTs, and an `AuthUser` extractor every future protected route in the REST API module will use.
