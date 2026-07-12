@@ -5,7 +5,7 @@ sidebar:
   order: 4
 ---
 
-## สิ่งที่เราจะสร้าง
+## What we're building
 
 ไฟล์ Docker Compose ที่ `taskflow/infra/docker-compose.yml` ที่รัน data store สองตัวที่ TaskFlow ต้องพึ่งพา คือ **PostgreSQL** และ **Redis** นี่คือโครงที่ตั้งใจให้เรียบง่าย — ยังไม่มีเซอร์วิส backend หรือ frontend ตัวนั้นจะมาร่วมไฟล์เดียวกันในโมดูล 11 เมื่อจบบทเรียนนี้ ทั้งสอง container จะขึ้น, healthy และเข้าถึงได้จาก terminal ของคุณ
 
@@ -14,11 +14,11 @@ infra/
 └── docker-compose.yml
 ```
 
-## ทำไมต้องทำแบบนี้
+## Why
 
 ทุกโมดูลถัดไป — การออกแบบ schema, query ของ backend, caching, realtime pub/sub — ต้องมี PostgreSQL และ Redis จริงให้คุยด้วย การรันมันผ่าน Docker Compose แทนที่จะติดตั้ง daemon แบบ native ทำให้เครื่องคุณสะอาด และทำให้ผู้ร่วมพัฒนาทุกคน (หรือตัวคุณในอนาคต บนเครื่องใหม่) ได้เวอร์ชันเดียวกันเป๊ะ ๆ ด้วยคำสั่งเดียว การเริ่มจาก `db` และ `redis` **เท่านั้น** ตอนนี้ ก่อนที่เซอร์วิสของแอปจะมีอยู่ ทำให้เราตรวจสอบชั้น data ได้แยกอิสระ — ถ้ามีอะไรผิดปกติกับฐานข้อมูล คุณจะรู้ว่ามันคือฐานข้อมูล ไม่ใช่บั๊กในโค้ด Rust ที่ยังไม่ถูกเขียน
 
-## ข้อดีและข้อเสีย
+## Pros & cons
 
 **ข้อดี**
 
@@ -33,7 +33,7 @@ infra/
 - ข้อมูลอยู่ใน volume ที่ Docker จัดการ ไม่ใช่โฟลเดอร์ธรรมดา — การตรวจดูมันตรง ๆ (นอกเหนือจาก `psql`/`redis-cli`) ต้องใช้ขั้นตอนเพิ่มอย่าง `docker volume inspect`
 - พอร์ต `5432`/`6379` บนเครื่องคุณต้องว่าง — ถ้าคุณมี Postgres หรือ Redis แบบ native รันอยู่แล้ว จะเจอปัญหา port ชนกัน
 
-## ลงมือสร้าง
+## Build it
 
 ### 1. ไฟล์ Compose
 
@@ -88,7 +88,7 @@ docker compose up -d db redis
 
 `-d` รันทั้งสอง container ในพื้นหลัง (detached) การระบุ `db redis` ตรง ๆ ตรงนี้ไม่จำเป็นมากนักเพราะเป็นเซอร์วิสสองตัวเดียวที่นิยามไว้ แต่มันคือ syntax เดียวกับที่คุณจะใช้ในโมดูล 11 เมื่อ `backend` และ `frontend` เข้าร่วมไฟล์นี้ด้วย และคุณต้องการเปิดเฉพาะชั้น data เท่านั้น
 
-## ตรวจสอบผล
+## Verify
 
 ### เช็กว่าทั้งสอง container ขึ้นและ healthy
 
@@ -148,6 +148,6 @@ docker compose exec redis redis-cli ping
 PONG
 ```
 
-## สรุป
+## Recap
 
 คุณเขียน `taskflow/infra/docker-compose.yml` ที่มีสองเซอร์วิส — `db` (`postgres:16`) และ `redis` (`redis:7`) — แต่ละตัวมี healthcheck (`pg_isready` / `redis-cli ping`) เพื่อให้เซอร์วิสที่พึ่งพารอ "พร้อมจริง" ไม่ใช่แค่ "container เริ่มแล้ว" ข้อมูลของ Postgres ถูกคงไว้ใน named volume `pgdata` จึงรอดจาก `docker compose down` (แต่ไม่รอดจาก `docker compose down -v` ที่ลบ volume ด้วย) `docker compose up -d db redis` เปิดทั้งสองขึ้นมา `docker compose ps` ยืนยันว่า `healthy` และคุณเชื่อมต่อแต่ละตัวด้วย `psql`/`redis-cli` ได้ทั้งแบบ native หรือผ่าน `docker compose exec` นี่คือจุดจบของโมดูล 1 — ตอนนี้คุณมี monorepo ที่วางโครงแล้ว, Rust workspace ที่ compile ได้, Astro dev server ที่รันอยู่ และ Postgres + Redis ที่ทำงานจริง ต่อไปคือโมดูล 2, การออกแบบฐานข้อมูล ที่เราจะออกแบบ schema และเขียน migration แรก

@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-## สิ่งที่เราจะสร้าง
+## What we're building
 
 ครึ่งหนึ่งของ monorepo ที่เป็น `frontend/`: โปรเจกต์ **Astro** ใหม่เอี่ยมที่ติดตั้ง integration ของ **Preact** ไว้แล้ว พร้อมสำหรับโฮสต์ shell ของ Kanban board ที่เป็น static เกือบทั้งหมด และในภายหลังคือ island ที่โต้ตอบได้หนึ่งตัว เมื่อจบบทเรียนนี้ `npm run dev` จะเสิร์ฟหน้าเว็บที่ใช้งานได้ที่ `http://localhost:4321`
 
@@ -20,11 +20,11 @@ frontend/
     └── components/
 ```
 
-## ทำไมต้องทำแบบนี้
+## Why
 
 UI ของ TaskFlow **เป็น static เกือบทั้งหมด** — โครง layout ของ board, navigation และ chrome ของหน้าเพจไม่จำเป็นต้องมี JavaScript ฝั่ง client เลย มีแค่ตัว Kanban board เองเท่านั้น (drag-and-drop, อัปเดตแบบ live ผ่าน WebSocket) ที่โต้ตอบได้จริง ๆ สถาปัตยกรรม islands ของ Astro ถูกออกแบบมาเพื่อการแบ่งแบบนี้โดยเฉพาะ: ส่ง HTML ธรรมดาเป็นค่า default และเลือกให้เฉพาะ component ที่ต้องการ hydrate เท่านั้น Preact คือ UI framework สำหรับ island ตัวนั้น — API ที่เข้ากันได้กับ React ในขนาดประมาณ 3KB ซึ่งเพียงพอสำหรับ component ที่โต้ตอบได้ตัวเดียว
 
-## ข้อดีและข้อเสีย
+## Pros & cons
 
 **ข้อดี**
 
@@ -38,7 +38,7 @@ UI ของ TaskFlow **เป็น static เกือบทั้งหมด
 - การแชร์ state ข้าม island หลายตัวทำได้ยุ่งยากกว่า global store ของ single-page app — ไม่ใช่ปัญหาสำหรับ TaskFlow เพราะเราตั้งใจใช้แค่ island เดียว แต่ควรรู้ไว้เผื่อโปรเจกต์โตขึ้น
 - ecosystem ของ Preact เล็กกว่า React แต่สำหรับความต้องการของ TaskFlow (board แบบ drag-and-drop หนึ่งตัว) ก็เพียงพอเหลือเฟือ
 
-## ลงมือสร้าง
+## Build it
 
 ### 1. สร้างโครงโปรเจกต์
 
@@ -114,7 +114,7 @@ src/
 mkdir -p src/pages src/layouts src/lib src/components
 ```
 
-## ตรวจสอบผล
+## Verify
 
 จาก `frontend/` เริ่ม dev server:
 
@@ -133,6 +133,6 @@ npm run dev
 
 เปิด `http://localhost:4321` ใน browser — คุณควรเห็นหน้า empty-template ค่า default ของ Astro `4321` คือพอร์ต dev ค่า default ของ Astro และเป็นค่าที่เราจะตั้งให้ `FRONTEND_ORIGIN` ใน `.env.example` ที่ root สำหรับ CORS หยุด server ด้วย `Ctrl+C` เมื่อตรวจสอบเสร็จแล้ว
 
-## สรุป
+## Recap
 
 คุณสร้างโครง `frontend/` ด้วย `npm create astro@latest`, เพิ่ม integration ของ Preact ด้วย `npx astro add preact` (ซึ่งต่อสาย `preact()` เข้า `astro.config.mjs` ให้อัตโนมัติ) และวางโครงไดเรกทอรี `src/pages`, `src/layouts`, `src/lib` และ `src/components` ที่โมดูล frontend ถัดไปจะเติมเนื้อหาลงไป คุณยังเห็นแล้วว่าทำไม `PUBLIC_API_URL` ถึงอยู่ใน `frontend/.env` ของตัวเอง แทนที่จะอยู่ใน `.env.example` ที่ root `npm run dev` ยืนยันว่าทุกอย่างรันได้บนพอร์ต 4321 ต่อไปเราจะเปิดฐานข้อมูลและ cache ขึ้นมาใน [compose-skeleton](/taskflow/th/setup/compose-skeleton/)

@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-## สิ่งที่เราจะสร้าง
+## What we're building
 
 **Cargo workspace** ของ Rust จริง ๆ ภายใน `taskflow/backend/` โดยมี member crate ตัวเดียวคือ `api` (ชื่อ package `taskflow-api`) ที่จะเติบโตกลายเป็น Axum server เต็มรูปแบบในโมดูลถัดไป เมื่อจบบทเรียนนี้ `cargo run` จะพิมพ์ `TaskFlow API` ออกทาง terminal — เป็นหลักฐานว่า workspace, crate และทุก dependency คอมไพล์เข้าด้วยกันได้ ก่อนที่เราจะเขียน handler สักตัว
 
@@ -18,11 +18,11 @@ backend/
         └── main.rs
 ```
 
-## ทำไมต้องทำแบบนี้
+## Why
 
 **Cargo workspace** ให้หลาย crate ใช้ `Cargo.lock` และไดเรกทอรี build `target/` ร่วมกันได้ วันนี้ TaskFlow มี crate เดียว (`api`) แต่การจัดโครงสร้างเป็น workspace ตั้งแต่แรกหมายความว่าการเพิ่ม crate ตัวที่สองในภายหลัง — เช่น library `taskflow-core` ที่รวม domain type ที่ใช้ร่วมกัน หรือเครื่องมือ CLI สำหรับ admin — จะเป็นแค่การเพิ่มบรรทัดเดียวใน `members` โดยไม่ต้องปรับโครงสร้างใหม่และไม่ต้องมี dependency เวอร์ชันซ้ำซ้อน
 
-## ข้อดีและข้อเสีย
+## Pros & cons
 
 **ข้อดี**
 
@@ -37,7 +37,7 @@ backend/
 
 เรายอมรับ overhead เล็กน้อยนี้ตอนนี้ เพราะโมดูล testing ของ TaskFlow ในภายหลังจะเพิ่มการตั้งค่า integration test ที่ได้ประโยชน์จากโครงสร้าง workspace
 
-## ลงมือสร้าง
+## Build it
 
 ### 1. สร้าง crate ด้วย `cargo new`
 
@@ -122,7 +122,7 @@ fn main() {
 
 โค้ดนี้ตั้งใจให้ยังไม่ทำอะไรมากไปกว่านี้ โมดูล Backend Foundations (โมดูล 3) จะแทนที่มันด้วยการตั้งค่า Axum server จริง — router, state และ `axum::serve`
 
-## ตรวจสอบผล
+## Verify
 
 จาก `taskflow/backend/` build และรัน crate `api`:
 
@@ -144,6 +144,6 @@ cargo check --workspace
 
 ควร exit โดยไม่มี error (คำเตือนเรื่อง dependency ที่ยังไม่ได้ใช้เป็นเรื่องปกติในขั้นนี้ — เรายังไม่ได้ใช้ dependency ส่วนใหญ่)
 
-## สรุป
+## Recap
 
 คุณสร้าง Cargo workspace ที่ `taskflow/backend/` แล้ว โดยมี member ตัวเดียวคือ crate `taskflow-api` ใน `api/` `Cargo.toml` ที่ root ประกาศ `members = ["api"]`; `api/Cargo.toml` ล็อก dependency ครบชุดที่ TaskFlow ต้องการ — Axum, Tokio, SQLx, Serde, JWT, Argon2, Redis และ tracing — แต่ละตัวมีจุดประสงค์ที่คุณเข้าใจแล้ว `main.rs` แบบขั้นต่ำพิสูจน์ว่าทุกอย่าง compile และรันได้ด้วย `cargo run -p api` ต่อไปเราจะสร้างโครง frontend ใน [frontend-init](/taskflow/th/setup/frontend-init/)
