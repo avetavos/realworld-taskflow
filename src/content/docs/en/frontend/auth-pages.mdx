@@ -1,0 +1,288 @@
+---
+title: Auth Pages
+description: Build frontend/src/pages/login.astro and register.astro — forms wired to a typed apiFetch wrapper that stores the returned token and redirects to / — and an honest comparison of localStorage token storage against httpOnly cookies.
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`frontend/src/pages/login.astro` and `register.astro` — the first two pages that wrap themselves in [`Base`](/taskflow/en/frontend/shell-layout/). Each is a plain HTML form (`login`: email + password; `register`: display name + email + password) with an inline `<script>` that, on submit, calls `POST /auth/login` or `POST /auth/register` through a typed `apiFetch` wrapper, stores the returned token, and redirects to `/`.
+
+That wrapper — `frontend/src/lib/api.ts` — is properly the subject of the next lesson, [api-client](/taskflow/en/frontend/api-client/). But these two forms can't call the backend without it, so this lesson builds the file in full now, matching the exact contract api-client walks through function by function afterward. Consider it introduced here, explained there.
+
+## Why
+
+A login or register form needs exactly one piece of state at submit time: did it succeed or fail. `new FormData(form)` already reads every field's current value with no per-keystroke `onChange` handler or component state to wire up — one more reason [shell-layout](/taskflow/en/frontend/shell-layout/)'s Pros & cons picked plain Astro over an island for pages like this one.
+
+Submitting is `event.preventDefault()` followed by a `fetch` call, not a plain HTML form `POST` straight to the backend, because a real form submission is a full page navigation with nowhere to catch the JSON response body. `POST /auth/login` and `POST /auth/register` both return `{token, user}` ([handlers](/taskflow/en/auth/handlers/) built this response shape); the token has to land in JavaScript's hands so `setToken` can persist it before anything else happens.
+
+Order matters inside the success branch: `setToken(result.token)` runs, *then* `window.location.href = '/'`. [boards-list](/taskflow/en/frontend/boards-list/), the page that redirect lands on, checks for a token the instant it loads — if the redirect fired first, the token wouldn't be in `localStorage` yet when that check ran, and the new page would immediately bounce right back to `/login`.
+
+## Pros & cons
+
+**Storing the token in `localStorage` (what we're using) vs. an httpOnly cookie**
+
+- Pros: nothing on the backend has to change to support it — [handlers](/taskflow/en/auth/handlers/) already returns `{token, user}` as a plain JSON body, and a JSON body is all a static frontend can easily act on. `apiFetch` (next lesson) reads the token straight out of `localStorage` and attaches `Authorization: Bearer <token>` to every request with one line; there's no `credentials: 'include'`, no `SameSite` tuning, and no same-origin-vs-cross-origin cookie complications to get right, which matters here because the static frontend and the Rust API are two separate deployments, not one origin serving both.
+- Cons: any JavaScript that executes on the page can read `localStorage.getItem('token')` — including a successful XSS injection from a compromised dependency or a stored-XSS bug anywhere else on the same origin. An httpOnly cookie is invisible to JavaScript entirely: even a full XSS payload running in the page can't read the cookie's value, it can only ride along on requests the browser already attaches it to automatically.
+- The honest trade-off: this course picks `localStorage` because the frontend is a static site with no server-side request that could set a cross-origin `Set-Cookie` header without careful `SameSite=None; Secure` and CORS `credentials` wiring — not because `localStorage` is simply "fine." A production system protecting anything more sensitive than a course Kanban board should default to httpOnly cookies and treat `localStorage` tokens as the exception that needs justifying, not the other way around.
+- The mitigation path, if a real app keeps `localStorage` anyway: a strict Content-Security-Policy (`script-src 'self'`, no `unsafe-inline`) that blocks unauthorized scripts from running at all, closing off the most common way an attacker gets JavaScript to execute on the page in the first place; a short token TTL, so a leaked token has a small window of usefulness — [jwt](/taskflow/en/auth/jwt/) set TaskFlow's `exp` to 24 hours specifically because building a refresh flow was out of scope for that lesson, not because 24 hours is the right number for a production system; and a refresh-token flow — a second, httpOnly-cookie-stored token used only to mint new short-lived access tokens, so even a stolen access token expires fast and the credential that actually matters long-term is never readable by JavaScript at all. None of that is built in this course, but it's the direction a real app grows in from here.
+
+## Build it
+
+### 1. `frontend/src/env.d.ts`
+
+```ts
+/// <reference types="astro/client" />
+
+interface ImportMetaEnv {
+  readonly PUBLIC_API_URL: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+```
+
+This gives `import.meta.env.PUBLIC_API_URL` a real type — `string` — instead of falling back to whatever Astro's built-in `ImportMetaEnv` declares for unknown keys. [api-client](/taskflow/en/frontend/api-client/) covers `PUBLIC_API_URL` itself in depth; this file just has to exist before anything imports it.
+
+### 2. `frontend/.env`
+
+```txt
+PUBLIC_API_URL=http://localhost:8080
+```
+
+Only variables prefixed `PUBLIC_` are ever bundled into client-side code — this is Vite's rule, and Astro inherits it unchanged. `PUBLIC_API_URL` isn't a secret (it ends up readable in the shipped JavaScript bundle no matter what), so this is really about configuration, not confidentiality: it's the one line that changes between a local backend on `:8080` and a deployed one.
+
+### 3. `frontend/src/lib/api.ts`
+
+```ts
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+const TOKEN_KEY = 'token';
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  headers.set('Content-Type', 'application/json');
+
+  const token = getToken();
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  const res = await fetch(`${import.meta.env.PUBLIC_API_URL}${path}`, {
+    ...init,
+    headers,
+  });
+
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body?.message) {
+        message = body.message;
+      }
+    } catch {
+      // no JSON body to read a message from — statusText is the fallback
+    }
+    throw new ApiError(res.status, message);
+  }
+
+  if (res.status === 204 || res.headers.get('content-length') === '0') {
+    return undefined as T;
+  }
+
+  return (await res.json()) as T;
+}
+
+export interface Board {
+  id: string;
+  owner_id: string;
+  title: string;
+  created_at: string;
+}
+```
+
+[api-client](/taskflow/en/frontend/api-client/) is where every piece of this file gets a full explanation — `ApiError`, the header logic, the `204`/empty-body handling. For now, three exports are what these two forms need: `apiFetch`, `setToken`, and `ApiError`.
+
+### 4. `frontend/src/pages/login.astro`
+
+```astro
+---
+import Base from '../layouts/Base.astro';
+---
+<Base title="Log in">
+  <h1>Log in</h1>
+  <form id="login-form">
+    <label>
+      Email
+      <input type="email" name="email" required autocomplete="email" />
+    </label>
+    <label>
+      Password
+      <input type="password" name="password" required autocomplete="current-password" />
+    </label>
+    <p id="login-error" role="alert" hidden></p>
+    <button type="submit">Log in</button>
+  </form>
+  <p>No account yet? <a href="/register">Register</a></p>
+</Base>
+
+<script>
+  import { apiFetch, setToken, ApiError } from '../lib/api';
+
+  interface LoginResponse {
+    token: string;
+    user: { id: string; email: string; display_name: string };
+  }
+
+  const form = document.getElementById('login-form') as HTMLFormElement;
+  const errorEl = document.getElementById('login-error') as HTMLParagraphElement;
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorEl.hidden = true;
+
+    const data = new FormData(form);
+    const email = data.get('email') as string;
+    const password = data.get('password') as string;
+
+    try {
+      const result = await apiFetch<LoginResponse>('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      });
+      setToken(result.token);
+      window.location.href = '/';
+    } catch (err) {
+      errorEl.textContent = err instanceof ApiError ? err.message : 'Something went wrong. Try again.';
+      errorEl.hidden = false;
+    }
+  });
+</script>
+```
+
+### 5. `frontend/src/pages/register.astro`
+
+```astro
+---
+import Base from '../layouts/Base.astro';
+---
+<Base title="Register">
+  <h1>Register</h1>
+  <form id="register-form">
+    <label>
+      Display name
+      <input type="text" name="display_name" required autocomplete="name" />
+    </label>
+    <label>
+      Email
+      <input type="email" name="email" required autocomplete="email" />
+    </label>
+    <label>
+      Password
+      <input type="password" name="password" required autocomplete="new-password" minlength="8" />
+    </label>
+    <p id="register-error" role="alert" hidden></p>
+    <button type="submit">Register</button>
+  </form>
+  <p>Already have an account? <a href="/login">Log in</a></p>
+</Base>
+
+<script>
+  import { apiFetch, setToken, ApiError } from '../lib/api';
+
+  interface RegisterResponse {
+    token: string;
+    user: { id: string; email: string; display_name: string };
+  }
+
+  const form = document.getElementById('register-form') as HTMLFormElement;
+  const errorEl = document.getElementById('register-error') as HTMLParagraphElement;
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorEl.hidden = true;
+
+    const data = new FormData(form);
+    const display_name = data.get('display_name') as string;
+    const email = data.get('email') as string;
+    const password = data.get('password') as string;
+
+    try {
+      const result = await apiFetch<RegisterResponse>('/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({ email, password, display_name }),
+      });
+      setToken(result.token);
+      window.location.href = '/';
+    } catch (err) {
+      errorEl.textContent = err instanceof ApiError ? err.message : 'Something went wrong. Try again.';
+      errorEl.hidden = false;
+    }
+  });
+</script>
+```
+
+### 6. Form styles — update `frontend/src/styles/global.css`
+
+Append to the file shell-layout created:
+
+```css
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 360px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.9rem;
+}
+
+input {
+  font: inherit;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid #33333355;
+  border-radius: 6px;
+}
+
+[role='alert'] {
+  color: #c0392b;
+}
+```
+
+## Verify
+
+```bash
+cd frontend
+npm run dev
+```
+
+With the backend running (`cargo run -p api`, from [handlers](/taskflow/en/auth/handlers/)), open `/register`, fill in the form, and submit. You should land on `/` with the nav bar (from [shell-layout](/taskflow/en/frontend/shell-layout/)) already showing "Boards / Log out" — open devtools, check `localStorage.getItem('token')`, and confirm it holds the JWT the backend issued. Log out, go to `/login`, and sign back in with the same credentials — same result. Submit either form with a wrong password and confirm the error paragraph shows the backend's actual message (`Unauthorized`, from [handlers](/taskflow/en/auth/handlers/)'s error mapping) instead of a generic failure.
+
+## Recap
+
+You built `login.astro` and `register.astro` — two forms whose submit handlers call the backend through `apiFetch`, store the returned token with `setToken`, and redirect to `/`. Along the way, `frontend/src/lib/api.ts` came into existence early, out of necessity, and you compared `localStorage` token storage against httpOnly cookies honestly: it's the pragmatic choice for a static frontend talking to a separate API, not an unconditionally safe one, and a real app layers CSP, a short TTL, and a refresh flow on top rather than treating `localStorage` as the finish line. Next, [api-client](/taskflow/en/frontend/api-client/) goes back through `api.ts` function by function — the deep dive this lesson deferred.

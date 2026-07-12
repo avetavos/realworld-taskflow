@@ -1,0 +1,150 @@
+---
+title: API Client
+description: frontend/src/lib/api.ts ฉบับเต็ม ทีละ function — ApiError, getToken/setToken/clearToken, ตัวแปรสภาพแวดล้อม PUBLIC_API_URL — และทำไม typed wrapper ตัวเดียวถึงดีกว่าเรียก fetch ตรง ๆ ในทุกหน้า
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+ไม่มีอะไรใหม่ — `frontend/src/lib/api.ts` มีอยู่แล้ว ถูกสร้างใน [auth-pages](/taskflow/th/frontend/auth-pages/) โดยความจำเป็น เพราะ `login.astro` กับ `register.astro` เรียก backend ไม่ได้เลยถ้าไม่มีมัน บทนี้คือ deep dive ที่บทนั้นเลื่อนมาทำ: ทุก export ในไฟล์นี้ ทำไม `ApiError` ถึงเป็น class แทนที่จะเป็น object ธรรมดา เกิดอะไรขึ้นกับ response body ตอนล้มเหลวเทียบกับตอนสำเร็จ และ `PUBLIC_API_URL` เดินทางจาก `.env` เข้าไปในการเรียก `fetch` จริง ๆ ได้ยังไง
+
+## Why
+
+ทุกหน้าที่คุยกับ backend — `login.astro` กับ `register.astro` ที่มีอยู่แล้ว [boards-list](/taskflow/th/frontend/boards-list/) บทถัดไป และ Kanban island ใน Module 9 หลังจากนั้น — ต้องการสามอย่างเดียวกันในทุก request: base URL ของ API ต่อหน้า path, header `Content-Type: application/json`, และ header `Authorization: Bearer <token>` เมื่อมี token อยู่ การเขียน logic นั้นครั้งเดียว อยู่หลัง `apiFetch<T>(path, init)` แบบ generic ตัวเดียว หมายความว่าทุก call site เหล่านั้นได้มันมาฟรี ๆ แค่เรียก `apiFetch(path)` — ทางเลือกอื่นคือ copy โค้ด header สามบรรทัดไปไว้ในทุก script ของทุกหน้า ซึ่งเป็น duplication แบบที่ copy ของหน้าหนึ่งจะค่อย ๆ เพี้ยนไปจากหน้าอื่นเงียบ ๆ (ลืม header, hardcode base URL ผิด) แล้วไม่มีใครสังเกตจนกว่าหน้านั้นจะเริ่ม fail ในแบบที่หน้าอื่นไม่เป็น
+
+## Pros & cons
+
+**`apiFetch<T>` แบบ generic ตัวเดียว (ตัวที่เราใช้) เทียบกับเรียก `fetch` ตรง ๆ ใน script ของแต่ละหน้า**
+
+- ข้อดี: base URL, header, และ error handling อยู่ในที่เดียวเป๊ะ ๆ ดังนั้นการแก้บั๊กหรือความต้องการ header ใหม่ (เช่น header เวอร์ชัน API ที่เพิ่มทีหลัง) คือการแก้ไฟล์เดียวแทนที่จะ search-and-replace ทั่วทุกหน้า call site อ่านเหมือนโค้ดธรรมดาที่ดูไม่ fail ได้ — `const boards = await apiFetch<Board[]>('/boards')` — โดยมี `try`/`catch` อยู่แค่ตรงที่ caller ต้องตอบสนองต่อความล้มเหลวจริง ๆ เท่านั้น
+- ข้อเสีย: `apiFetch<T>` เป็น dependency ที่ใช้ร่วมกัน — บั๊กในนั้นพังทุก caller พร้อมกัน ไม่ใช่แค่หน้าเดียว และ generic `<T>` เป็นสัญญาแค่ตอน compile-time เท่านั้น — `apiFetch<Board[]>('/boards')` บอก TypeScript ให้เชื่อว่า response มีรูปร่างเป็น `Board[]` แต่ไม่มีอะไร runtime มาเช็คจริง ๆ ว่า JSON ที่ได้กลับมาตรงกันไหม — ถ้ารูปร่าง response ของ backend เพี้ยนไปจาก interface `Board` (contract ของ Module 5) `apiFetch` จะไม่จับได้เลย ความไม่ตรงกันจะโผล่มาทีหลัง ตรงจุดที่ caller พยายามใช้ field ที่ไม่มีอยู่จริง
+
+**การ throw `ApiError` (ตัวที่เราใช้) เทียบกับการคืน result object แบบ `{ ok, data, error }`**
+
+- ข้อดี: การ throw ทำให้ path ที่สำเร็จไม่ต้อง unwrap อะไรเลย — `const result = await apiFetch<LoginResponse>(...)` อ่านเหมือนโค้ดธรรมดาที่ไม่ fail และ `try`/`catch` คือที่เดียวที่ต้องเขียน error handling ไม่ใช่การเช็ค `.ok` ในทุก call site `err instanceof ApiError` narrow `err` ให้เป็น type ที่มี field `.status: number` จริง ๆ ดังนั้น caller ที่สนใจ HTTP status เฉพาะเจาะจง (แบบ boards-list ที่ "`401` แปลว่า redirect ไป `/login` อย่างอื่น re-throw") จะ branch ได้โดยไม่ต้อง cast ด้วย `as`
+- ข้อเสีย: caller ที่ลืม `try`/`catch` ไปเลยจะได้ unhandled promise rejection แทนที่จะเป็นค่าที่แค่ไม่ได้เช็ค — ระบบ type ของ TypeScript ไม่ได้บังคับให้ทุก `await apiFetch(...)` ถูกห่อไว้แบบที่ function ที่คืน `Result` จะบังคับให้เช็ค `.ok` ก่อนแตะ `.data` นี่คือ trade-off จริง ไม่ใช่ของฟรี คอร์สนี้ยอมรับมันเพราะทุก call site ในโมดูลนี้ต้องมี `try`/`catch` อยู่แล้ว เพื่อโชว์ผู้ใช้ว่า *มีบางอย่าง* ผิดพลาด
+
+## Build it
+
+`frontend/src/lib/api.ts` เหมือนเดิมกับใน [auth-pages](/taskflow/th/frontend/auth-pages/) — นี่คือไฟล์เดิมอีกครั้งแบบเต็ม ๆ เพื่อให้คำอธิบายด้านล่างชี้ไปที่บรรทัดจริงได้:
+
+```ts
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+const TOKEN_KEY = 'token';
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  headers.set('Content-Type', 'application/json');
+
+  const token = getToken();
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  const res = await fetch(`${import.meta.env.PUBLIC_API_URL}${path}`, {
+    ...init,
+    headers,
+  });
+
+  if (!res.ok) {
+    let message = res.statusText;
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body?.message) {
+        message = body.message;
+      }
+    } catch {
+      // no JSON body to read a message from — statusText is the fallback
+    }
+    throw new ApiError(res.status, message);
+  }
+
+  if (res.status === 204 || res.headers.get('content-length') === '0') {
+    return undefined as T;
+  }
+
+  return (await res.json()) as T;
+}
+
+export interface Board {
+  id: string;
+  owner_id: string;
+  title: string;
+  created_at: string;
+}
+```
+
+รายละเอียดที่ควรพูดถึง:
+
+- `ApiError extends Error` และพก `public status: number` มาพร้อมกับ `message` ที่สืบทอดมา — caller ไม่ต้องไป lookup ที่สองหรือมี map แยกเพื่อไปจาก "request นี้ล้มเหลว" ให้ถึง "นี่คือ HTTP status code ที่อธิบายเหตุผล" `constructor(public status: number, message: string) { super(message); }` คือ parameter-property shorthand ของ TypeScript: การเขียน `public` ตรง ๆ ใน constructor signature ทั้งประกาศ field และ assign มันในบรรทัดเดียว ไม่ต้องมีบรรทัด `this.status = status;` แยกต่างหาก
+- `getToken`/`setToken`/`clearToken` ทั้งหมดผ่าน `const TOKEN_KEY = 'token';` เพียงตัวเดียว แทนที่จะเขียน string `'token'` ซ้ำสามครั้ง — เหตุผลแบบ DRY เดียวกับ `apiFetch` เอง แค่เอามาใช้กับ string constant แทน request logic `clearToken` ยังไม่มีหน้าไหนใช้ — ปุ่ม logout ของ shell-layout เรียก `localStorage.removeItem('token')` ตรง ๆ แทนที่จะใช้ helper ตัวนี้ เพราะ nav script ของ `Base.astro` ต้องการแค่เช็คว่ามีหรือไม่มี และถูกสร้างก่อนไฟล์นี้จะมีอยู่ด้วยซ้ำ การ cleanup ทีหลังอาจสลับมาใช้ helper ตัวนี้ได้ คอร์สนี้ปล่อยมันไว้แบบที่เขียนไว้เพื่อให้ diff ของแต่ละบทตรงกับสิ่งที่มันแก้จริง ๆ
+- `new Headers(init.headers)` — ไม่ใช่ object literal ธรรมดา — เพราะ `init.headers` ที่ caller ส่งเข้ามาอาจเป็น `Headers` instance อยู่แล้ว, array ของ tuple, หรือ object ธรรมดา (ทั้งสามแบบเป็น `RequestInit['headers']` ที่ถูกต้อง) และ constructor ของ `Headers` รับทั้งสามแบบได้เหมือนกันหมด การต่อยอดจากสิ่งที่ caller ส่งมา แทนที่จะเขียนทับด้วย object ใหม่ หมายความว่า caller เพิ่ม header ของตัวเองได้โดยที่ `apiFetch` ไม่เงียบ ๆ ทิ้งมันไป
+- ฝั่ง error พยายาม `res.json()` ใน `try`/`catch` ของตัวเอง แยกจากตัวนอก เพราะ response ที่ไม่ใช่ 2xx ไม่ได้การันตีว่าจะมี JSON body เสมอไป — เช่น `502` จาก proxy ที่อยู่หน้า API จริง อาจคืน HTML error page มาแทน ถ้า parse ไม่สำเร็จ `message` ก็แค่ใช้ `res.statusText` เป็นค่า fallback (`"Unauthorized"`, `"Not Found"`) แทนที่ `throw` เองจะพังด้วย `SyntaxError` ที่ไม่มีใครคาดไว้
+- `res.status === 204 || res.headers.get('content-length') === '0'` ครอบคลุมสองแบบที่ response ที่สำเร็จอาจไม่มีอะไรให้ parse: `DELETE /boards/:id` ในอนาคตคืน `204 No Content` เปล่า ๆ ไม่มี body เลย และ server บางตัวคืน `200` พร้อม body ว่างแทน การเรียก `res.json()` กับสองแบบนี้จะ throw บน empty string ก่อนจะถึง caller เลย การเช็คทั้งสองแบบไว้ล่วงหน้าหมายความว่า `apiFetch<void>(...)` resolve เป็น `undefined` ได้อย่างสะอาด แทนที่จะ throw บน response ที่จริง ๆ แล้วสำเร็จ
+
+### `PUBLIC_API_URL` กับ `.env`
+
+`frontend/.env` (สร้างไว้แล้วใน [auth-pages](/taskflow/th/frontend/auth-pages/)):
+
+```txt
+PUBLIC_API_URL=http://localhost:8080
+```
+
+ตัวแปรสภาพแวดล้อมของ Astro เดินผ่านระบบในตัวของ Vite แทนที่แบบ static ตอน build มีแค่ตัวแปรที่ขึ้นต้นด้วย `PUBLIC_` เท่านั้นที่จะรวมอยู่ในโค้ดฝั่ง client — อะไรที่ไม่มี prefix นี้จะถูกตัดออกจาก browser bundle ซึ่งสำคัญสำหรับค่าอย่าง database URL หรือ API secret key ที่ script ฝั่ง backend ในอนาคตอาจอ่าน แต่ไม่สำคัญกับ `PUBLIC_API_URL` ที่ตั้งใจให้เป็นสาธารณะอยู่แล้ว — มันคือ base URL เดียวกับที่ network tab ของ browser โชว์เป็นข้อความเปล่า ๆ อยู่แล้วทุก request
+
+`frontend/src/env.d.ts` (สร้างไว้แล้วใน [auth-pages](/taskflow/th/frontend/auth-pages/)) คือสิ่งที่ทำให้ `import.meta.env.PUBLIC_API_URL` resolve เป็น `string` แทนที่จะตกไปใช้ fallback ที่ไม่มี type:
+
+```ts
+/// <reference types="astro/client" />
+
+interface ImportMetaEnv {
+  readonly PUBLIC_API_URL: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+```
+
+การ deploy จริงจะเขียนทับด้วย `.env` ของตัวเอง — หรือที่พบบ่อยกว่าคือตัวแปรสภาพแวดล้อมที่ตั้งตรงใน dashboard ของ hosting platform — ชี้ `PUBLIC_API_URL` ไปที่ domain จริงของ API แทน `localhost:8080` `.env` เองไม่ควร commit เข้า git เลย ไฟล์ `frontend/.env.example` ที่มี key เดียวกันกับค่า placeholder (`PUBLIC_API_URL=http://localhost:8080`) ต่างหากที่ควรอยู่ใน git เพื่อบันทึกว่ามีตัวแปรอะไรบ้างโดยไม่ commit ค่าเฉพาะของแต่ละ environment
+
+## Verify
+
+```bash
+cd frontend
+npx astro check
+```
+
+จากนั้น เมื่อ `npm run dev` กำลังรันอยู่และ backend เปิดอยู่ เปิดหน้าไหนก็ได้ใน browser เปิด console ของ devtools แล้วลองใช้ `apiFetch` ตรง ๆ:
+
+```js
+const { apiFetch } = await import('/src/lib/api.ts');
+await apiFetch('/boards');
+```
+
+ตอนที่ยังไม่ได้ login คำสั่งนี้จะ reject ด้วย `ApiError` ที่มี `.status` เป็น `401` login ก่อน (ผ่าน `/login`) แล้วรันใหม่ มันจะ resolve เป็น array อะไรก็ตามที่ `GET /boards` ([boards](/taskflow/th/rest-api/boards/)) คืนให้ user คนนั้น — `[]` สำหรับบัญชีที่เพิ่งสร้างใหม่
+
+## Recap
+
+คุณย้อนกลับไปไล่ `frontend/src/lib/api.ts` ทีละบรรทัด: parameter-property shorthand ของ `ApiError`, `getToken`/`setToken`/`clearToken` ที่ผ่าน `TOKEN_KEY` constant ตัวเดียว และการประกอบ header, การ parse error body พร้อม fallback เป็น `statusText`, กับการจัดการ `204`/empty-body ของ `apiFetch<T>` คุณเห็นแล้วว่าทำไม wrapper แบบ generic ตัวเดียวถึงดีกว่าการ duplicate fetch logic ในแต่ละหน้า และต้นทุนจริงของทางเลือกนั้น — พื้นที่บั๊กที่ใช้ร่วมกัน กับการการันตี type แค่ตอน compile-time ต่อไป [boards-list](/taskflow/th/frontend/boards-list/) คือหน้าแรกที่เรียก `apiFetch<Board[]>` จริง ๆ แล้ว render สิ่งที่ได้กลับมา

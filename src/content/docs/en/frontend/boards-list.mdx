@@ -1,0 +1,132 @@
+---
+title: Boards List
+description: Build frontend/src/pages/index.astro — fetch the signed-in user's boards with apiFetch<Board[]>, render them as links, wire a create-board form, and redirect to /login when there's no token.
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+`frontend/src/pages/index.astro` — the landing page, wrapped in [`Base`](/taskflow/en/frontend/shell-layout/). A client `<script>` checks `getToken()` before anything else and redirects to `/login` if it's missing; otherwise it calls `apiFetch<Board[]>('/boards')` ([boards](/taskflow/en/rest-api/boards/)), renders each board as a link to `/boards/:id`, and wires a small form that `POST`s `{title}` to `/boards` and appends the newly created board to the list without a full refetch.
+
+`/boards/:id` — the actual interactive board, with columns and cards — is Module 9's job. This lesson's links to it are plain, static `<a href>` tags; clicking one is an ordinary browser navigation to a page that doesn't exist yet, and it 404s until Module 9 (The Kanban Island) builds it. That's expected at this point in the course, not a bug in this lesson.
+
+## Why
+
+The auth guard runs client-side, first thing in the script, because a static site has no per-request server hop to intercept — there's no middleware layer that could check a cookie or a header before the page's HTML is served, the way a server-rendered app might. `getToken()` (built in [auth-pages](/taskflow/en/frontend/auth-pages/), explained in [api-client](/taskflow/en/frontend/api-client/)) returning `null` means redirecting immediately, the same "check first, act on the result" shape [shell-layout](/taskflow/en/frontend/shell-layout/)'s nav script already used for a smaller decision — which nav state to reveal.
+
+Appending the newly created board to the list directly, instead of calling `apiFetch<Board[]>('/boards')` again after a successful `POST`, isn't a micro-optimization — it's using data that's already in hand. `POST /boards` ([boards](/taskflow/en/rest-api/boards/)) returns the created `Board` itself in its response body; that object has every field `renderBoard` needs, so building one `<li>` from it is a single DOM operation that reuses a response the page already received, rather than firing a second network request just to get back a list that now includes something the page already knows about.
+
+## Pros & cons
+
+**A static Astro page + vanilla script (what we're using) vs. building this page as a Preact/React island (`client:load`)**
+
+This is the same trade-off shell-layout's Pros & cons opened with, applied to a page that does a bit more than a nav toggle: fetch a list, render it, and handle one form submission.
+
+- Pros: `index.astro` ships no framework runtime just to loop over an array and call `document.createElement('li')` a handful of times — vanilla DOM APIs handle "render N items, append a new one occasionally" without a virtual DOM, a diffing pass, or a single hydration directive to pick. It's the same reasoning that kept `login.astro` and `register.astro` framework-free: the amount of state here — a list of boards, one form's error message — doesn't justify the runtime cost of a component tree.
+- Cons: `renderBoard` building DOM nodes by hand (`document.createElement`, `.append`) and `loadBoards` manually tracking an "empty state" `<p>`'s `hidden` attribute is exactly the kind of imperative list-management code that stops scaling the moment items need to be reordered, filtered, or updated from more than one place at once. That's precisely what Module 9's actual board needs — cards dragged between columns, an optimistic reorder that has to roll back on a server rejection, and remote `card.moved`/`card.created` events ([protocol](/taskflow/en/realtime/protocol/)) arriving over WebSocket at arbitrary times, all needing to stay in sync with whatever's on screen. This page's board list is read-mostly and append-only — new boards arrive one at a time, from this page's own form submissions, never from anywhere else — which is exactly the ceiling where vanilla script is still the right tool. Module 9 is where that ceiling gets crossed.
+
+## Build it
+
+### `frontend/src/pages/index.astro`
+
+```astro
+---
+import Base from '../layouts/Base.astro';
+---
+<Base title="Boards">
+  <h1>Your boards</h1>
+  <ul id="board-list"></ul>
+  <p id="board-list-empty" hidden>No boards yet — create your first one below.</p>
+
+  <form id="create-board-form">
+    <label>
+      New board title
+      <input type="text" name="title" required />
+    </label>
+    <button type="submit">Create board</button>
+  </form>
+  <p id="create-board-error" role="alert" hidden></p>
+</Base>
+
+<script>
+  import { apiFetch, getToken, ApiError, type Board } from '../lib/api';
+
+  const listEl = document.getElementById('board-list') as HTMLUListElement;
+  const emptyEl = document.getElementById('board-list-empty') as HTMLParagraphElement;
+  const form = document.getElementById('create-board-form') as HTMLFormElement;
+  const errorEl = document.getElementById('create-board-error') as HTMLParagraphElement;
+
+  function renderBoard(board: Board): void {
+    const item = document.createElement('li');
+    const link = document.createElement('a');
+    link.href = `/boards/${board.id}`;
+    link.textContent = board.title;
+    item.append(link);
+    listEl.append(item);
+    emptyEl.hidden = true;
+  }
+
+  async function loadBoards(): Promise<void> {
+    try {
+      const boards = await apiFetch<Board[]>('/boards');
+      if (boards.length === 0) {
+        emptyEl.hidden = false;
+      } else {
+        boards.forEach(renderBoard);
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      throw err;
+    }
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    errorEl.hidden = true;
+
+    const data = new FormData(form);
+    const title = data.get('title') as string;
+
+    try {
+      const board = await apiFetch<Board>('/boards', {
+        method: 'POST',
+        body: JSON.stringify({ title }),
+      });
+      renderBoard(board);
+      form.reset();
+    } catch (err) {
+      errorEl.textContent = err instanceof ApiError ? err.message : 'Something went wrong. Try again.';
+      errorEl.hidden = false;
+    }
+  });
+
+  if (!getToken()) {
+    window.location.href = '/login';
+  } else {
+    void loadBoards();
+  }
+</script>
+```
+
+Everything that needs DOM references and event listeners is wired up first — `listEl`, `emptyEl`, `form`, `errorEl`, `renderBoard`, `loadBoards`, and the form's `submit` listener all exist before the script decides whether to redirect or fetch. The guard runs last, deliberately: `if (!getToken())` redirecting is the one branch that ends the page's usefulness entirely, so it reads as the final decision the script makes, not a gate that has to be threaded through everything above it.
+
+`void loadBoards()` — the `void` operator, not a bare `loadBoards()` call — makes explicit that the returned promise is intentionally not awaited at the top level of the script (there's nothing to await it *into*; the script isn't an `async function`) and silences the "floating promise" warning a stricter lint config would otherwise raise. `loadBoards` still handles its own errors internally with `try`/`catch`, so nothing is actually being ignored — the `void` is documentation, not a shortcut around error handling.
+
+`import { apiFetch, getToken, ApiError, type Board } from '../lib/api';` mixes a type-only import (`type Board`) into the same statement as three value imports — valid TypeScript since version 4.5, and it means the bundler can tell at a glance that `Board` contributes nothing to the runtime output, only to type-checking.
+
+## Verify
+
+```bash
+cd frontend
+npm run dev
+```
+
+Logged out (clear `localStorage` in devtools if needed), visit `/` and confirm it redirects straight to `/login`. Log in (from [auth-pages](/taskflow/en/frontend/auth-pages/)), land back on `/`, and confirm it shows "No boards yet" for a fresh account. Create a board through the form — it should appear in the list immediately, with no page reload, and the empty-state message should disappear. Reload the page and confirm the board is still there (`apiFetch<Board[]>('/boards')` refetching from Postgres, not from anything cached client-side). Click the board's link and confirm it 404s — expected, since `/boards/:id` doesn't exist until Module 9 (The Kanban Island).
+
+## Recap
+
+You built `index.astro`: a client-side auth guard that redirects to `/login` before rendering anything meaningful, a `GET /boards` fetch rendered as a plain list, and a create-board form that appends its own response to that list instead of refetching. You saw why this page — read-mostly, append-only, one form — stays on the vanilla-script side of the line shell-layout drew, and exactly which properties of the actual Kanban board (concurrent drag state, optimistic updates, remote WebSocket events) push Module 9 across it. Module 8 is done — every static page TaskFlow's frontend needs, from nav bar to board list, wired to the typed `apiFetch` client this module built. Next, Module 9 — The Kanban Island — starts: the one page in this frontend that earns a Preact island, and builds `/boards/:id` for real.
