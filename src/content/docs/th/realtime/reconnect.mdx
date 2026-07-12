@@ -1,0 +1,190 @@
+---
+title: Reconnection & Heartbeats
+description: เพิ่ม heartbeat แบบ ping/pong ฝั่งเซิร์ฟเวอร์เข้าไปใน handle_socket เพื่อตรวจจับ connection ที่ตายไป และกำหนด client contract สำหรับการ reconnect — resubscribe แล้ว refetch board tree เพื่อปิดช่องว่างที่ protocol แบบ broadcast อย่างเดียวปิดเองไม่ได้
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+หนึ่งส่วนที่เพิ่มเข้าไปใน `handle_socket` ของ `realtime/handlers.rs`: `tokio::select!` branch ที่สาม เป็น `tokio::time::interval` ที่ tick ทุก 30 วินาที ส่ง `Message::Ping` ไปให้ไคลเอนต์ ไม่มีไฟล์ใหม่ — บทนี้ปิด loop ที่ [ws-endpoint](/taskflow/th/realtime/ws-endpoint/) เริ่มไว้ แล้วหันไปพูดถึงข้อความล้วน ๆ: **ไคลเอนต์** มีหน้าที่ทำอะไรทันทีที่ WebSocket ของมัน reconnect และทำไมความรับผิดชอบนี้ถึงออกแบบให้หายไปโดยพึ่งฝั่งเซิร์ฟเวอร์อย่างเดียวไม่ได้
+
+## Why
+
+`handle_socket` ของ [ws-endpoint](/taskflow/th/realtime/ws-endpoint/) จบ loop อยู่แล้ว — และด้วยเหตุนี้ปิด connection และ drop `rx` — ทันทีที่ `socket.recv()` คืน frame `Close` หรือ `None` นี่จัดการกับการตัดการเชื่อมต่อแบบ **สะอาด**: แท็บเบราว์เซอร์ที่ปิด ไคลเอนต์ที่เรียก `.close()` แต่มันไม่ทำอะไรเลยกับการตัดการเชื่อมต่อแบบ **ไม่สะอาด**: แล็ปท็อปที่หลับ, เครือข่าย WiFi ที่หลุดกลางคัน, ไคลเอนต์มือถือที่สัญญาณหายในอุโมงค์ TCP เองไม่ได้แจ้งเตือนสิ่งเหล่านี้ได้อย่างน่าเชื่อถือรวดเร็ว — connection ที่เปิดครึ่งเดียว (ฝั่งหนึ่งคิดว่ายังเชื่อมต่ออยู่ อีกฝั่งหายไปแล้วจริง ๆ) อาจนั่งอยู่โดยไม่มีใครสังเกตเป็นเวลานาน โดยเฉพาะผ่าน NAT หรือ load balancer ที่ยังคง forward connection อยู่อย่างมีความสุข ทั้งที่ไม่มีฝั่งไหนใช้งานมันจริง ๆ แล้ว
+
+**Heartbeat** — เซิร์ฟเวอร์ส่งอะไรบางอย่างเป็นระยะ ๆ แล้วรอการตอบกลับ — คือทางแก้มาตรฐาน และ Axum ทำให้ครึ่งหนึ่งอยู่แล้วโดยอัตโนมัติ: ตามเอกสารของ Axum เอง `Message::Ping` ที่เซิร์ฟเวอร์นี้ส่งจะถูกตอบกลับด้วย `Message::Pong` โดยอัตโนมัติจากไคลเอนต์ที่ทำงานถูกต้อง (และ Axum เองก็ตอบ `Ping` ใด ๆ ที่*มันได้รับ*โดยอัตโนมัติเช่นกัน — เฟรมเวิร์กจัดการทั้งสองทิศทางของ ping/pong ระดับ WebSocket โดยไม่ต้องมีโค้ดในโมดูลนี้เลย) สิ่งที่ Axum ทำเองไม่ได้คือการสังเกต connection ที่ตายจริง ๆ ด้วยความคิดริเริ่มของเซิร์ฟเวอร์เอง — นั่นคือสิ่งที่ `select!` branch ใหม่ทำ: ทุก 30 วินาที `socket.send(Message::Ping(...))` จะสำเร็จ (การเขียน TCP ที่อยู่ข้างใต้ผ่านไปได้) หรือล้มเหลวไปเลย และความล้มเหลวจะถูกจัดการเหมือนกับ frame `Close` เป๊ะ — จบ loop, drop `rx`, ให้จำนวน receiver ของ `Hub` สำหรับบอร์ดนี้ลดลงหนึ่ง
+
+นี่ก็ยังไม่ใช่ตัวตรวจจับที่สมบูรณ์แบบทันที — `send` สามารถสำเร็จในระดับ TCP ได้แม้ peer จะไม่เคยอ่านมันจริง ๆ เพราะ TCP บัฟเฟอร์การเขียนไว้ — แต่รวมกับฝั่งอ่านที่ปิด loop อยู่แล้วเมื่อมี transport error ใด ๆ จาก `socket.recv()` มันคือ heartbeat pattern แบบ best-effort เดียวกับที่บริการ WebSocket ในโปรดักชันส่วนใหญ่ใช้: ไม่ใช่การรับประกันว่า peer ที่ตายจะถูกสังเกตภายในขอบเขตเวลาที่แน่นอน แต่เป็นสัญญาณที่คงที่ ต้นทุนต่ำ ที่จับกรณีทั่วไปได้ (เครือข่ายหลุด, process ถูกฆ่า, connection NAT ที่เปิดครึ่งเดียว) ภายในหนึ่งหรือสอง heartbeat interval แทนที่จะไม่เคยจับได้เลย
+
+## Pros & cons
+
+**ping interval ทุก 30 วินาทีที่เซิร์ฟเวอร์เป็นผู้เริ่ม (สิ่งที่เราใช้) เทียบกับการพึ่งพาการตรวจจับระดับ TCP อย่างเดียว (ไม่มี application heartbeat เลย)**
+
+- ข้อดี: 30 วินาทีจำกัดว่า connection ที่ตายแล้วแต่ยังไม่ถูกสังเกตจะครอง receiver slot ของ `Hub` และ task ฝั่งเซิร์ฟเวอร์ได้นานแค่ไหน — สั้นพอที่ connection ที่ค้างจะเยียวยาตัวเองได้ภายในครึ่งนาที ยาวพอที่จะเป็นแค่ traffic เพิ่มเติมเล็กน้อยคงที่ ไม่ใช่ภาระที่มีนัยสำคัญต่อทั้งเซิร์ฟเวอร์หรือแบตเตอรี/ดาต้าของไคลเอนต์ ถ้าไม่มี application-level heartbeat เลย TCP connection ที่เปิดครึ่งเดียวหลัง NAT หรือ load balancer บางแบบอาจอยู่ได้นานหลายนาทีถึงหลายชั่วโมง ก่อนที่ TCP keepalive ระดับ OS (ถ้าเปิดใช้งาน) หรือ write ที่ล้มเหลวจริง ๆ จะเผยปัญหาออกมา — `Hub` จะนับ socket ที่ตายนั้นเป็น receiver ที่ยังมีชีวิตตลอดเวลานั้น
+- ข้อเสีย: มันคือ `tokio::select!` branch อีกหนึ่งอัน และเป็นอีกสิ่งหนึ่งที่ฟังก์ชันนี้ต้องทำ — สำหรับแอประดับคอร์สที่มี socket พร้อมกันจำนวนไม่มาก ต้นทุนนั้นเล็กน้อยจนไม่มีนัยสำคัญ ระบบที่รัน socket อายุยืนจำนวนมหาศาลอาจปรับ interval ให้ยาวขึ้นเพื่อลด ping traffic รวม โดยแลกกับหน้าต่างเวลาที่นานขึ้นก่อนที่ connection ที่ตายจะถูกสังเกต
+
+**การให้ entry ของ `HashMap` ต่อบอร์ดใน Hub คงอยู่ตลอดอายุของ process (สิ่งที่เราใช้) เทียบกับการ evict entry เมื่อ receiver ตัวสุดท้ายของมันตัดการเชื่อมต่อ**
+
+- ข้อดี: เป็นการ implement ที่ถูกต้องแบบง่ายที่สุด — `Hub::subscribe` ไม่ต้องประสานงานกับ cleanup pass แยกต่างหากเลย และไม่มี race condition ระหว่าง "receiver ตัวสุดท้ายเพิ่ง drop ไป" กับ "socket ใหม่กำลัง subscribe เข้าบอร์ดเดียวกันในจังหวะเดียวกันพอดี" ที่ต้องทำให้ถูกต้อง `broadcast::Sender` ที่ไม่มี receiver เลยมีต้นทุนถูกที่จะเก็บไว้ — มันคือการจัดสรร heap เล็ก ๆ ไม่ใช่ connection ที่ถืออยู่หรือ task ที่กำลังรัน
+- ข้อเสีย: `HashMap` ของ `Hub` โตขึ้นเรื่อย ๆ เท่านั้น ตลอดอายุของ process — บอร์ดที่เคยมี socket เชื่อมต่อเข้ามาครั้งเดียว เมื่อหลายปีก่อน แล้วไม่เคยอีกเลย ก็ยังมี entry นั่งอยู่ในหน่วยความจำ นี่คือ trade-off ที่จงใจและยอมรับสำหรับแอประดับคอร์ส ไม่ใช่ระดับโปรดักชัน: เป็นการตัดสินใจประเภทเดียวกับ registry แบบ keyed ที่สร้างแบบ lazy ใด ๆ (connection pool ต่อ tenant, provider ที่ cache แบบ `.family`) ที่ต้องการ eviction policy ที่ชัดเจน — LRU, การกวาดล้างเป็นระยะที่ลบ entry ที่ `sender.receiver_count() == 0` — เมื่อจำนวน key ที่แตกต่างกันที่ถูกสร้างขึ้นตลอดอายุของ process มากพอที่จะมีนัยสำคัญ จำนวนบอร์ดของ TaskFlow สำหรับโปรเจกต์ระดับคอร์ส ไม่มีวันถึงสเกลนั้น การ deploy โปรดักชันจริงจะต้องการการกวาดล้างนั้น
+
+## Build it
+
+### `realtime/handlers.rs` — heartbeat branch
+
+อัปเดต `taskflow/backend/api/src/realtime/handlers.rs`:
+
+```rust
+use std::time::Duration;
+
+use axum::{
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
+    response::Response,
+};
+use deadpool_redis::redis::AsyncCommands;
+use serde::Deserialize;
+use tokio::sync::broadcast;
+use uuid::Uuid;
+
+use crate::{
+    auth::jwt,
+    boards::service as boards_service,
+    error::{AppError, AppResult},
+    state::AppState,
+};
+
+#[derive(Debug, Deserialize)]
+pub struct WsAuthQuery {
+    pub token: String,
+}
+
+/// How often the server pings an otherwise-idle socket to detect a
+/// connection that's died without a clean close frame ever arriving.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// `GET /ws/boards/:id?token=<jwt>` — upgrades to a WebSocket after the
+/// same three checks `AuthUser` runs on every REST request (signature,
+/// expiry, Redis allowlist), plus board membership.
+pub async fn ws_upgrade(
+    State(state): State<AppState>,
+    Path(board_id): Path<Uuid>,
+    Query(query): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> AppResult<Response> {
+    let claims =
+        jwt::verify(&query.token, &state.config.jwt_secret).map_err(|_| AppError::Unauthorized)?;
+
+    let mut conn = state
+        .redis
+        .get()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    let session: Option<String> = conn
+        .get(format!("auth:token:{}", claims.jti))
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    if session.is_none() {
+        return Err(AppError::Unauthorized);
+    }
+
+    let user_id = claims
+        .sub
+        .parse::<Uuid>()
+        .map_err(|_| AppError::Unauthorized)?;
+
+    boards_service::assert_member(&state.db, user_id, board_id).await?;
+
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, board_id)))
+}
+
+async fn handle_socket(mut socket: WebSocket, state: AppState, board_id: Uuid) {
+    let mut rx = state.hub.subscribe(board_id);
+    let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat.tick().await; // the first tick fires immediately; consume it
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return;
+                    }
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => {
+                        return;
+                    }
+                    Some(Ok(_)) => {
+                        // Text/Binary/Ping/Pong from the client — this
+                        // socket is read-only from the client's point of
+                        // view, but receiving anything at all, including
+                        // the Pong reply below, confirms it's still alive.
+                    }
+                    Some(Err(_)) => {
+                        return;
+                    }
+                }
+            }
+            _ = heartbeat.tick() => {
+                if socket.send(Message::Ping(Vec::new())).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+```
+
+สิ่งเดียวที่เปลี่ยนจากเวอร์ชันของ [redis-backplane](/taskflow/th/realtime/redis-backplane/): `heartbeat` เป็น `tokio::time::interval(HEARTBEAT_INTERVAL)` และ `tokio::select!` arm ที่สามที่แข่งกับสอง branch เดิมที่มีอยู่แล้ว `heartbeat.tick().await` รันครั้งเดียวทันทีก่อนที่ loop จะเริ่ม — tick แรกของ `tokio::time::interval` ยิงทันทีเสมอแทนที่จะรอครบหนึ่ง interval เต็ม ๆ ดังนั้นบรรทัดนี้แค่กิน tick แรกที่ยิงทันทีนั้นไป หมายความว่า ping จริงตัวแรกจะถูกส่งหลังจาก socket เชื่อมต่อไปแล้ว 30 วินาที ไม่ใช่ทันทีที่เชื่อมต่อ ภายใน loop ทุกครั้งที่ `heartbeat.tick()` resolve ต่อจากนั้นจะส่ง `Ping` ไป; `send` ที่ล้มเหลว — สัญญาณ "connection ที่อยู่ข้างใต้หายไปแล้ว" แบบเดียวกับที่อีกสอง branch เฝ้าดูอยู่แล้ว — จะจบ loop เหมือนกับ frame `Close` หรือ error จาก `socket.recv()` เป๊ะ
+
+ไม่มีการเปลี่ยนแปลงใน `Hub` หรือ `run_subscriber` — บทนี้เกี่ยวกับ liveness ของ loop ต่อ socket เองล้วน ๆ ไม่เกี่ยวกับ backplane
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+ยืนยันว่า heartbeat ยิงตามกำหนดเวลา: เชื่อมต่อแล้วเฝ้าดู WebSocket frame ดิบ (ไม่ใช่แค่ JSON payload) เป็นเวลา 60+ วินาที — `websocat -v` จะ log รายละเอียดระดับ frame รวมถึง ping/pong ออกทาง stderr:
+
+```bash
+cd taskflow/infra && docker compose up -d db redis
+cd ../backend && cargo run -p api &
+
+websocat -v "ws://localhost:8080/ws/boards/$BOARD_ID?token=$TOKEN"
+```
+
+frame `Ping` สองครั้งจะปรากฏห่างกันประมาณ 30 วินาทีใน log แต่ละครั้งอาจถูกตอบกลับอัตโนมัติโดย `websocat` เองหรือมองเห็นเป็น frame แยกต่างหาก ขึ้นอยู่กับการตั้งค่าความละเอียดของ log ของไคลเอนต์ — รูปแบบ log ที่แน่นอนแตกต่างกันไปตามไคลเอนต์แต่ละตัว แต่จังหวะประมาณ 30 วินาทีควรเห็นได้ชัดเจนไม่ผิดเพี้ยน
+
+ยืนยันว่าการตัดการเชื่อมต่อแบบไม่สะอาดถูกสังเกตในที่สุด: เชื่อมต่อแล้วจำลอง connection ที่ตายโดยไม่ส่ง close frame ที่ถูกต้อง — ฆ่า TCP connection ที่อยู่ข้างใต้แบบทันที (เช่น ปิดเครือข่ายชั่วคราว หรือฆ่า `websocat` ด้วย `kill -9` จากอีกเทอร์มินัลหนึ่งแทนที่จะเป็น Ctrl-C ซึ่งอย่างน้อยก็พยายามปิดแบบสะอาด) วิธีจำลองที่แน่นอนขึ้นอยู่กับ OS/network stack ของคุณ แต่สัญญาณฝั่งเซิร์ฟเวอร์ที่ควรมองหาคือบรรทัด log (หรือถ้ายังไม่ได้เพิ่ม log ก็แค่การไม่มีกิจกรรมใด ๆ เพิ่มเติมสำหรับ socket นั้น) เมื่อ `send` ครั้งถัดไป — ไม่ว่าจะเป็น heartbeat `Ping` หรือ broadcast event จริง — ล้มเหลวและ `handle_socket` return
+
+## The client contract: resubscribe and refetch, not replay
+
+ทุกอย่างจนถึงตอนนี้เป็นฝั่งเซิร์ฟเวอร์ทั้งหมด อีกครึ่งหนึ่งของ "การ reconnect" เป็นของไคลเอนต์ และควรพูดให้ชัดเจนเพราะ protocol แบบ broadcast อย่างเดียวเช่นนี้แก้ปัญหาจากฝั่งเซิร์ฟเวอร์เพียงอย่างเดียวไม่ได้: **`BoardEvent` ใด ๆ ที่ publish ออกไปตอนที่ socket ของไคลเอนต์หลุดการเชื่อมต่อ จะหายไปถาวร ทันทีที่มันถูกส่งออกไป** `broadcast::channel` ของ `Hub` ไม่มีประวัติ — `Receiver` ที่ยังไม่มีอยู่ตอนที่ข้อความถูกส่ง จะไม่มีวันเห็นมันเลย โดยการออกแบบ (นั่นคือสิ่งที่ `Lagged` ครอบคลุมไว้แล้วสำหรับ receiver ที่*มีอยู่*แต่ตามหลัง; receiver ที่ไม่มีอยู่เลยไม่ได้อยู่ในบัญชีนั้นด้วยซ้ำ) ไม่มี event log ให้ replay ไม่มี "ขอทุกอย่างตั้งแต่ sequence number N" ที่ไคลเอนต์ขอได้ — ส่วน Pros & cons ของ [protocol](/taskflow/th/realtime/protocol/) ตั้งชื่อช่องว่างนี้ไว้แล้วตอนที่เลือก broadcast-on-mutation แทนทางเลือกที่หนักกว่า และนี่คือบทที่ทางแก้ถูกกำหนดไว้จริง ๆ
+
+ทางแก้ไม่ใช่ protocol ที่ซับซ้อนขึ้น — มันคือการใช้ชิ้นส่วนที่ TaskFlow สร้างไว้แล้วซ้ำ ทันทีที่ WebSocket ของไคลเอนต์ reconnect (request `WebSocketUpgrade` ใหม่, task `handle_socket` ใหม่เอี่ยม, การเรียก `Hub::subscribe` ใหม่ที่เห็นแค่ event จากจุดนี้เป็นต้นไป) ไคลเอนต์มีหน้าที่ทำสองอย่าง ตามลำดับ:
+
+1. **เปิด WebSocket ใหม่** — `ws_upgrade` รันการตรวจสอบตามปกติกับ token ปัจจุบัน; ถ้า token หมดอายุระหว่างที่ไคลเอนต์หลุดการเชื่อมต่อ ขั้นตอนนี้จะล้มเหลวและไคลเอนต์จะกลับไปใช้การจัดการปกติ "session หมดอายุ กรุณาเข้าสู่ระบบใหม่" เหมือนกับที่มันจะทำสำหรับ REST call ใด ๆ ที่ token หมดอายุ
+2. **refetch บอร์ดทันที** — `GET /boards/:id` ธรรมดา ๆ endpoint cache-aside ตัวเดียวกับที่ [cache-reads](/taskflow/th/caching/cache-reads/) สร้างไว้ นี่ปิดช่องว่างในหนึ่ง round trip: ไม่ว่าอะไรจะเปลี่ยนไประหว่างที่หลุดการเชื่อมต่อ — การย้ายการ์ดหนึ่งครั้งหรือห้าสิบครั้ง — การ refetch จะคืนค่าสถานะ*ปัจจุบัน*ที่ถูกต้องของบอร์ด เพราะมันอ่านจาก Postgres-หรือ-cache ไม่ใช่จากประวัติ broadcast ใด ๆ ที่อาจพลาด event ไป ไคลเอนต์ไม่จำเป็นต้องรู้ว่ามันพลาด*อะไร*ไป แค่รู้ว่ามันอาจพลาด*บางอย่าง*ไปก็พอ และการ refetch เต็มรูปแบบตอบคำถามนั้นได้แบบไม่มีเงื่อนไข
+
+นี่ก็เป็นเหตุผลที่การ refetch นั้นถูกพอที่จะทำแบบไม่มีเงื่อนไขทุกครั้งที่ reconnect ไม่ใช่สิ่งที่ควรพยายามข้ามเมื่อ "คงไม่มีอะไรเปลี่ยนหรอก": `GET /boards/:id` แบบ cache-aside ของ [cache-reads](/taskflow/th/caching/cache-reads/) เป็น fast path ที่ทุก page load ใช้อยู่แล้ว มี TTL 60 วินาทีและถูก invalidate ทุกครั้งที่มีการเขียน — การ refetch ที่เกิดจาก reconnect ไม่ใช่ operation พิเศษที่แพงเพิ่มขึ้นมา มันคือ request ตัวเดียวกันเป๊ะกับที่ไคลเอนต์จะยิงตอน page load ปกติ แค่ถูกกระตุ้นด้วย event ที่ต่างออกไป (socket reconnect แล้ว) แทนที่จะเป็นการนำทาง ไคลเอนต์ที่ resubscribe แต่*ข้าม*การ refetch คือบั๊กเฉพาะเจาะจงที่ส่วนนี้มีไว้เพื่อป้องกัน — socket ดูเหมือนเชื่อมต่ออยู่ event สามนาทีจากนี้จะมาถึงถูกต้อง แต่สิ่งที่เปลี่ยนไปในช่วงที่หลุดจะไม่ถูกวาดใหม่เงียบ ๆ จนกว่าจะมีอะไรอื่นมากระตุ้นให้ fetch ใหม่
+
+## Recap
+
+คุณได้เพิ่ม heartbeat 30 วินาทีเข้าไปใน `handle_socket` — `tokio::time::interval` แข่งกับ `tokio::select!` branch ที่สามกับ branch การรับ broadcast และการรับจากไคลเอนต์ที่มีอยู่แล้ว ส่ง `Ping` และปฏิบัติต่อ `send` ที่ล้มเหลวเหมือนกับ connection ที่ตายเหมือนกับ frame `Close` เป๊ะ คุณได้เห็นว่าทำไม Axum ถึงจัดการทั้งสองทิศทางของ ping/pong ระดับล่างให้อัตโนมัติอยู่แล้ว และทำไม application-level heartbeat ยังจำเป็นอยู่เพื่อจับ connection ที่เปิดครึ่งเดียวที่การจัดการอัตโนมัติของ Axum จับเองไม่ได้ คุณได้ระบุการเติบโตแบบไม่มีขอบเขตของ `HashMap` ใน `Hub` ว่าเป็น trade-off ที่จงใจและบันทึกไว้ในระดับคอร์ส ไม่ใช่บั๊ก และคุณได้กำหนด client contract ที่ protocol แบบ broadcast อย่างเดียวต้องการ: resubscribe แล้ว refetch board tree แบบไม่มีเงื่อนไข ปิดช่องว่างของ event ที่พลาดไปด้วย `GET /boards/:id` แบบ cache-aside ตัวเดียวกันเป๊ะกับที่คอร์สนี้สร้างไว้เมื่อสองโมดูลก่อน แทนที่จะคิดค้นกลไก event-replay ที่โมดูลนี้ไม่เคยต้องการ นั่นคือการปิดโมดูล 7 — Realtime: ตอนนี้ TaskFlow มี REST endpoint, การ cache และ rate limit ที่อิง Redis, และการอัปเดตแบบ live ผ่าน WebSocket ที่ทำงานได้บน backend instance กี่ตัวก็ได้ และฟื้นตัวได้อย่างสะอาดจาก connection ที่หลุด ต่อไป [Frontend](/taskflow/th/frontend/) จะเริ่มสร้างแอป Astro ที่เรียกใช้ทุกอย่างนี้จริง ๆ

@@ -1,0 +1,378 @@
+---
+title: WebSocket Endpoint
+description: Build realtime/handlers.rs — the GET /ws/boards/:id?token= upgrade, auth-by-query-param, the membership check, and the per-socket tokio::select! loop — plus the Hub registry and AppState field it depends on.
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`realtime/handlers.rs`: `ws_upgrade`, the handler behind `GET /ws/boards/:id?token=<jwt>`, and `handle_socket`, the function it hands each accepted connection off to. `ws_upgrade` runs the same signature-and-expiry-and-allowlist check `AuthUser` runs on every REST request, plus a board membership check, before ever upgrading the connection — a WebSocket to a board you can't read is refused exactly as firmly as a `GET /boards/:id` would be.
+
+Two smaller pieces come with it, both needed just to make `ws_upgrade` compile: `realtime/hub.rs`, with a `Hub` struct holding one `tokio::sync::broadcast::Sender<String>` per board that has at least one live subscriber, and one new field on `AppState`, `hub: Arc<realtime::hub::Hub>`, alongside `db`, `redis`, and `config`. By the end of this lesson, two browser tabs connected to the same board's WebSocket can already see each other's events — as long as both are talking to the *same* backend process. [redis-backplane](/taskflow/en/realtime/redis-backplane/) removes that one remaining limitation.
+
+## Why
+
+`AuthUser`, the `FromRequestParts` extractor from [middleware](/taskflow/en/auth/middleware/), can't be reused here — it exists because Axum runs it before *every* protected handler as a normal HTTP request extractor, but a WebSocket upgrade is a `GET` request with no room for a bearer token the way a REST call has: browsers building a native `WebSocket` object have no API for attaching arbitrary headers to the handshake. `ws_upgrade` inlines the same three checks `AuthUser` runs — signature and expiry via `jwt::verify`, then the Redis allowlist — reading the token from a query parameter instead of a header.
+
+**Query parameter, not header, and why that's a real trade-off.** The browser's `WebSocket` constructor is `new WebSocket(url, protocols?)` — no headers argument exists, full stop. That leaves two realistic options for authenticating a WebSocket handshake from a browser: rely on cookies (which TaskFlow doesn't use — [jwt](/taskflow/en/auth/jwt/) is a bearer token, by design, not a cookie-based session), or put the token somewhere the URL can carry it. A query parameter is the simplest of the URL-carrying options (the alternative, encoding it into the `Sec-WebSocket-Protocol` header via the `protocols` argument, works but is a stranger fit for a value that isn't actually a protocol name). The trade-off is real and worth naming plainly: a token in a URL can end up in server access logs, browser history, and any reverse proxy's request logs — places a header never appears by default. TaskFlow accepts this because the token is the same short-lived (24-hour), individually revocable JWT [jwt](/taskflow/en/auth/jwt/) already built, not a new, more sensitive credential; a production system handling more sensitive data would likely mint a separate, single-use, minute-lived "connect ticket" purpose-built for the WS handshake instead of reusing the general-purpose bearer token, and would make sure `token` is stripped from any access-log line before it's ever written.
+
+`Hub` exists because a `broadcast::Sender` has to live somewhere shared across every WebSocket connection watching the same board — `handle_socket` runs once per connected socket, so per-socket state can't be where a *board's* subscriber list lives. `Hub` is that shared registry, one entry per board, created lazily on the first subscriber and reused by every subsequent one. It only knows about sockets connected to *this* process for now; [redis-backplane](/taskflow/en/realtime/redis-backplane/) is what feeds it events that originated on a different backend instance.
+
+## Pros & cons
+
+**One `broadcast::Sender<String>` per board (what we're using) vs. one single, app-wide `broadcast::Sender<BoardEvent>` every socket filters client-side**
+
+- Pros: a socket watching board A never even receives board B's traffic — `Hub::subscribe(board_id)` hands back a receiver scoped to exactly one board's channel, so there's no per-message `if event.board_id == my_board_id` filter running in every socket's hot loop, and a busy board can't cause a `Lagged` error on a socket watching a completely different, quiet board (each board's channel has its own independent buffer).
+- Cons: `Hub`'s `HashMap<Uuid, Sender>` needs a lock (a `std::sync::Mutex`, briefly held only for the `HashMap` lookup/insert, never across an `.await`) that a single global sender wouldn't need at all. For TaskFlow's scale — dozens to low thousands of concurrently-open boards, not millions — a short-held `std::sync::Mutex` around a `HashMap` entry lookup is not a contention concern; a system with a much larger number of distinct broadcast topics might reach for a sharded map instead, but that's solving a problem this course's scale doesn't have.
+
+## Build it
+
+### 1. `realtime/hub.rs`
+
+Create `taskflow/backend/api/src/realtime/hub.rs`:
+
+```rust
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use tokio::sync::broadcast;
+use uuid::Uuid;
+
+/// How many buffered events a lagging subscriber can fall behind by before
+/// `broadcast::Receiver::recv` starts returning `Lagged` instead of the
+/// oldest unread message.
+const CHANNEL_CAPACITY: usize = 128;
+
+/// The in-process registry of live WebSocket subscribers, one
+/// `broadcast::Sender` per board that currently has at least one socket
+/// watching it.
+pub struct Hub {
+    channels: Mutex<HashMap<Uuid, broadcast::Sender<String>>>,
+}
+
+impl Hub {
+    pub fn new() -> Self {
+        Self {
+            channels: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Registers a new subscriber for `board_id`, creating that board's
+    /// broadcast channel on first use.
+    pub fn subscribe(&self, board_id: Uuid) -> broadcast::Receiver<String> {
+        let mut channels = self.channels.lock().unwrap();
+        let sender = channels
+            .entry(board_id)
+            .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0);
+        sender.subscribe()
+    }
+}
+
+impl Default for Hub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+```
+
+`or_insert_with` only runs the closure — allocating a new `broadcast::channel` — when `board_id` isn't already a key; every subscriber after the first for a given board reuses the same `Sender` and just calls `.subscribe()` on it to get its own independent `Receiver`. `broadcast::channel(128).0` discards the `Receiver` half the constructor also returns — `Hub` only ever needs to hand out receivers via `.subscribe()`, never to read from one itself.
+
+### 2. `realtime/mod.rs`
+
+Create `taskflow/backend/api/src/realtime/mod.rs`:
+
+```rust
+pub mod handlers;
+pub mod hub;
+
+use axum::{routing::get, Router};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::state::AppState;
+
+/// The single message shape published to a board's Redis channel and
+/// forwarded verbatim, as a JSON string, to every WebSocket subscribed to
+/// that board. See `protocol` for the full event-type catalog.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BoardEvent {
+    pub r#type: String,
+    #[serde(rename = "boardId")]
+    pub board_id: Uuid,
+    pub payload: serde_json::Value,
+}
+
+pub fn routes() -> Router<AppState> {
+    Router::new().route("/ws/boards/:id", get(handlers::ws_upgrade))
+}
+```
+
+This is the exact `BoardEvent` shape from [protocol](/taskflow/en/realtime/protocol/), now placed in real code. Nothing constructs one yet — that's `realtime::publish`, built in [redis-backplane](/taskflow/en/realtime/redis-backplane/) — so expect a `dead_code` warning on `BoardEvent` after this lesson, the same way `jwt::issue`/`jwt::verify` sat unused for one lesson back in [jwt](/taskflow/en/auth/jwt/).
+
+### 3. `realtime/handlers.rs`
+
+Create `taskflow/backend/api/src/realtime/handlers.rs`:
+
+```rust
+use axum::{
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
+    response::Response,
+};
+use deadpool_redis::redis::AsyncCommands;
+use serde::Deserialize;
+use tokio::sync::broadcast;
+use uuid::Uuid;
+
+use crate::{
+    auth::jwt,
+    boards::service as boards_service,
+    error::{AppError, AppResult},
+    state::AppState,
+};
+
+#[derive(Debug, Deserialize)]
+pub struct WsAuthQuery {
+    pub token: String,
+}
+
+/// `GET /ws/boards/:id?token=<jwt>` — upgrades to a WebSocket after the
+/// same three checks `AuthUser` runs on every REST request (signature,
+/// expiry, Redis allowlist), plus board membership.
+pub async fn ws_upgrade(
+    State(state): State<AppState>,
+    Path(board_id): Path<Uuid>,
+    Query(query): Query<WsAuthQuery>,
+    ws: WebSocketUpgrade,
+) -> AppResult<Response> {
+    let claims =
+        jwt::verify(&query.token, &state.config.jwt_secret).map_err(|_| AppError::Unauthorized)?;
+
+    let mut conn = state
+        .redis
+        .get()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    let session: Option<String> = conn
+        .get(format!("auth:token:{}", claims.jti))
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    if session.is_none() {
+        return Err(AppError::Unauthorized);
+    }
+
+    let user_id = claims
+        .sub
+        .parse::<Uuid>()
+        .map_err(|_| AppError::Unauthorized)?;
+
+    boards_service::assert_member(&state.db, user_id, board_id).await?;
+
+    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, board_id)))
+}
+
+async fn handle_socket(mut socket: WebSocket, state: AppState, board_id: Uuid) {
+    let mut rx = state.hub.subscribe(board_id);
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                match event {
+                    Ok(json) => {
+                        if socket.send(Message::Text(json)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return;
+                    }
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => {
+                        return;
+                    }
+                    Some(Ok(_)) => {
+                        // Text/Binary/Ping/Pong from the client — this
+                        // socket is read-only from the client's point of
+                        // view, so there's nothing to act on except noting
+                        // the connection is still alive.
+                    }
+                    Some(Err(_)) => {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+Walking through `ws_upgrade` in order — it's the same shape as `AuthUser::from_request_parts` from [middleware](/taskflow/en/auth/middleware/), plus one extra step:
+
+1. **Verify the JWT** from the `token` query parameter, exactly like `AuthUser` verifies the `Authorization` header's bearer token.
+2. **Check the Redis allowlist** (`auth:token:{jti}`) — a token that's been revoked (logout, or a future admin action) is rejected here too, not just on REST calls.
+3. **Parse `sub` into a `Uuid`** — the authenticated user's id.
+4. **Check board membership** with `boards_service::assert_member` — the same function every REST handler in [rest-api](/taskflow/en/rest-api/design/) already calls. A valid, non-revoked token for a user who isn't on this board still gets rejected.
+5. **Upgrade**, handing the now-established `WebSocket` to `handle_socket` along with a clone of `state` (cheap — `AppState` is `Arc`-backed throughout) and `board_id`.
+
+`handle_socket`'s `tokio::select!` races two futures on every iteration of its loop:
+
+- **`rx.recv()`** — the next event `Hub::subscribe` will ever deliver for this board. A successful receive is forwarded to the client as a `Message::Text`. `RecvError::Lagged` (this socket fell more than `CHANNEL_CAPACITY` messages behind) is *not* fatal — `continue` just picks up the next available message; a socket lagging behind by 128 rapid-fire events on a very busy board loses some intermediate states but keeps running, and [reconnect](/taskflow/en/realtime/reconnect/) covers why that's an acceptable, self-healing gap rather than a bug to eliminate. `RecvError::Closed` (every `Sender` for this channel has been dropped) ends the loop — it can't happen in this module's current design, since `Hub` itself always holds the `Sender`, but the match has to be exhaustive.
+- **`socket.recv()`** — anything the client sends. A `Close` frame or a closed connection (`None`) ends the loop. Anything else (`Text`, `Binary`, `Ping`, `Pong`) is currently a no-op: this socket is push-only from the server's side, so there's nothing for the client to tell it — receiving *anything* is enough to know the connection is still alive. A transport-level error ends the loop.
+
+Returning from `handle_socket` — from any branch — drops `rx`, decrementing that board's `Sender`'s receiver count. There's no separate cleanup step to write: a dropped `broadcast::Receiver` is the entire deregistration.
+
+### 4. `state.rs` — add `hub`
+
+Update `taskflow/backend/api/src/state.rs`:
+
+```rust
+#[derive(Clone)]
+pub struct AppState {
+    pub db: sqlx::PgPool,
+    pub redis: deadpool_redis::Pool,
+    pub config: std::sync::Arc<crate::config::Config>,
+    pub hub: std::sync::Arc<crate::realtime::hub::Hub>,
+}
+```
+
+### 5. Wire it up in `main.rs`
+
+```rust
+mod auth;
+mod boards;
+mod cache;
+mod cards;
+mod columns;
+mod config;
+mod db;
+mod error;
+mod labels;
+mod middleware;
+mod realtime;
+mod state;
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use config::Config;
+use middleware::rate_limit::rate_limit;
+use state::AppState;
+use tower_http::cors::CorsLayer;
+use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let config = Config::from_env()?;
+
+    let db = db::create_pg_pool(&config.database_url).await?;
+    let redis = db::create_redis_pool(&config.redis_url)?;
+
+    let state = AppState {
+        db,
+        redis,
+        config: Arc::new(config),
+        hub: Arc::new(realtime::hub::Hub::new()),
+    };
+
+    let cors = CorsLayer::new().allow_origin(
+        state
+            .config
+            .frontend_origin
+            .parse::<axum::http::HeaderValue>()
+            .expect("FRONTEND_ORIGIN must be a valid header value"),
+    );
+
+    let app_port = state.config.app_port;
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .nest(
+            "/auth",
+            auth::routes().route_layer(from_fn_with_state(state.clone(), rate_limit)),
+        )
+        .merge(boards::routes())
+        .merge(columns::routes())
+        .merge(cards::routes())
+        .merge(labels::routes())
+        .merge(realtime::routes())
+        .layer(cors)
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{app_port}")).await?;
+    tracing::info!("listening on {}", listener.local_addr()?);
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+```
+
+Three changes from [rate-limit](/taskflow/en/caching/rate-limit/)'s version: `mod realtime;` is a new module declaration, `AppState`'s literal gets a `hub: Arc::new(realtime::hub::Hub::new())` field, and `.merge(realtime::routes())` adds the new `/ws/boards/:id` route to the same `Router` every other resource module merges into.
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+Bring up the stack, get a token and a board (reusing the pattern from earlier modules), and connect with a WebSocket client — [`websocat`](https://github.com/vi/websocat) is a convenient CLI one:
+
+```bash
+cd taskflow/infra && docker compose up -d db redis
+cd ../backend && cargo run -p api &
+
+TOKEN=$(curl -s -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"correct horse battery staple","display_name":"Ada"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
+BOARD_ID=$(curl -s -X POST http://localhost:8080/boards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Sprint 12"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+websocat "ws://localhost:8080/ws/boards/$BOARD_ID?token=$TOKEN"
+```
+
+The connection stays open — a valid token for a board you're a member of upgrades successfully and then simply waits, since nothing publishes an event yet. Confirm the rejection paths too, each closing the handshake instead of upgrading:
+
+```bash
+# Bad token
+websocat "ws://localhost:8080/ws/boards/$BOARD_ID?token=not-a-real-token"
+
+# Valid token, board you're not a member of
+OTHER_BOARD=$(curl -s -X POST http://localhost:8080/boards \
+  -H "Authorization: Bearer $OTHER_TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Not yours"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+websocat "ws://localhost:8080/ws/boards/$OTHER_BOARD?token=$TOKEN"
+```
+
+Both close immediately with no successful upgrade. With two terminals both running the first `websocat` command against the same `$BOARD_ID`, either one closing (Ctrl-C) leaves the other connected and unaffected — confirming `Hub` tracks subscribers independently per socket, not per board-as-a-whole.
+
+## Recap
+
+You built `realtime/hub.rs`'s `Hub` registry — one `broadcast::Sender<String>` per board, created lazily — and `realtime/handlers.rs`'s `ws_upgrade` handler, which runs the exact same signature/expiry/allowlist checks `AuthUser` runs on REST calls, reading the token from a query parameter instead of a header because a browser's `WebSocket` constructor has no way to set one, plus a board membership check before ever upgrading. `handle_socket`'s `tokio::select!` loop races incoming broadcast events against incoming client frames, forwarding the former and watching the latter only for disconnect signals. Two sockets on the same backend process, watching the same board, can already reach each other through `Hub` — but nothing publishes an event into it yet, and a second backend process would have its own, entirely separate `Hub` with no way to hear about the first one's traffic. [redis-backplane](/taskflow/en/realtime/redis-backplane/) builds both: the `publish` call every mutation makes, and the Redis-fed background task that makes `Hub` instances on different processes agree.

@@ -1,0 +1,643 @@
+---
+title: Redis Backplane
+description: Extend hub.rs with a PSUBSCRIBE board:* subscriber task and add realtime::publish, wiring it into move_card and every other Module-5 mutation, so events reach sockets on every backend instance, not just the one that handled the write.
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+Two additions to `realtime/hub.rs` — `Hub::route`, a private method that feeds a message into the right board's local channel, and `run_subscriber`, a function spawned once at startup that holds one dedicated Redis connection, `PSUBSCRIBE`s to `board:*`, and calls `route` for every message that arrives. One addition to `realtime/mod.rs` — `publish`, the function every mutation calls to broadcast what it just did. And one new dependency, `futures-util`, needed for the `Stream` this lesson's subscriber loop consumes.
+
+Then the payoff: `realtime::publish` gets wired into `move_card` — replacing the `// Module 7 wires realtime broadcast of card.moved here` comment [move-reorder](/taskflow/en/rest-api/move-reorder/) left two modules ago — and into every other card and column mutation that has a matching event type in [protocol](/taskflow/en/realtime/protocol/)'s catalog.
+
+## Why
+
+[ws-endpoint](/taskflow/en/realtime/ws-endpoint/) left one gap open on purpose: `Hub` only knows about sockets connected to the *same process* that's running it. Run `cargo run -p api` twice on two different ports (or, in production, run two instances behind a load balancer) and you have two completely independent `Hub`s, each with its own `HashMap` of boards and senders, sharing nothing. A card move handled by instance A has no way to reach a socket that happened to connect to instance B — even though both sockets are watching the exact same board.
+
+This is the reason a **backplane** exists at all: something both instances already share, that isn't in-process memory. TaskFlow already has exactly one thing every backend instance connects to independently of the others — Redis — and Redis pub/sub is built for precisely this shape of problem: a `PUBLISH` from any client reaches every currently-subscribed client, with no awareness of which process either one is. `publish` is the "any instance, any request" side of that; `run_subscriber` is the "every instance, all the time" side. Together, a card moved by a request instance A happened to handle reaches a socket connected to instance B in exactly the same way it reaches a socket connected to instance A itself — `run_subscriber` doesn't special-case "did this event originate on my own process," because from Redis's point of view there's no such thing as "my own" `PUBLISH`; every subscriber, including the instance that published it, receives every message on a pattern it's subscribed to.
+
+A single `PSUBSCRIBE board:*`, not one `SUBSCRIBE board:{id}` per active board, is the other deliberate choice here. Every board that has ever had a socket connect to any instance is invisibly covered by the one pattern subscription from the moment the process starts — there's no "first subscriber to a board triggers a new Redis `SUBSCRIBE`" bookkeeping to get right, and no risk of a race between a socket connecting and a `SUBSCRIBE` call it depends on not having completed yet. The cost is that `run_subscriber` receives *every* board's traffic on *every* instance, whether or not that instance currently has any socket watching that particular board — `Hub::route` is where that filtering actually happens, cheaply, as a `HashMap` lookup that's a no-op when nobody local is listening.
+
+## Pros & cons
+
+**A single `PSUBSCRIBE board:*` background task (what we're using) vs. `SUBSCRIBE`/`UNSUBSCRIBE` per board as sockets connect and disconnect**
+
+- Pros: one Redis connection, opened once at startup, for the entire process's lifetime — no connection churn, no per-board subscribe/unsubscribe bookkeeping to keep in sync with `Hub`'s own `HashMap`, and no window where a socket connects to a board a fraction of a second before that board's `SUBSCRIBE` call has actually completed against Redis (in which case an event published in that gap would be silently missed).
+- Cons: every instance receives every board's Redis traffic regardless of local demand, which is genuinely wasted work for a board nobody on that instance is watching — for TaskFlow's scale (a course-sized app, not a system fanning out millions of distinct high-frequency topics) that overhead is a `HashMap::get` per message, not a meaningful cost. A system with an enormous number of rarely-overlapping topics might reach for dynamic per-topic `SUBSCRIBE` despite the added bookkeeping, to avoid paying for traffic that has zero local subscribers; TaskFlow's boards don't reach the scale where that trade flips.
+
+**Publishing from every mutation via a shared `AppState`-based `publish` function (what we're using) vs. a message queue (e.g., a Redis Stream or a dedicated job queue) between the write and the broadcast**
+
+- Pros: `realtime::publish` is a direct, synchronous-from-the-caller's-perspective function call, right next to the `cache::invalidate` call [invalidation](/taskflow/en/caching/invalidation/) already added to the same functions — one more `.await?` in an already-`async` request-handling path, no separate consumer process, no queue infrastructure to run, monitor, or reason about ordering guarantees for. A card move's broadcast happens within the same request that persisted the move, using a Redis connection the request already had reason to hold.
+- Cons: if the `PUBLISH` call itself fails (a momentary Redis blip), `realtime::publish` returns `Err`, and because it's called with `?` right after `cache::invalidate`, the whole request fails with `500` even though the underlying write to Postgres already committed successfully — a client could see an error for a mutation that, in fact, took effect. A queue-based design could decouple "did the write succeed" from "did the broadcast succeed," retrying the broadcast independently. TaskFlow accepts the coupling: a `PUBLISH` failing means only that *this one event* isn't broadcast live — a reconnecting or newly-loading client still sees the change correctly via the ordinary `GET /boards/:id`, which reads from cache-or-Postgres, not from any broadcast history. The realtime layer is a live-update convenience layered over a REST API that's independently correct; it was never the source of truth.
+
+## Build it
+
+### 1. Add the `futures-util` dependency
+
+```bash
+cd taskflow/backend
+cargo add futures-util -p api
+```
+
+This adds `futures-util = "0.3"` under `[dependencies]` in `api/Cargo.toml` — needed for the `StreamExt` trait, which turns the raw Redis pub/sub connection into something `run_subscriber`'s loop can `.next().await` on.
+
+### 2. `realtime/hub.rs` — add `route` and `run_subscriber`
+
+Update `taskflow/backend/api/src/realtime/hub.rs`:
+
+```rust
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use futures_util::StreamExt;
+use tokio::sync::broadcast;
+use uuid::Uuid;
+
+/// How many buffered events a lagging subscriber can fall behind by before
+/// `broadcast::Receiver::recv` starts returning `Lagged` instead of the
+/// oldest unread message.
+const CHANNEL_CAPACITY: usize = 128;
+
+/// The in-process registry of live WebSocket subscribers, one
+/// `broadcast::Sender` per board that currently has at least one socket
+/// watching it.
+pub struct Hub {
+    channels: Mutex<HashMap<Uuid, broadcast::Sender<String>>>,
+}
+
+impl Hub {
+    pub fn new() -> Self {
+        Self {
+            channels: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Registers a new subscriber for `board_id`, creating that board's
+    /// broadcast channel on first use.
+    pub fn subscribe(&self, board_id: Uuid) -> broadcast::Receiver<String> {
+        let mut channels = self.channels.lock().unwrap();
+        let sender = channels
+            .entry(board_id)
+            .or_insert_with(|| broadcast::channel(CHANNEL_CAPACITY).0);
+        sender.subscribe()
+    }
+
+    /// Routes a message that arrived over the Redis backplane into the
+    /// matching board's local broadcast channel, if anyone's currently
+    /// listening for it.
+    fn route(&self, board_id: Uuid, payload: String) {
+        let channels = self.channels.lock().unwrap();
+        if let Some(sender) = channels.get(&board_id) {
+            // `send` returns `Err` when there are no receivers — that's not
+            // a failure, it just means nobody on *this* instance is
+            // watching this board right now.
+            let _ = sender.send(payload);
+        }
+    }
+}
+
+impl Default for Hub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Spawned once at startup. Holds a single dedicated Redis connection,
+/// `PSUBSCRIBE`s to every board's channel with one pattern, and routes each
+/// incoming message into the matching board's `Hub` entry.
+pub async fn run_subscriber(hub: Arc<Hub>, redis_url: String) -> anyhow::Result<()> {
+    let client = redis::Client::open(redis_url)?;
+    let mut pubsub = client.get_async_pubsub().await?;
+    pubsub.psubscribe("board:*").await?;
+
+    let mut messages = pubsub.on_message();
+    while let Some(msg) = messages.next().await {
+        let channel = msg.get_channel_name();
+        let Some(id) = channel.strip_prefix("board:") else {
+            continue;
+        };
+        let Ok(board_id) = id.parse::<Uuid>() else {
+            continue;
+        };
+        let Ok(payload) = msg.get_payload::<String>() else {
+            continue;
+        };
+
+        hub.route(board_id, payload);
+    }
+
+    Ok(())
+}
+```
+
+Walking through `run_subscriber`:
+
+1. **`redis::Client::open(redis_url)`** — a plain `redis::Client`, not `deadpool_redis::Pool`. This connection is dedicated and long-lived for the entire life of the process, never returned to a pool, so pooling machinery would only add overhead here with nothing to pool.
+2. **`client.get_async_pubsub().await?`** — opens a connection specifically for pub/sub use, returning a `PubSub` value that can subscribe to channels and stream incoming messages.
+3. **`pubsub.psubscribe("board:*").await?`** — the one pattern subscription, made once, that implicitly covers every board's channel for the rest of this task's lifetime.
+4. **`pubsub.on_message()`** — turns the connection into a `Stream` of incoming `Msg`s; `StreamExt::next()` (from `futures_util`, this lesson's new dependency) is what lets the `while let` loop pull from it.
+5. **Per message**: `get_channel_name()` returns the full channel a message arrived on (e.g., `board:3fa8...`); `strip_prefix("board:")` recovers just the id portion, and a channel that somehow doesn't match the pattern (shouldn't happen, given `PSUBSCRIBE board:*`, but the `let else` guards it defensively) is skipped rather than panicking. `get_payload::<String>()` reads the message body — the JSON string `publish` built — and a failed parse is likewise skipped, not fatal to the whole subscriber loop.
+6. **`hub.route(board_id, payload)`** — hands the message to `Hub`, which either forwards it to this process's local sockets watching that board, or silently does nothing if there are none.
+
+`route` is `fn`, not `pub fn` — it's only ever called from within this same file, by `run_subscriber`, so there's no reason to widen its visibility past the module boundary.
+
+### 3. `realtime/mod.rs` — add `publish`
+
+Update `taskflow/backend/api/src/realtime/mod.rs`:
+
+```rust
+pub mod handlers;
+pub mod hub;
+
+use axum::{routing::get, Router};
+use deadpool_redis::redis::AsyncCommands;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{
+    error::{AppError, AppResult},
+    state::AppState,
+};
+
+/// The single message shape published to a board's Redis channel and
+/// forwarded verbatim, as a JSON string, to every WebSocket subscribed to
+/// that board. See `protocol` for the full event-type catalog.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BoardEvent {
+    pub r#type: String,
+    #[serde(rename = "boardId")]
+    pub board_id: Uuid,
+    pub payload: serde_json::Value,
+}
+
+pub fn routes() -> Router<AppState> {
+    Router::new().route("/ws/boards/:id", get(handlers::ws_upgrade))
+}
+
+/// Builds a `BoardEvent`, serializes it to JSON, and `PUBLISH`es it to
+/// `board:{board_id}` — the one function every mutation in this course
+/// calls, right after persisting and invalidating the cache, to broadcast
+/// what just changed.
+pub async fn publish(
+    state: &AppState,
+    board_id: Uuid,
+    event_type: &str,
+    payload: serde_json::Value,
+) -> AppResult<()> {
+    let event = BoardEvent {
+        r#type: event_type.to_string(),
+        board_id,
+        payload,
+    };
+
+    let json = serde_json::to_string(&event).map_err(|err| AppError::Internal(err.into()))?;
+
+    let mut conn = state
+        .redis
+        .get()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    conn.publish::<_, _, ()>(format!("board:{board_id}"), json)
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    Ok(())
+}
+```
+
+`publish` reaches into `state.redis` — the same `deadpool_redis::Pool` `cache.rs` already uses — rather than the dedicated connection `run_subscriber` holds; a `PUBLISH` is a normal, one-shot command that fits the request-scoped pooled-connection pattern every other Redis write in this course already follows, unlike the long-lived subscription `run_subscriber` needs. `conn.publish::<_, _, ()>(...)` uses the same discarded-return-type turbofish `cache.rs`'s `set_ex`/`del` already established — `PUBLISH` replies with the number of clients that received the message, a value this function has no use for.
+
+### 4. Wire `publish` into `cards/service.rs`
+
+Update `taskflow/backend/api/src/cards/service.rs` — it needs `crate::realtime` imported at the top of the file too:
+
+```rust
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::{
+    boards::service as boards_service,
+    cache, columns,
+    error::{AppError, AppResult},
+    realtime,
+    state::AppState,
+};
+
+use super::model::Card;
+use super::repo;
+
+pub async fn create_card(
+    state: &AppState,
+    user_id: Uuid,
+    column_id: Uuid,
+    title: String,
+    description: Option<String>,
+) -> AppResult<Card> {
+    let db = &state.db;
+
+    let column = columns::repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    let position = repo::max_position(db, column_id).await?.unwrap_or(0.0) + 1.0;
+    let card = repo::insert_card(
+        db,
+        Uuid::new_v4(),
+        column_id,
+        &title,
+        description.as_deref(),
+        position,
+    )
+    .await?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{}", column.board_id)).await?;
+
+    realtime::publish(
+        state,
+        column.board_id,
+        "card.created",
+        serde_json::json!({ "columnId": column_id, "card": card }),
+    )
+    .await?;
+
+    Ok(card)
+}
+
+async fn card_board_id(db: &PgPool, card: &Card) -> AppResult<Uuid> {
+    let column = columns::repo::find_column(db, card.column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(column.board_id)
+}
+
+pub async fn get_card(db: &PgPool, user_id: Uuid, card_id: Uuid) -> AppResult<Card> {
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    Ok(card)
+}
+
+pub async fn update_card(
+    state: &AppState,
+    user_id: Uuid,
+    card_id: Uuid,
+    title: Option<String>,
+    description: Option<String>,
+) -> AppResult<Card> {
+    let db = &state.db;
+
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    let updated = repo::update_card(db, card_id, title.as_deref(), description.as_deref())
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+
+    realtime::publish(
+        state,
+        board_id,
+        "card.updated",
+        serde_json::json!({ "card": updated }),
+    )
+    .await?;
+
+    Ok(updated)
+}
+
+pub async fn delete_card(state: &AppState, user_id: Uuid, card_id: Uuid) -> AppResult<()> {
+    let db = &state.db;
+
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    if repo::delete_card(db, card_id).await? {
+        cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+
+        realtime::publish(
+            state,
+            board_id,
+            "card.deleted",
+            serde_json::json!({ "cardId": card_id, "columnId": card.column_id }),
+        )
+        .await?;
+
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+pub async fn move_card(
+    state: &AppState,
+    user_id: Uuid,
+    card_id: Uuid,
+    target_column_id: Uuid,
+    before_id: Option<Uuid>,
+    after_id: Option<Uuid>,
+) -> AppResult<Card> {
+    let db = &state.db;
+
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let source_board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, source_board_id).await?;
+
+    let target_column = columns::repo::find_column(db, target_column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if target_column.board_id != source_board_id {
+        return Err(AppError::Forbidden);
+    }
+
+    let before = match before_id {
+        Some(id) => Some(repo::find_card(db, id).await?.ok_or(AppError::NotFound)?),
+        None => None,
+    };
+    let after = match after_id {
+        Some(id) => Some(repo::find_card(db, id).await?.ok_or(AppError::NotFound)?),
+        None => None,
+    };
+
+    let position = match (&before, &after) {
+        (Some(before), Some(after)) => (before.position + after.position) / 2.0,
+        (Some(before), None) => before.position + 1.0,
+        (None, Some(after)) => after.position - 1.0,
+        (None, None) => 1.0,
+    };
+
+    let updated = repo::move_card(db, card_id, target_column_id, position)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{source_board_id}")).await?;
+
+    realtime::publish(
+        state,
+        source_board_id,
+        "card.moved",
+        serde_json::json!({ "card": updated }),
+    )
+    .await?;
+
+    Ok(updated)
+}
+```
+
+`move_card`'s `realtime::publish` call replaces the `// Module 7 wires realtime broadcast of card.moved here` comment [move-reorder](/taskflow/en/rest-api/move-reorder/) left in its exact place — the one deliberate `&AppState` signature that lesson called out two modules in advance is now finally used for the reason it was added.
+
+`delete_card` reads `card.column_id` for its event payload *before* the `if repo::delete_card(...)?` branch — `card` was already fetched and authorized at the top of the function, so its fields are still valid Rust values describing the row that's about to be gone, even once the `DELETE` has actually run.
+
+### 5. Wire `publish` into `columns/service.rs`
+
+Update `taskflow/backend/api/src/columns/service.rs` — it needs `crate::realtime` imported too:
+
+```rust
+use uuid::Uuid;
+
+use crate::{
+    boards::service as boards_service,
+    cache,
+    error::{AppError, AppResult},
+    realtime,
+    state::AppState,
+};
+
+use super::model::Column;
+use super::repo;
+
+pub async fn create_column(
+    state: &AppState,
+    user_id: Uuid,
+    board_id: Uuid,
+    title: String,
+) -> AppResult<Column> {
+    let db = &state.db;
+
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    let position = repo::max_position(db, board_id).await?.unwrap_or(0.0) + 1.0;
+    let column = repo::insert_column(db, Uuid::new_v4(), board_id, &title, position).await?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+
+    realtime::publish(
+        state,
+        board_id,
+        "column.created",
+        serde_json::json!({ "column": column }),
+    )
+    .await?;
+
+    Ok(column)
+}
+
+pub async fn update_column(
+    state: &AppState,
+    user_id: Uuid,
+    column_id: Uuid,
+    title: String,
+) -> AppResult<Column> {
+    let db = &state.db;
+
+    let column = repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    let updated = repo::update_title(db, column_id, &title)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{}", column.board_id)).await?;
+
+    realtime::publish(
+        state,
+        column.board_id,
+        "column.updated",
+        serde_json::json!({ "column": updated }),
+    )
+    .await?;
+
+    Ok(updated)
+}
+
+pub async fn delete_column(state: &AppState, user_id: Uuid, column_id: Uuid) -> AppResult<()> {
+    let db = &state.db;
+
+    let column = repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    if repo::delete_column(db, column_id).await? {
+        cache::invalidate(&state.redis, &format!("cache:board:{}", column.board_id)).await?;
+
+        realtime::publish(
+            state,
+            column.board_id,
+            "column.deleted",
+            serde_json::json!({ "columnId": column_id }),
+        )
+        .await?;
+
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+**`update_board` and `attach_label`/`detach_label` are deliberately *not* wired to `realtime::publish`, and that's worth calling out explicitly, the same way [invalidation](/taskflow/en/caching/invalidation/) explained why `create_board`/`delete_board`/`create_label`/`delete_label` were excluded from cache invalidation.** [protocol](/taskflow/en/realtime/protocol/)'s event catalog has no `board.updated` or `label.*` entry — every event type that exists corresponds to a card or column change, because those are the two things a Kanban board's live view actually redraws in place. Inventing a new event type to cover board renames or label changes is a real, reasonable next step for a future lesson (a `board.updated` broadcast so a renamed board's title updates live in every open tab, mirroring the same defensive-inclusion reasoning [invalidation](/taskflow/en/caching/invalidation/) used for `attach_label`/`detach_label`'s cache invalidation) — but adding it here, without a corresponding entry in this lesson's own canonical catalog, would mean a client-side event handler receiving a `type` it was never told to expect. This module ships exactly the seven event types [protocol](/taskflow/en/realtime/protocol/) named, no more.
+
+### 6. Spawn the subscriber in `main.rs`
+
+```rust
+mod auth;
+mod boards;
+mod cache;
+mod cards;
+mod columns;
+mod config;
+mod db;
+mod error;
+mod labels;
+mod middleware;
+mod realtime;
+mod state;
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use config::Config;
+use middleware::rate_limit::rate_limit;
+use realtime::hub::Hub;
+use state::AppState;
+use tower_http::cors::CorsLayer;
+use tracing_subscriber::EnvFilter;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
+
+    let config = Config::from_env()?;
+
+    let db = db::create_pg_pool(&config.database_url).await?;
+    let redis = db::create_redis_pool(&config.redis_url)?;
+    let hub = Arc::new(Hub::new());
+
+    let state = AppState {
+        db,
+        redis,
+        config: Arc::new(config),
+        hub: hub.clone(),
+    };
+
+    tokio::spawn({
+        let hub = hub.clone();
+        let redis_url = state.config.redis_url.clone();
+        async move {
+            if let Err(err) = realtime::hub::run_subscriber(hub, redis_url).await {
+                tracing::error!(error = %err, "realtime redis subscriber exited");
+            }
+        }
+    });
+
+    let cors = CorsLayer::new().allow_origin(
+        state
+            .config
+            .frontend_origin
+            .parse::<axum::http::HeaderValue>()
+            .expect("FRONTEND_ORIGIN must be a valid header value"),
+    );
+
+    let app_port = state.config.app_port;
+
+    let app = Router::new()
+        .route("/health", get(health))
+        .nest(
+            "/auth",
+            auth::routes().route_layer(from_fn_with_state(state.clone(), rate_limit)),
+        )
+        .merge(boards::routes())
+        .merge(columns::routes())
+        .merge(cards::routes())
+        .merge(labels::routes())
+        .merge(realtime::routes())
+        .layer(cors)
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{app_port}")).await?;
+    tracing::info!("listening on {}", listener.local_addr()?);
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+```
+
+Two changes from [ws-endpoint](/taskflow/en/realtime/ws-endpoint/)'s version: `hub` is pulled out into its own `let hub = Arc::new(Hub::new());` binding — instead of being constructed inline inside the `AppState` literal — specifically so both `state.hub` and the spawned task below can share the same `Arc` via `.clone()` (an `Arc` clone, not a `Hub` clone — cheap, and both handles point at the identical registry). And a `tokio::spawn` block runs `run_subscriber` for the lifetime of the process, logging (via `tracing::error!`) rather than crashing the whole server if the Redis subscriber ever exits with an error — a realtime outage degrades to "live updates stop arriving," not "the API goes down," consistent with the Pros & cons discussion above about `publish` failures not blocking the underlying write.
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+Bring up the stack, connect a `websocat` client to a board (reusing [ws-endpoint](/taskflow/en/realtime/ws-endpoint/)'s `$TOKEN`/`$BOARD_ID`), and — from a second terminal — make a mutation:
+
+```bash
+cd taskflow/infra && docker compose up -d db redis
+cd ../backend && cargo run -p api &
+
+websocat "ws://localhost:8080/ws/boards/$BOARD_ID?token=$TOKEN" &
+sleep 1
+
+curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"To Do"}' > /dev/null
+```
+
+The `websocat` terminal prints the event the moment the `curl` request completes:
+
+```json
+{"type":"column.created","boardId":"...","payload":{"column":{"id":"...","boardId":"...","title":"To Do","position":1.0}}}
+```
+
+To see the backplane itself do real work — not just the in-process `Hub` [ws-endpoint](/taskflow/en/realtime/ws-endpoint/) already proved — simulate a second backend instance by publishing directly to Redis, bypassing the API process entirely:
+
+```bash
+docker compose exec redis redis-cli PUBLISH "board:$BOARD_ID" \
+  '{"type":"card.updated","boardId":"'"$BOARD_ID"'","payload":{"card":{"id":"simulated"}}}'
+```
+
+The same `websocat` connection prints that event too — `run_subscriber`'s `PSUBSCRIBE board:*` doesn't distinguish a message published by this course's own `api` process from one published by any other client speaking the same protocol, which is exactly the property that makes it work identically whether that other publisher is a second `cargo run -p api` instance or, here, `redis-cli` standing in for one.
+
+## Recap
+
+You extended `hub.rs` with `run_subscriber` — one dedicated Redis connection, one `PSUBSCRIBE board:*`, routing every incoming message into whichever local board channel matches — and added `realtime::publish` to `mod.rs`, the function that builds a `BoardEvent`, serializes it, and `PUBLISH`es it to `board:{board_id}`. You wired `publish` into `move_card` (closing the two-module-old TODO from [move-reorder](/taskflow/en/rest-api/move-reorder/)) and into six other card/column mutations, matching [protocol](/taskflow/en/realtime/protocol/)'s catalog exactly — and explained why `update_board` and the label mutations are deliberately left out for now. You saw why a single `PSUBSCRIBE board:*` pattern beats per-board `SUBSCRIBE`/`UNSUBSCRIBE` bookkeeping, and confirmed the backplane actually closes the cross-instance gap by publishing directly to Redis and watching the same effect a second `api` process would have produced. That's realtime updates working end to end, on any number of backend instances. Next, [reconnect](/taskflow/en/realtime/reconnect/) hardens the socket loop itself — detecting a connection that's died without a clean close, and defining what a client does the moment it reconnects after missing some window of events entirely.
