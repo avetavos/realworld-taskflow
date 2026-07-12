@@ -1,0 +1,97 @@
+---
+title: Board Page & Mounting the Island
+description: สร้าง frontend/src/pages/boards/[id].astro — การตัดสินใจเรื่อง prerender=false ว่าทำไมต้องใช้ adapter, การ mount <Board client:only="preact">, และทำไม client:only ถึงดีกว่า client:load (รวมถึงดีกว่าการเดา client:visible ของ Module 1) สำหรับหน้าที่ auth-gated และขับเคลื่อนด้วยข้อมูล
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`frontend/src/pages/boards/[id].astro` — หน้าที่ [boards-list](/taskflow/th/frontend/boards-list/) link ไปหาอยู่แล้ว และ 404 มาตลอดจนถึงตอนนี้ ไฟล์เดียวนี้ทำสองงาน: ตัดสินใจว่า Astro จะเสิร์ฟ board id ที่ไม่รู้ล่วงหน้าได้อย่างไรบน route ที่ static site นี้ไม่เคยรู้จักตอน build time และ mount Preact island เดียวที่ frontend ทั้งหมดนี้ต้องการ — `Board` component ที่ [drag-drop](/taskflow/th/kanban-island/drag-drop/) จะสร้างต่อไป
+
+ไม่มีอะไรเกี่ยวกับ column, card, drag-and-drop, หรือการต่อ WebSocket อยู่ในบทนี้เลย บทนี้เป็นเรื่องของการเอา `boardId` จาก URL ไปให้ `<Board boardId={id} client:only="preact" />` อย่างปลอดภัยและถูกต้อง — ปัญหาเรื่อง routing ไม่ใช่ตัวบอร์ดเอง
+
+## Why
+
+ทุกหน้าอื่นที่ frontend นี้สร้างมาเป็นเรื่อง routing ที่ไม่มีอะไรซับซ้อน: `index.astro` คือ `/`, `login.astro` คือ `/login` ทั้งคู่รู้ครบตั้งแต่ตอน `astro build` รัน `/boards/:id` ต่างออกไป — ประเด็นทั้งหมดของ dynamic segment คือ `id` ไม่ใช่หนึ่งในค่าที่รู้ล่วงหน้าไม่กี่ค่า แต่เป็นอะไรก็ตามที่ `POST /boards` ([boards](/taskflow/th/rest-api/boards/)) สร้างเป็น UUID ไว้ ณ เวลาใดเวลาหนึ่งในอดีต ให้ user คนใดคนหนึ่ง บนบอร์ดที่ build นี้ไม่เคยรู้จักมาก่อน `getStaticPaths()` เครื่องมือที่ static output ของ Astro ใช้ปกติสำหรับแจกแจงชุด page ที่จำกัดของ dynamic route ล่วงหน้า ไม่มีอะไรให้แจกแจงตรงนี้ — ไม่มี list ของ board id ที่มีขอบเขตจำกัดให้ส่งเข้าไป
+
+## Pros & cons
+
+**`export const prerender = false` — route แบบ server-rendered on-demand (ตัวที่เราใช้) เทียบกับ static shell เดียว + parse URL ฝั่ง client**
+
+- ข้อดี: `Astro.params.id` ถูกต้องเสมอในทุก request แบบเดียวกับ dynamic route จริงใน server-rendered framework ไหนก็ตาม — ไม่ต้องคิดเรื่อง `getStaticPaths` placeholder ไม่ต้องตั้ง host-level rewrite rule แยกต่างหาก และ request ไปยัง route ที่แอปนี้ไม่ได้รองรับจริง ๆ (`/boards/` ที่ไม่มี id, path ที่ผิดรูปแบบ) ก็ยังได้ 404 handling ปกติของ Astro เอง แทนที่จะเสิร์ฟไฟล์ static เดียวกันให้ทุกอย่างอย่างเงียบ ๆ มันคือ route เดียวที่ถอนตัวออกจากแผน "static เป็นหลัก" ที่ [frontend-init](/taskflow/th/setup/frontend-init/) วางไว้ — ทุกหน้าอื่นใน frontend นี้ยังคง static เต็มรูปแบบ ไม่ได้รับผลกระทบ
+- ข้อเสีย: `prerender = false` ต้องมี adapter — Astro เสิร์ฟหน้าแบบ on-demand จากโฟลเดอร์ HTML ที่ build ไว้ล่วงหน้าไม่ได้ มันต้องมี *อะไรบางอย่าง* รันอยู่ต่อ request นั่นคือโครงสร้างพื้นฐานใหม่จริง ๆ ที่ route เดียวนี้ดึงเข้ามา ในขณะที่ [shell-layout](/taskflow/th/frontend/shell-layout/) กับ [boards-list](/taskflow/th/frontend/boards-list/) รอดมาได้โดยไม่ต้องมี server ของตัวเองเลย คอร์สนี้เพิ่ม `@astrojs/node` แบบ standalone mode — Node process เล็ก ๆ ที่ Docker Compose stack เดียวกันจาก [compose-skeleton](/taskflow/th/setup/compose-skeleton/) รันเป็น container เพิ่มอีกตัวได้ในภายหลัง — แทนที่จะผูกกับ adapter ของ hosting platform ใดเจาะจงตั้งแต่ตอนนี้
+
+**ทางเลือกอีกแบบ พอสังเขป:** ไฟล์ static ไฟล์เดียว (build ครั้งเดียว ด้วย `getStaticPaths()` ที่คืน placeholder path เดียว) โดยให้ id จริงถูกอ่านฝั่ง client จาก `window.location.pathname` และตั้งค่า static host ให้เสิร์ฟไฟล์เดียวนั้นสำหรับทุก request ภายใต้ `/boards/*` มันทำให้ทั้ง site ยังอยู่ในเรื่องเล่า "แค่ไฟล์บน CDN" ต่อไปได้อีกหน่อย แต่แลก `prerender = false` บรรทัดเดียวกับ rewrite rule เฉพาะ hosting (nginx `try_files`, Netlify `_redirects`, Vercel `rewrites`) ที่ต้องตั้งให้ถูกและคอยดูแลให้ตรงกับโครงสร้าง route เองด้วยมือ — และ URL ที่ผิดจริง ๆ ภายใต้ `/boards/*` ก็จะได้ `200` เดียวกันกับ shell ว่างเปล่าเดียวกันกับ URL ที่ถูก เพราะ web server แยกไม่ออกก่อนที่ JavaScript จะรัน `prerender = false` ย้ายการแยกแยะนั้นกลับไปที่ที่มันควรอยู่ตามปกติ — server ไม่ใช่ rewrite rule ที่เดาเจตนา
+
+**`client:only="preact"` (ตัวที่เราใช้) เทียบกับ `client:load`**
+
+`Board` ไม่รันบน server เลย เต็มที่ — ไม่ใช่เพราะกฎทั่วไปอะไรเกี่ยวกับ Preact island แต่เพราะทุกอย่างเกี่ยวกับ *component ตัวนี้โดยเฉพาะ* พึ่งพา API ที่ server ไม่มี `getToken()` อ่าน `localStorage` ซึ่งไม่มีอยู่นอก browser สิ่งถัดไปที่ `Board` ทำคือเรียก `apiFetch<BoardTree>('/boards/:id')` เป็น network request ที่ผูกกับ session ของ *visitor คนนี้* ไม่ใช่ค่าที่ Astro คำนวณครั้งเดียวตอน build time แล้วใช้ซ้ำกับทุก visitor ได้ `client:load` ก็ยังพยายาม render `Board` บน server ครั้งหนึ่งเพื่อสร้าง HTML เริ่มต้นก่อน hydrate — และการ render นั้นก็จะ crash ตอนเอื้อมไปหา `localStorage` หรือไม่ก็ต้องมี branch ที่ปลอดภัยสำหรับ server ของตัวเองซึ่งก็ render อะไรที่ไม่มีประโยชน์อยู่ดี เพราะเนื้อหาจริงของบอร์ดผูกกับ user เป็นการเฉพาะและ cache ไม่ได้ตอน build time `client:only="preact"` ข้าม server render นั้นไปเลย: server ส่ง markup fallback อะไรก็ตามที่ Astro ใส่รอบ island (ไม่มีอะไรเลยในกรณีนี้) และการ render `<Board>` ครั้งเดียวที่เกิดขึ้นจริงคือการ render จริงใน browser ที่มีทั้ง `localStorage` และ `fetch` พร้อมใช้งาน
+
+นี่ก็เป็นการแก้คอร์สที่ควรพูดตรง ๆ ด้วย: [frontend-init](/taskflow/th/setup/frontend-init/) ใน Module 1 เดา `client:visible` ไว้สำหรับ "Kanban island" ด้วยเหตุผลว่าการ hydrate ก็ต่อเมื่อ scroll เข้ามาในจอช่วยประหยัดงานสำหรับเนื้อหาที่อยู่ใต้ fold การเดานั้นสมเหตุสมผลก่อนที่ requirement จริงของ component นี้จะมีอยู่บนกระดาษ `client:visible` ก็ยังพยายาม render ฝั่ง server สำหรับ HTML เริ่มต้นของมันอยู่ดี — ปัญหาเดียวกับ `client:load` — และที่สำคัญกว่านั้น `Board` ไม่เคยอยู่ใต้ fold บนหน้าของตัวเองเลย มัน *คือ* หน้า เป็นสิ่งเดียวที่ `/boards/:id` แสดง ดังนั้น "รอจน scroll เข้ามาในจอ" ไม่ได้ช่วยประหยัดอะไรเลยแล้วก็แค่ทำให้ first useful paint ของหน้าที่ auth-gated อยู่แล้วช้าลงโดยไม่มีเหตุผล `client:only="preact"` คือการตัดสินใจที่ถูกต้องเมื่อรู้รูปร่างจริงของ component แล้ว — auth-gated, พึ่งพา `localStorage`, prerender ไม่ได้ — ไม่ใช่การถอยจากแผนเดิม
+
+## Build it
+
+### 1. เพิ่ม adapter
+
+จาก `frontend/`:
+
+```bash
+npx astro add node
+```
+
+คำสั่งนี้ติดตั้ง `@astrojs/node` และต่อสายเข้า `astro.config.mjs` ให้อัตโนมัติ แบบเดียวกับที่ `npx astro add preact` ทำไว้ใน [frontend-init](/taskflow/th/setup/frontend-init/):
+
+```js
+// @ts-check
+import { defineConfig } from 'astro/config';
+import preact from '@astrojs/preact';
+import node from '@astrojs/node';
+
+export default defineConfig({
+  integrations: [preact()],
+  adapter: node({ mode: 'standalone' }),
+});
+```
+
+`output` ไม่ต้องเปลี่ยน Astro 5 ขึ้นไปรวม mode `'hybrid'` แยกต่างหากเดิมเข้ากับ `'static'` เองแล้ว ดังนั้น `output: 'static'` ค่า default หมายถึง "prerender ทุกอย่าง ยกเว้นหน้าไหนที่ถอนตัวด้วย `prerender = false`" อยู่แล้ว `mode: 'standalone'` ทำให้ adapter สร้าง Node HTTP server ธรรมดา (`node ./dist/server/entry.mjs`) แทนที่จะเป็น middleware ที่ต่อเข้ากับ server ที่มีอยู่แล้ว — รูปแบบที่ Docker container รันได้ตรง ๆ
+
+### 2. `frontend/src/pages/boards/[id].astro`
+
+```astro
+---
+export const prerender = false;
+
+import Base from '../../layouts/Base.astro';
+import Board from '../../components/Board.tsx';
+
+const { id } = Astro.params;
+---
+<Base title="Board">
+  <Board boardId={id} client:only="preact" />
+</Base>
+```
+
+นั่นคือไฟล์ทั้งหมด `Astro.params.id` มี type เป็น `string` ไม่ใช่ `string | undefined` — `prerender = false` บวกกับ segment เดียวที่จำเป็นของ `[id].astro` รวมกันหมายความว่า *ทุก* request ที่มาถึงหน้านี้ต้อง match กับ `id` ที่ไม่ว่างเปล่า ไม่มีค่าคืนจาก `getStaticPaths` ที่จะทำให้มันเป็น optional ตรงนี้ `boardId={id}` ส่งค่าเข้า island ตรง ๆ เป็น prop ปกติ — Astro serialize มันเข้าไปใน hydration payload เล็ก ๆ ที่ส่งไปพร้อมกับ `client:only` component ไม่ต่างในหลักการจาก prop อื่นใดที่ส่งให้ island อื่นใด
+
+`Board.tsx` ยังไม่มีอยู่ — [drag-drop](/taskflow/th/kanban-island/drag-drop/) บทถัดไป คือที่ที่มันจะถูกสร้างเต็มรูปแบบ ถ้าคุณกำลังตามอ่านทีละไฟล์แทนที่จะอ่านทั้งโมดูลก่อน หน้านี้จะยัง compile ไม่ผ่านจนกว่าไฟล์นั้นจะมีอยู่ — นั่นคาดไว้อยู่แล้ว แบบเดียวกับที่ [auth-pages](/taskflow/th/frontend/auth-pages/) สร้าง `api.ts` เต็มรูปแบบไปก่อนบทที่ [api-client](/taskflow/th/frontend/api-client/) จะเดินอธิบายทีละฟังก์ชัน แค่สลับลำดับกัน
+
+## Verify
+
+```bash
+cd frontend
+npx astro check
+```
+
+คำสั่งนี้จะยัง type-check ไม่ครบจนกว่า `Board.tsx` จะมีอยู่ ([drag-drop](/taskflow/th/kanban-island/drag-drop/)) — ตอนนี้ให้ยืนยันแค่ว่า adapter ต่อสายถูกต้องแทน:
+
+```bash
+npm run build
+npm run preview
+```
+
+`npm run build` ตอนนี้ควรสร้างโฟลเดอร์ `dist/server/` ควบคู่กับ output static `dist/client/` ตามปกติ — สัญญาณเดียวที่มองเห็นได้ว่า `prerender = false` มีผลจริงกับ route นี้ แทนที่จะถูก prerender เงียบ ๆ เหมือนเดิม `npm run preview` รัน Node server ที่ build ไว้ การเข้า `/boards/anything-at-all` ควรไปถึงหน้านี้ได้ (แทนที่จะเจอ 404 ทั่วไปของ static host) และ render shell ของ `Base` ออกมา — island `Board` เองยังไม่มีอะไรให้ mount
+
+## Recap
+
+คุณเพิ่ม `@astrojs/node` — โครงสร้างพื้นฐานฝั่ง server ชิ้นเดียวที่ frontend นี้ทั้งหมดต้องการ — และสร้าง `boards/[id].astro`: หน้าสองบรรทัดที่ถอนตัวจาก prerendering ด้วย `export const prerender = false` อ่าน `Astro.params.id` จริงในทุก request และ mount `<Board boardId={id} client:only="preact" />` คุณเปรียบเทียบมันกับการให้ site อยู่ static เต็มรูปแบบด้วย shell placeholder และ host-level rewrite และระบุต้นทุนจริงของแต่ละทาง — Node process ที่ต้องรัน หรือ rewrite rule ที่ต้องดูแลและรักษาความถูกต้องเรื่อง 404 คุณเห็นแล้วว่าทำไม `client:only` ไม่ใช่ `client:load` หรือการเดา `client:visible` เดิมของ Module 1 คือ hydration directive ที่ถูกต้องสำหรับ component ที่โดยพื้นฐานแล้ว render ให้ถูกต้องที่ไหนไม่ได้เลยนอกจาก browser ที่ถือ session จริงอยู่ ต่อไป [drag-drop](/taskflow/th/kanban-island/drag-drop/) จะสร้าง `Board.tsx` ขึ้นมาจริง ๆ — การ fetch, การ render, และ drag-and-drop ที่บทนี้แค่เตรียมที่ว่างไว้ให้

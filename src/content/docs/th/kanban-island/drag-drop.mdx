@@ -1,0 +1,382 @@
+---
+title: Drag & Drop and Optimistic Moves
+description: สร้าง components/Board.tsx — fetch และ render board tree, native HTML5 drag-and-drop, คำนวณ before_id/after_id จาก DOM geometry ตอน drop, และ optimistic local move พร้อม rollback เมื่อล้มเหลว — รวมถึง trade-off ตรง ๆ ของการอัปเดตหน้าจอก่อนที่ server จะยืนยัน
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`frontend/src/components/Board.tsx` — Preact island ที่ [board-page](/taskflow/th/kanban-island/board-page/) mount ด้วย `client:only="preact"` บทนี้พามันจากไม่มีอะไรเลยไปเป็นบอร์ดที่ทำงานได้เต็มรูปแบบ: fetch tree, render column กับ card ของมัน และให้ user ลากการ์ดไปตำแหน่งใหม่ — ที่ไหนก็ได้ใน column เดิม หรือย้ายไป column อื่น — โดยที่การย้ายถูกใช้กับหน้าจอทันที และ persist ด้วยการเรียก `PATCH /cards/:id/move` หนึ่งครั้ง ([move-reorder](/taskflow/th/rest-api/move-reorder/))
+
+สิ่งที่มันยังทำไม่ได้คือรับรู้การย้ายของ *คนอื่น* สองแท็บที่เปิดบอร์ดเดียวกัน หรือสองคนที่แก้ไขพร้อมกัน จะไม่เห็นการเปลี่ยนแปลงของกันและกันจนกว่าจะ reload ด้วยมือ — [live-sync](/taskflow/th/kanban-island/live-sync/) บทถัดไป ต่อฝั่ง WebSocket ที่ปิดช่องว่างนั้น
+
+## Why
+
+`Board` mount แล้วเช็ค `getToken()` — redirect ไปที่ `/login` ทันทีถ้าไม่มี guard เดียวกับที่ [boards-list](/taskflow/th/frontend/boards-list/) รันอยู่แล้ว — จากนั้นเรียก `apiFetch<BoardTree>('/boards/:id')` ([boards](/taskflow/th/rest-api/boards/)) ครั้งเดียวเพื่อได้ tree ทั้งหมดใน round trip เดียว เหตุผลเดียวกับที่ทำให้ `get_tree` ประกอบ response เดียวฝั่ง server ตั้งแต่แรก แทนที่จะให้ component นี้ fetch column กับ card แยกกัน
+
+ตัวการลากเองเป็น native HTML5 drag-and-drop — `draggable`, `dragstart`, `dragover`, `drop` — ไม่ใช่ library ที่อิงกับ pointer events handler `dragstart` ของการ์ดเก็บ id ของมันไว้ใน `event.dataTransfer`; handler `dragover` ของ column เรียก `event.preventDefault()` (บรรทัดเดียวที่ browser ต้องการก่อนที่มันจะยอม fire event `drop` บน element นั้นเลย); และ handler `drop` ของ column อ่าน id กลับออกมา วัดว่า pointer ลงตรงไหนเทียบกับการ์ดที่มีอยู่แล้วใน column แล้วแปลงเป็นรูปแบบ `before_id`/`after_id` เดียวกับที่ `move_card` ([move-reorder](/taskflow/th/rest-api/move-reorder/)) คาดหวังอยู่แล้ว — server ทำเลขคณิตแบบ fractional position เอง งานของ client มีแค่ระบุ id ของเพื่อนบ้านสองตัวให้ถูกต้อง
+
+การ apply การย้ายเข้า state `board` *ก่อน* ที่ `PATCH` จะ resolve — ไม่ใช่หลัง — คือการตัดสินใจในการออกแบบเรื่องเดียวที่บทนี้ใช้ section Pros & cons พูดถึง
+
+## Pros & cons
+
+**Optimistic update — apply การย้ายฝั่ง local ก่อน แล้วค่อยเรียก `PATCH /cards/:id/move`, rollback เมื่อล้มเหลว (ตัวที่เราใช้) เทียบกับรอ response จาก server ก่อนแตะหน้าจอ**
+
+- ข้อดี: การลากการ์ดแล้วปล่อยรู้สึกเร็วทันที ซึ่งใกล้เคียงกับเหตุผลทั้งหมดที่ drag-and-drop ของ Kanban board มีอยู่ตั้งแต่แรก ถ้ารอ round trip ของ `PATCH /cards/:id/move` ก่อนที่จะโชว์การ์ดในตำแหน่งใหม่ ทุกการลากจะเห็นภาพ "เด้งกลับแล้วค่อยกระโดด" แม้บนการเชื่อมต่อที่เร็ว และจะค้างหรือหยุดชะงักบนการเชื่อมต่อที่ช้า — ตรงข้ามกับความรู้สึกที่การลากควรจะเป็น
+- ข้อเสีย: มันต้องมี rollback path ที่ track ไว้อย่างตั้งใจและชัดเจน — `previousBoard` ที่ถูกเก็บไว้ก่อน `setBoard` แบบ optimistic เพียงเสี้ยววินาที แล้วเอากลับมาคืนเป๊ะ ๆ ใน `catch` block — เพราะ local state แตกต่างจากของ server ไปแล้วตั้งแต่การ์ดถูกปล่อย และ `PATCH` ที่ล้มเหลว (`403` จาก target column ที่อยู่คนละบอร์ด, `404` จากการ์ดเพื่อนบ้านที่คนอื่นลบไปแล้ว, network error ธรรมดา) ต้องมีการยกเลิกความแตกต่างนั้นอย่างชัดเจน ไม่ใช่ปล่อยให้ refetch ในภายหลังค่อยแก้ไขเอง มันยังหมายความว่าในช่วงสั้น ๆ ระหว่างที่ปล่อยการ์ดกับตอนที่ `PATCH` resolve หน้าจอกำลังโชว์สิ่งที่ยังไม่จริงบน server — ความเสี่ยงเล็ก ๆ ที่ปกติมองไม่เห็น ซึ่ง section conflict-handling ของ [live-sync](/taskflow/th/kanban-island/live-sync/) จะพูดถึงตรง ๆ: การย้ายของ client อื่นที่มาถึงในช่วงเวลาเดียวกันพอดี
+
+**คำนวณ `before_id`/`after_id` จาก `getBoundingClientRect()` ตอน drop (ตัวที่เราใช้) เทียบกับ track "index ที่ hover อยู่ตอนนี้" ใน component state ระหว่างลาก**
+
+- ข้อดี: drop index ถูกอ่านสด ๆ ครั้งเดียว ณ ช่วงเวลาที่ปล่อยจริง ตรงจาก DOM ที่ Preact render ออกมาจริง ไม่มี state แยกต่างหากที่ track ว่า "pointer อยู่ที่ slot ไหน" ที่ต้องคอยดูแลให้ sync กับ DOM เอง จึงไม่มีอะไรที่จะ drift ออกจากสิ่งที่เห็นบนหน้าจอได้
+- ข้อเสีย: การ์ดทุกอันใน target column ถูกวัดด้วย `getBoundingClientRect()` ตอน drop — ต้นทุนการอ่าน layout เล็ก ๆ แต่มีจริง — และที่สังเกตได้ชัดกว่านั้นคือไม่มี visual feedback *ระหว่าง* การลากเลย ไม่มีช่องว่างเปิดขึ้นระหว่างการ์ดเพื่อ preview ว่ามันจะลงตรงไหน TaskFlow ยอมรับให้การ์ดแค่ snap เข้าตำแหน่งสุดท้ายตอน drop แทนที่จะ preview ระหว่างลาก บอร์ดระดับ production ที่ขัดเกลา interaction นี้คงจะเพิ่ม hover-index state เข้าไปบนสิ่งที่บทนี้สร้าง ด้วยต้นทุนของ state อีกชิ้นที่ต้องคอยดูแลไม่ให้ drift ออกจาก pointer
+
+## Build it
+
+### 1. เพิ่ม type ของ board tree ใน `frontend/src/lib/api.ts`
+
+เพิ่ม interface สามตัวนี้ใน `frontend/src/lib/api.ts` ต่อจาก interface `Board` ที่ [api-client](/taskflow/th/frontend/api-client/) สร้างไว้ — มันสะท้อน `Card`, `Column`, และ `BoardTree` ของ `boards::model` ([boards](/taskflow/th/rest-api/boards/)) ทีละ field:
+
+```ts
+export interface Card {
+  id: string;
+  column_id: string;
+  title: string;
+  description: string | null;
+  position: number;
+  created_at: string;
+}
+
+export interface Column {
+  id: string;
+  board_id: string;
+  title: string;
+  position: number;
+  cards: Card[];
+}
+
+export interface BoardTree {
+  id: string;
+  owner_id: string;
+  title: string;
+  created_at: string;
+  columns: Column[];
+}
+```
+
+`Column` ตรงนี้มี `cards: Card[]` เพราะทุกที่ที่ frontend นี้ใช้ `Column` มันเป็นตัวหนึ่งใน `BoardTree.columns` — รูปแบบ `ColumnWithCards` ที่ถูก flatten ด้วย `#[serde(flatten)]` ฝั่ง server ไม่ใช่ row `Column` เปล่า ๆ ที่ Postgres เก็บไว้ [live-sync](/taskflow/th/kanban-island/live-sync/) คือที่ที่ความสะดวกนี้มีต้นทุนจริงที่ควรระบุชัด: event realtime `column.created`/`column.updated` broadcast `Column` แบบ *เปล่า* ไม่มี field `cards` เลย แม้ type TypeScript นี้จะอ้างว่ามันมีอยู่เสมอ
+
+### 2. `frontend/src/components/Board.tsx`
+
+```tsx
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { apiFetch, getToken, ApiError, type BoardTree, type Column, type Card } from '../lib/api';
+
+export interface BoardProps {
+  boardId: string;
+}
+
+function sortCards(cards: Card[]): Card[] {
+  return [...cards].sort((a, b) => a.position - b.position);
+}
+
+function sortColumns(columns: Column[]): Column[] {
+  return [...columns].sort((a, b) => a.position - b.position);
+}
+
+function sortTree(tree: BoardTree): BoardTree {
+  return {
+    ...tree,
+    columns: sortColumns(tree.columns).map((column) => ({
+      ...column,
+      cards: sortCards(column.cards),
+    })),
+  };
+}
+
+function findCard(tree: BoardTree, cardId: string): Card | undefined {
+  for (const column of tree.columns) {
+    const card = column.cards.find((c) => c.id === cardId);
+    if (card) return card;
+  }
+  return undefined;
+}
+
+function updateColumn(
+  tree: BoardTree,
+  columnId: string,
+  updateCards: (column: Column) => Card[],
+): BoardTree {
+  return {
+    ...tree,
+    columns: tree.columns.map((column) =>
+      column.id === columnId ? { ...column, cards: updateCards(column) } : column,
+    ),
+  };
+}
+
+function applyMove(tree: BoardTree, card: Card): BoardTree {
+  const withoutCard: BoardTree = {
+    ...tree,
+    columns: tree.columns.map((column) => ({
+      ...column,
+      cards: column.cards.filter((c) => c.id !== card.id),
+    })),
+  };
+  return updateColumn(withoutCard, card.column_id, (column) => sortCards([...column.cards, card]));
+}
+
+function computeDropIndex(columnEl: HTMLElement, clientY: number, excludeCardId: string): number {
+  const cardEls = Array.from(columnEl.querySelectorAll<HTMLElement>('[data-card-id]')).filter(
+    (el) => el.dataset.cardId !== excludeCardId,
+  );
+
+  for (let i = 0; i < cardEls.length; i++) {
+    const rect = cardEls[i].getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) {
+      return i;
+    }
+  }
+
+  return cardEls.length;
+}
+
+export default function Board({ boardId }: BoardProps) {
+  const [board, setBoard] = useState<BoardTree | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pendingRef = useRef<Set<string>>(new Set());
+
+  async function fetchBoard(): Promise<void> {
+    try {
+      const tree = await apiFetch<BoardTree>(`/boards/${boardId}`);
+      setBoard(sortTree(tree));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      setError(err instanceof ApiError ? err.message : 'Could not load this board.');
+    }
+  }
+
+  useEffect(() => {
+    if (!getToken()) {
+      window.location.href = '/login';
+      return;
+    }
+    void fetchBoard();
+  }, [boardId]);
+
+  function handleDragStart(cardId: string) {
+    return (event: DragEvent) => {
+      if (!event.dataTransfer) return;
+      event.dataTransfer.setData('text/plain', cardId);
+      event.dataTransfer.effectAllowed = 'move';
+    };
+  }
+
+  function handleDragOver(event: DragEvent): void {
+    event.preventDefault();
+  }
+
+  function handleDrop(targetColumnId: string) {
+    return async (event: DragEvent) => {
+      event.preventDefault();
+
+      const cardId = event.dataTransfer?.getData('text/plain');
+      if (!cardId || !board) return;
+
+      const targetColumn = board.columns.find((column) => column.id === targetColumnId);
+      const movedCard = findCard(board, cardId);
+      if (!targetColumn || !movedCard) return;
+
+      const columnEl = event.currentTarget as HTMLElement;
+      const dropIndex = computeDropIndex(columnEl, event.clientY, cardId);
+      const siblings = targetColumn.cards.filter((c) => c.id !== cardId);
+      const beforeCard = siblings[dropIndex - 1];
+      const afterCard = siblings[dropIndex];
+
+      const position =
+        beforeCard && afterCard
+          ? (beforeCard.position + afterCard.position) / 2
+          : beforeCard
+            ? beforeCard.position + 1
+            : afterCard
+              ? afterCard.position - 1
+              : 1;
+
+      const optimisticCard: Card = { ...movedCard, column_id: targetColumnId, position };
+      const previousBoard = board;
+
+      pendingRef.current.add(cardId);
+      setBoard((current) => (current ? applyMove(current, optimisticCard) : current));
+
+      try {
+        await apiFetch<Card>(`/cards/${cardId}/move`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            target_column_id: targetColumnId,
+            before_id: beforeCard?.id,
+            after_id: afterCard?.id,
+          }),
+        });
+      } catch {
+        setBoard(previousBoard);
+      } finally {
+        pendingRef.current.delete(cardId);
+      }
+    };
+  }
+
+  if (error) {
+    return <p role="alert">{error}</p>;
+  }
+
+  if (!board) {
+    return <p>Loading board…</p>;
+  }
+
+  return (
+    <div class="board">
+      <h1>{board.title}</h1>
+      <div class="columns">
+        {board.columns.map((column) => (
+          <div
+            key={column.id}
+            class="column"
+            data-column-id={column.id}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop(column.id)}
+          >
+            <h2>{column.title}</h2>
+            <ul>
+              {column.cards.map((card) => (
+                <li
+                  key={card.id}
+                  data-card-id={card.id}
+                  class="card"
+                  draggable
+                  onDragStart={handleDragStart(card.id)}
+                >
+                  {card.title}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+ไล่ดูส่วนที่ไม่ใช่ตัวการลากก่อน: `sortTree` รันครั้งเดียวทันทีหลัง fetch ทุกครั้ง เพราะ `get_tree` ของ [boards](/taskflow/th/rest-api/boards/) คืน column กับ card ที่เรียงตาม `position` มาแล้วจาก Postgres — แต่ `reconcile` ใน [live-sync](/taskflow/th/kanban-island/live-sync/) จะ patch การ์ดทีละใบเข้า state โดยไม่ fetch ทั้ง tree ใหม่ ดังนั้นการเก็บ helper `sortCards`/`sortColumns` ไว้ (แทนที่จะเชื่อว่าทุก code path จะรักษาลำดับไว้เอง) ทำให้ทั้งสองที่เรียกฟังก์ชันเดียวกันได้ แทนที่จะให้ที่ใดที่หนึ่งแอบสมมติลำดับที่รับประกันไว้แค่ตอน fetch เท่านั้น `updateColumn` กับ `applyMove` เป็นฟังก์ชันแยกของตัวเองด้วยเหตุผลเดียวกับที่ `reconcile` ใน [live-sync](/taskflow/th/kanban-island/live-sync/) ก็ต้องใช้มันเหมือนกัน — การ์ดที่ถูกย้ายด้วยการลากของ client *นี้* กับการ์ดที่ถูกย้ายด้วย broadcast event ของ client *อื่น* ทั้งคู่ลงเอยที่ต้องการ "เอาการ์ดออกจากที่ที่มันอยู่ตอนนี้ ใส่เข้า column นี้ เรียงลำดับให้ครบ" เหมือนกัน จึงเขียนไว้ครั้งเดียวตรงนี้แทนที่จะเขียนสองครั้ง
+
+ทีนี้ลำดับของการลากเอง:
+
+1. **`handleDragStart`** ใส่ id ของการ์ดที่ถูกลากเข้า `event.dataTransfer` — ช่องทางเดียวที่ HTML5 drag-and-drop มีให้สำหรับส่งข้อมูลจาก `dragstart` ไปยัง `drop` เพราะทั้งสอง event เกิดบน element คนละตัวกันได้ (การ์ด แล้วก็ column) และไม่มีอะไรอื่นเชื่อมมันเข้าด้วยกัน
+2. **`handleDragOver`** งานทั้งหมดของมันคือ `event.preventDefault()` ทุก element ปฏิเสธ drop โดย default; การเรียก `preventDefault()` ใน `dragover` handler คือสัญญาณที่ browser ต้องการเพื่อบอกว่า element นี้เป็น drop target ที่ใช้ได้ — ถ้าไม่ทำ `drop` จะไม่ fire ที่นี่เลย ไม่มี error ไม่มี warning เงียบไปเฉย ๆ
+3. **`handleDrop`** อ่าน id ของการ์ดกลับออกมาจาก `dataTransfer` หา card และ target column ของมันใน state ปัจจุบัน แล้วเรียก `computeDropIndex` ด้วย DOM node ของ column element เอง (`event.currentTarget`) และ `clientY` ของ pointer ณ ตอนที่ปล่อย
+4. **เลขคณิตตำแหน่ง** — เขียนแบบ `match` ใน TypeScript เหมือนกับที่ `match (&before, &after)` ของ Rust ใน `move_card` เขียนไว้ — สะท้อนสูตรของ [move-reorder](/taskflow/th/rest-api/move-reorder/) เป๊ะ ๆ: เฉลี่ยเพื่อนบ้านสองตัว ขยับ `±1.0` ผ่านฝั่งที่ไม่มีเพื่อนบ้าน หรือ `1.0` สำหรับ column ที่ว่างจริง ๆ `Board.tsx` ไม่เคยส่ง `position` ที่คำนวณนี้ไปให้ server เลย — `optimisticCard.position` มีไว้เพื่อให้การ re-render ฝั่ง local ลงตำแหน่งที่ถูกต้องบนหน้าจอทันทีเท่านั้น; body ของ `PATCH` มีแค่ `target_column_id`, `before_id`, และ `after_id` ให้ server คำนวณค่าที่แท้จริงเองตามที่ Pros & cons ของ [move-reorder](/taskflow/th/rest-api/move-reorder/) เคยพูดไว้แล้ว
+5. **`pendingRef.current.add(cardId)`** รันทันทีก่อน `setBoard` แบบ optimistic — นี่คือ Set ที่ [live-sync](/taskflow/th/kanban-island/live-sync/) จะเอาไปใช้ซ้ำเพื่อจำ echo ของ WebSocket ตัวเอง; สำหรับบทนี้เพียงบทเดียว งานเดียวของมันคือมีอยู่ให้ `try`/`finally` ด้านล่างบันทึกว่า "มีการย้ายของการ์ดนี้กำลังค้างอยู่"
+6. **`try`/`catch`/`finally`** เรียก `PATCH`, rollback กลับไปที่ `previousBoard` เมื่อมี error ใด ๆ ถูก throw และเอา `cardId` ออกจาก `pendingRef` ใน `finally` เสมอ — ทั้งตอนสำเร็จและตอนล้มเหลว เพราะไม่ว่าทางไหนก็ไม่มีการย้ายของการ์ดนี้ค้างอยู่แล้ว
+
+`useRef<Set<string>>(new Set())` ไม่ใช่ `useState` เพราะสมาชิกใน `pending` ไม่เคยต้อง trigger re-render ด้วยตัวมันเอง — มันถูกอ่านและเขียนอยู่ใน event handler กับ effect เท่านั้น ไม่เคยถูก render ตรง ๆ ซึ่งตรงกับสิ่งที่ `useRef` มีไว้เป๊ะ ๆ: ค่าที่ mutate ได้ที่อยู่รอดข้าม render โดยไม่เป็นส่วนหนึ่งของ render cycle ของ Preact
+
+### 3. CSS นิดหน่อย
+
+เพิ่มสิ่งนี้ใน `frontend/src/styles/global.css` ต่อจาก rule ที่ [shell-layout](/taskflow/th/frontend/shell-layout/) เขียนไว้แล้ว:
+
+```css
+.board {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.columns {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  overflow-x: auto;
+}
+
+.column {
+  background: #33333311;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  min-width: 220px;
+  flex: 0 0 220px;
+}
+
+.column h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.column ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 2rem;
+}
+
+.card {
+  background: Canvas;
+  border: 1px solid #33333322;
+  border-radius: 0.375rem;
+  padding: 0.5rem 0.75rem;
+  cursor: grab;
+}
+
+.card:active {
+  cursor: grabbing;
+}
+```
+
+`background: Canvas` — CSS system color keyword ไม่ใช่ค่า hex — resolve เป็นพื้นหลังปกติของหน้าตาม color scheme ที่ใช้งานอยู่ ตรงกับ `:root { color-scheme: light dark; }` ใน `global.css` โดยไม่ต้องมี `prefers-color-scheme` media query ของตัวเอง
+
+## Verify
+
+```bash
+cd frontend
+npm run build
+npm run preview
+```
+
+สร้าง column กับ card จริงในบอร์ดผ่าน API ตรง ๆ — ไม่มี UI สำหรับสร้าง column/card ใน frontend ของคอร์สนี้ มีแค่ตัวบอร์ดเอง ดังนั้นใช้ pattern `curl` เดียวกับที่ section Verify ของ [move-reorder](/taskflow/th/rest-api/move-reorder/) ใช้อยู่แล้ว:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"correct horse battery staple","display_name":"Ada"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
+BOARD_ID=$(curl -s -X POST http://localhost:8080/boards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Sprint 12"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+TODO=$(curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"To Do"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+DOING=$(curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Doing"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+curl -s -X POST http://localhost:8080/columns/$TODO/cards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"title":"Card A"}'
+curl -s -X POST http://localhost:8080/columns/$TODO/cards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"title":"Card B"}'
+
+echo "http://localhost:4321/boards/$BOARD_ID"
+```
+
+Login ผ่าน browser ก่อน (`/login` ใช้บัญชีเดียวกับที่ออก `$TOKEN`) เพื่อให้ `localStorage` มี token จริง แล้วเปิด URL `/boards/$BOARD_ID` ที่พิมพ์ออกมา ยืนยันว่า: ทั้งสอง column render พร้อมการ์ดของมัน; การลาก "Card A" เข้า "Doing" ย้ายมันไปทันที โดยไม่มีภาพเด้งกลับไปที่ "To Do" ให้เห็น; reload หน้าแล้วมันยังอยู่ที่ "Doing" (ยืนยันว่า `PATCH` persist จริง ไม่ใช่แค่ local state แบบ optimistic); และการลากการ์ดระหว่างสองใบใน column เดียวกันลงตรง slot นั้นเป๊ะ ๆ เพื่อดู rollback path ให้หยุด backend (`Ctrl+C` process `cargo run -p api`) แล้วลองลากอีกครั้ง — การ์ดควรกระโดดไปตำแหน่งใหม่ทันที แล้วเด้งกลับไปที่เดิมทันทีที่ `fetch` ที่ล้มเหลว reject
+
+## Recap
+
+คุณขยาย `frontend/src/lib/api.ts` ด้วย `Card`, `Column`, และ `BoardTree` แล้วสร้าง `Board.tsx` เต็มรูปแบบ: fetch ที่ auth-gated ตอน mount, column กับ card ที่ render จาก state, native HTML5 drag-and-drop ที่คำนวณ `before_id`/`after_id` จาก DOM geometry ตอน drop, และ optimistic local move — apply ก่อนที่ `PATCH` จะ resolve, rollback เป๊ะ ๆ เมื่อล้มเหลว — โดยใช้ Set `pending` ที่ตอนนี้มีไว้แค่เพื่อให้ rollback path เป็นไปได้ คุณเปรียบเทียบ optimistic update กับการรอ server และเปรียบเทียบ geometry ตอน drop กับ hover state ที่ track ไว้ ระบุต้นทุนจริงของแต่ละแบบ สิ่งที่บอร์ดนี้ยังทำไม่ได้คือโชว์การย้ายของคนอื่นโดยไม่ reload — [live-sync](/taskflow/th/kanban-island/live-sync/) บทถัดไป จะสร้าง `lib/ws.ts` ต่อมันเข้ากับ component เดียวกันนี้ และให้ Set `pending` มีงานที่สอง

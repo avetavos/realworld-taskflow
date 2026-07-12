@@ -1,0 +1,97 @@
+---
+title: Board Page & Mounting the Island
+description: Build frontend/src/pages/boards/[id].astro — the prerender=false decision and why it needs an adapter, mounting <Board client:only="preact">, and why client:only beats client:load (and Module 1's original client:visible guess) for an auth-gated, data-driven view.
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`frontend/src/pages/boards/[id].astro` — the page [boards-list](/taskflow/en/frontend/boards-list/) already links to and that 404s until now. This one file does two jobs: decide how Astro serves an arbitrary board id under a route this static site never knew about at build time, and mount the one Preact island this whole frontend needs — `Board`, the component [drag-drop](/taskflow/en/kanban-island/drag-drop/) builds next.
+
+Nothing about columns, cards, drag-and-drop, or WebSocket wiring lives here. This lesson is entirely about getting a `boardId` safely and correctly from the URL into `<Board boardId={id} client:only="preact" />` — the routing problem, not the board itself.
+
+## Why
+
+Every other page this frontend has built is a routing non-event: `index.astro` is `/`, `login.astro` is `/login`, both fully known the moment `astro build` runs. `/boards/:id` is different — the whole point of a dynamic segment is that `id` isn't one of a handful of known values, it's whatever `POST /boards` ([boards](/taskflow/en/rest-api/boards/)) generated as a UUID at some point in the past, for some user, on some board this build has never heard of. `getStaticPaths()`, the tool Astro's static output normally uses to enumerate a dynamic route's finite set of pages up front, has nothing to enumerate here — there's no bounded list of board ids to hand it.
+
+## Pros & cons
+
+**`export const prerender = false` — an on-demand, server-rendered route (what we're using) vs. a single static shell + client-side URL parsing**
+
+- Pros: `Astro.params.id` is simply correct, on every request, the same way it would be for a real dynamic route in any server-rendered framework — no `getStaticPaths` placeholder to reason about, no separate host-level rewrite rule to configure, and a request for a route this app genuinely doesn't handle (`/boards/` with no id, a malformed path) still gets Astro's own normal 404 handling rather than silently serving the same static file for everything. It's exactly one route opting out of the "mostly static" plan [frontend-init](/taskflow/en/setup/frontend-init/) laid out — every other page in this frontend stays fully static, unaffected.
+- Cons: `prerender = false` needs an adapter — Astro can't serve a page on demand from a folder of pre-built HTML files, it needs *something* running per request. That's a real, new piece of infrastructure this one route pulls in, where [shell-layout](/taskflow/en/frontend/shell-layout/) and [boards-list](/taskflow/en/frontend/boards-list/) got away with zero server of their own. This course adds `@astrojs/node` in standalone mode — a small Node process the same Docker Compose stack from [compose-skeleton](/taskflow/en/setup/compose-skeleton/) can run as one more container later — rather than committing to a specific hosted platform's adapter this early.
+
+**The alternative, briefly:** a single static file (built once, via `getStaticPaths()` returning one placeholder path), with the actual id read client-side from `window.location.pathname`, and the static host configured to serve that one file for any request under `/boards/*`. It keeps the whole site on the "just files on a CDN" story a little longer, but it trades a one-line `prerender = false` for a hosting-specific rewrite rule (an nginx `try_files`, a Netlify `_redirects` entry, a Vercel `rewrites` config) that has to be gotten right and kept in sync with the route structure by hand — and a genuinely bad URL under `/boards/*` returns the same `200` with the same empty shell as a good one, since the web server can't tell them apart before any JavaScript runs. `prerender = false` moves that distinction back to where it usually lives — the server, not a rewrite rule guessing at intent.
+
+**`client:only="preact"` (what we're using) vs. `client:load`**
+
+`Board` never runs on the server, full stop — not because of some general rule about Preact islands, but because everything about *this specific component* depends on APIs the server doesn't have. `getToken()` reads `localStorage`, which doesn't exist outside a browser; the very next thing `Board` does is call `apiFetch<BoardTree>('/boards/:id')`, a network request scoped to *this visitor's* session, not a value Astro could compute once at build time and reuse for every visitor. `client:load` would still attempt to render `Board` once on the server to produce initial HTML before hydrating — and that render would either crash reaching for `localStorage`, or need its own server-safe branch that renders nothing useful anyway, since a board's actual content is inherently per-user and un-cacheable at build time. `client:only="preact"` skips that server render entirely: the server ships whatever fallback markup Astro puts around the island (nothing, here), and the *only* render of `<Board>` that ever happens is the real one, in the browser, with `localStorage` and `fetch` both available.
+
+This is also a course correction worth being explicit about: [frontend-init](/taskflow/en/setup/frontend-init/), back in Module 1, guessed `client:visible` for "the Kanban island," reasoning that hydrating only once it scrolls into view saves work for content below the fold. That guess made sense before this component's actual requirements existed on paper. `client:visible` still attempts a server-side render for its initial HTML — same problem as `client:load` — and more importantly, `Board` is never below the fold on its own page: it *is* the page, the only thing `/boards/:id` shows, so "wait until it scrolls into view" saves nothing and just delays an already auth-gated view's first useful paint for no reason. `client:only="preact"` is the correct call once the component's actual shape — auth-gated, `localStorage`-dependent, un-prerenderable — is known, not a downgrade from the original plan.
+
+## Build it
+
+### 1. Add the adapter
+
+From `frontend/`:
+
+```bash
+npx astro add node
+```
+
+This installs `@astrojs/node` and wires it into `astro.config.mjs` automatically, the same way `npx astro add preact` did back in [frontend-init](/taskflow/en/setup/frontend-init/):
+
+```js
+// @ts-check
+import { defineConfig } from 'astro/config';
+import preact from '@astrojs/preact';
+import node from '@astrojs/node';
+
+export default defineConfig({
+  integrations: [preact()],
+  adapter: node({ mode: 'standalone' }),
+});
+```
+
+`output` doesn't need to change. Astro 5+ merged the old separate `'hybrid'` mode into `'static'` itself, so the default `output: 'static'` already means "prerender everything, except any page that opts out with `prerender = false`." `mode: 'standalone'` makes the adapter emit a plain Node HTTP server (`node ./dist/server/entry.mjs`) rather than middleware bolted onto an existing server — the shape a Docker container can run directly.
+
+### 2. `frontend/src/pages/boards/[id].astro`
+
+```astro
+---
+export const prerender = false;
+
+import Base from '../../layouts/Base.astro';
+import Board from '../../components/Board.tsx';
+
+const { id } = Astro.params;
+---
+<Base title="Board">
+  <Board boardId={id} client:only="preact" />
+</Base>
+```
+
+That's the whole file. `Astro.params.id` is typed `string`, not `string | undefined` — `prerender = false` plus `[id].astro`'s single required segment together mean *every* request that reaches this page matched a non-empty `id`; there's no `getStaticPaths` return value to make optional here. `boardId={id}` passes it straight into the island as a normal prop — Astro serializes it into the small hydration payload it ships alongside `client:only` components, no different in principle from any other prop passed to any other island.
+
+`Board.tsx` doesn't exist yet — [drag-drop](/taskflow/en/kanban-island/drag-drop/), next, is where it gets built in full. If you're following along file-by-file rather than reading the whole module first, this page won't compile until that file exists; that's expected, the same way [auth-pages](/taskflow/en/frontend/auth-pages/) built a full `api.ts` a lesson ahead of [api-client](/taskflow/en/frontend/api-client/) walking through it, just in the reverse order.
+
+## Verify
+
+```bash
+cd frontend
+npx astro check
+```
+
+This won't fully type-check until `Board.tsx` exists ([drag-drop](/taskflow/en/kanban-island/drag-drop/)) — for now, confirm the adapter is wired up correctly instead:
+
+```bash
+npm run build
+npm run preview
+```
+
+`npm run build` should now produce a `dist/server/` directory alongside the usual static `dist/client/` output — the one visible signal that `prerender = false` actually took effect on this one route rather than silently prerendering it anyway. `npm run preview` runs the built Node server; visiting `/boards/anything-at-all` should reach the page (rather than a static host's generic 404) and render `Base`'s shell — the `Board` island itself has nothing to mount yet.
+
+## Recap
+
+You added `@astrojs/node` — the one piece of server infrastructure this whole frontend needs — and built `boards/[id].astro`: a two-line page that opts out of prerendering with `export const prerender = false`, reads a real `Astro.params.id` on every request, and mounts `<Board boardId={id} client:only="preact" />`. You compared that against keeping the site fully static with a placeholder shell and a host-level rewrite, and named the real cost either way — a Node process to run, or a rewrite rule to maintain and keep honest about 404s. And you saw why `client:only`, not `client:load` or Module 1's original `client:visible` guess, is the correct hydration directive for a component that's fundamentally impossible to render correctly anywhere but a browser holding a real session. Next, [drag-drop](/taskflow/en/kanban-island/drag-drop/) builds `Board.tsx` for real — the fetch, the render, and the drag-and-drop this lesson only made room for.

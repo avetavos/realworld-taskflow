@@ -1,0 +1,394 @@
+---
+title: Live Sync — WebSocket Wiring & Reconnection
+description: สร้าง connectBoard ใน lib/ws.ts — reconnect แบบ exponential backoff — ต่อมันเข้ากับฟังก์ชัน reconcile ใหม่ใน Board.tsx, ให้ Set pending จาก drag-drop มีงานที่สอง (เพิกเฉย echo การย้ายของ island ตัวเอง), refetch ตอน reconnect เพื่อปิดช่องว่าง event ที่พลาดไป และขีดจำกัดตรง ๆ ของ heuristic นี้เมื่อการย้ายจากคนอื่นกับการย้ายฝั่ง local แข่งกัน Full final Board.tsx
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`frontend/src/lib/ws.ts` — ฟังก์ชันเดียว `connectBoard` ที่เปิด WebSocket ที่ [ws-endpoint](/taskflow/th/realtime/ws-endpoint/) สร้างไว้ reconnect แบบ exponential backoff ถ้าหลุด และส่ง `BoardEvent` ([protocol](/taskflow/th/realtime/protocol/)) ที่เข้ามาแต่ละอันกลับไปให้ callback ที่ caller ให้มา และการเปลี่ยนแปลงใน `Board.tsx` ที่ต่อมันเข้าไป: ฟังก์ชัน `reconcile` ใหม่ที่ apply `BoardEvent` เข้า state ของ `board` ตาม id และ `useEffect` ที่เปิดการเชื่อมต่อทันทีหลัง fetch เริ่มต้น แล้วปิดมันตอน unmount
+
+ไม่มีอะไรตรงนี้แทนที่สิ่งที่ [drag-drop](/taskflow/th/kanban-island/drag-drop/) สร้างไว้เลย — fetch, render, drag-and-drop, optimistic move และ rollback ของมัน ยังคงเหมือนเดิมทุกอย่าง บทนี้เป็นการเพิ่มล้วน ๆ ปิดช่องว่างเดียวที่บทนั้นเหลือไว้: อีกแท็บ browser หนึ่ง หรืออีกคนหนึ่ง ย้ายการ์ดบนบอร์ดเดียวกันนี้โดยที่แท็บนี้ไม่รู้เรื่องเลยจนกว่าจะ reload ด้วยมือ
+
+## Why
+
+การเชื่อมต่อ WebSocket หลุดได้ด้วยเหตุผลที่ไม่เกี่ยวกับฝั่งไหนผิดเลย — laptop หลับ, WiFi หลุด, การเชื่อมต่อมือถือเสียสัญญาณในอุโมงค์ สถานการณ์ unclean-disconnect แบบเดียวกับที่ [reconnect](/taskflow/th/realtime/reconnect/) สร้าง heartbeat ฝั่ง server ขึ้นมาเพื่อตรวจจับ server ที่รู้ว่าการเชื่อมต่อตายแล้วเคลียร์มันทิ้ง เป็นแค่ครึ่งหนึ่งของเรื่อง; client ที่รู้ว่า *การเชื่อมต่อของตัวเอง* ตายแล้วแล้วต่อใหม่ คืออีกครึ่งหนึ่ง และไม่มีอะไรฝั่ง server ทำส่วนนั้นแทนได้ `connectBoard` รับผิดชอบเรื่องนี้เต็ม ๆ: เปิด socket แล้วถ้ามันปิดด้วยเหตุผลที่ caller ไม่ได้ขอ ก็เปิดอีกอัน โดยรอนานขึ้นทีละนิดในแต่ละครั้ง เพื่อไม่ให้ backend ที่ล่มจริง ๆ โดนถล่มด้วย reconnect loop ที่ถี่เกินไป
+
+รูปร่างของ `reconcile` มาจาก event catalog ของ [protocol](/taskflow/th/realtime/protocol/) ตรง ๆ — `switch` หนึ่ง arm ต่อ string `type` หนึ่งตัว แต่ละอันทำ state surgery แบบเดียวกับที่ `applyMove`/`updateColumn` ทำให้ optimistic move ฝั่ง local อยู่แล้ว เพราะ event `card.moved` จากที่อื่นกับการลากฝั่ง local จากมุมมองของ state แล้วคือ operation เดียวกัน แค่ต้นทางต่างกัน ปัญหาใหม่หนึ่งเดียวที่ `reconcile` ต้องแก้ที่การลากฝั่ง local ไม่เคยต้องแก้คือ: แยกแยะ event ที่เป็นข้อมูลใหม่จริง ๆ ออกจาก event ที่เป็นแค่การลากของ client ตัวเองที่ broadcast กลับมา
+
+## Pros & cons
+
+**เอา Set `pending` จาก `drag-drop` มาใช้ซ้ำเพื่อข้าม echo ของ `card.moved` (ตัวที่เราใช้) เทียบกับ token ต่อการย้ายที่เทียบกับ event**
+
+- ข้อดี: ไม่ต้องสร้างอะไรใหม่เลย — `Set<string>` ตัวเดียวกับที่ [drag-drop](/taskflow/th/kanban-island/drag-drop/) เติมเข้าไปทุกครั้งที่มี optimistic move เพื่อจุดประสงค์ rollback กลายเป็นข้อมูลเดียวกับที่ `reconcile` ต้องการเพื่อตอบคำถาม "event `card.moved` นี้กำลังพูดถึงการย้ายที่ฉันรู้จักอยู่แล้วหรือเปล่า" `useRef<Set<string>>` ตัวเดียว สองเหตุผลที่ปรึกษามัน ไม่มี state ที่สองที่ต้องคอยดูแลให้ sync กับตัวแรก
+- ข้อเสีย — และนี่คือขีดจำกัดที่ควรพูดตรง ๆ ไม่ปิดบัง: Set ที่ key ด้วย card id อย่างเดียวแยกแยะ "นี่คือ echo ของฉันเอง" ออกจาก "มีคนอื่นย้ายการ์ดใบนี้จริง ๆ ระหว่างที่การย้ายของฉันยังค้างอยู่" ไม่ได้ ถ้า client สองตัวลากการ์ดใบเดียวกันภายใน round-trip window เดียวกัน `card.moved` broadcast ของ client ที่สองจะมาถึง client แรกตอนที่ id ของการ์ดนั้นยังอยู่ใน Set `pending` ของ client แรก — แล้วก็จะถูกข้ามอย่างเงียบ ๆ ถูกมองว่าเป็น echo ของการย้ายของ client แรกเอง ทั้งที่จริง ๆ แล้วมันคือข้อมูลใหม่จากคนอื่น ไม่มี version number หรือ move token อยู่ใน payload ของ `BoardEvent` ที่จะแยกทั้งสองออกจากกันได้ สิ่งที่เกิดขึ้นจริงในการแข่งนั้นคือสิ่งที่ `UPDATE` ของ Postgres เองตัดสินไปแล้ว โดยไม่มีอะไรในโมดูลนี้ช่วย: `PATCH /cards/:id/move` ตัวไหน commit หลังสุดใน `repo::move_card` ของ [move-reorder](/taskflow/th/rest-api/move-reorder/) ก็ชนะไปเลย ไม่มีการเช็ค optimistic-concurrency ที่จะปฏิเสธตัวที่แพ้ client ที่แพ้การแข่งจะเห็น state แบบ optimistic ของตัวเองค้างอยู่บนหน้าจอจนกว่า `PATCH` call ของตัวเองจะ resolve — ณ จุดนั้น เพราะ response เป็น *การ์ดของตัวเอง* ที่อัปเดตล่าสุดจาก server หน้าจอจะโชว์ตำแหน่งที่แพ้อยู่แป๊บหนึ่ง ถูกต้องแค่จนกว่า `reconcile` ครั้งถัดไป (หรือ refetch จาก `onReconnect` ในที่สุด) จะดึง state ที่ชนะจริง ๆ กลับเข้ามา ระบบระดับ production ที่ต้องการตรวจจับ conflict จริง ๆ จะต้องให้ server ปฏิเสธการเขียนที่ล้าสมัยไปเลย — คอลัมน์ version ที่เช็คและเพิ่มค่าทุกครั้งที่ `UPDATE` ตอบกลับ `409` ให้ `PATCH` ที่สร้างมาจาก version เก่า — แทนที่จะเป็น heuristic ฝั่ง client ที่เดาได้แค่ "ของฉันเทียบกับของเขา" จาก card id เปล่า ๆ
+
+**Exponential backoff (ตัวที่เราใช้) เทียบกับ retry interval แบบคงที่**
+
+- ข้อดี: backend ที่ล่มจริง ๆ หรือ network outage ที่กระทบทุก client พร้อมกัน ไม่กลายเป็นทุก browser ที่เชื่อมต่ออยู่ถล่ม endpoint เดียวกันบน interval คงที่เดียวกันทันทีที่มันกลับมา — backoff กระจาย reconnect attempt ออกไปตามเวลา แทนที่จะลงพร้อมกันหมดในจังหวะเดียว มันยังหมายความว่าการเชื่อมต่อที่หลุดแล้วกลับมาทันที (WiFi สะดุดสั้น ๆ) จะ reconnect เร็วเกือบเท่ากับ interval สั้นแบบคงที่ เพราะ delay จะโตขึ้นก็ต่อเมื่อล้มเหลว *ซ้ำ* เท่านั้น เริ่มจากค่าน้อย
+- ข้อเสีย: การเชื่อมต่อที่หลุดไปนานแล้วต้องรอนานกว่าจะ retry เมื่อเทียบกับแบบ interval คงที่ ตามที่ออกแบบไว้ — การจำกัด delay สูงสุด (`10` วินาทีตรงนี้) จำกัดว่ามันแย่ได้แค่ไหน แต่ก็เป็น trade-off จริงและตั้งใจต่อ "reconnect ให้เร็วที่สุดเท่าที่จะเป็นไปได้เสมอ" ที่ยอมรับ เพราะทางเลือกอื่น (ถล่ม backend ที่กำลังฟื้นตัวอยู่) แย่กว่าสำหรับทุกคนที่เชื่อมต่ออยู่ ไม่ใช่แค่ client ตัวนี้ตัวเดียว
+
+## Build it
+
+### 1. `frontend/src/lib/ws.ts`
+
+```ts
+export interface BoardEvent {
+  type: string;
+  boardId: string;
+  payload: any;
+}
+
+const RECONNECT_BASE_DELAY_MS = 500;
+const RECONNECT_MAX_DELAY_MS = 10_000;
+
+function wsUrl(boardId: string, token: string): string {
+  const base = import.meta.env.PUBLIC_API_URL.replace(/^http/, 'ws');
+  return `${base}/ws/boards/${boardId}?token=${encodeURIComponent(token)}`;
+}
+
+export function connectBoard(
+  boardId: string,
+  token: string,
+  onEvent: (e: BoardEvent) => void,
+  onReconnect: () => void,
+): () => void {
+  let socket: WebSocket | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let attempt = 0;
+  let disposed = false;
+
+  function connect(): void {
+    socket = new WebSocket(wsUrl(boardId, token));
+
+    socket.addEventListener('open', () => {
+      attempt = 0;
+      onReconnect();
+    });
+
+    socket.addEventListener('message', (event) => {
+      const boardEvent = JSON.parse(event.data as string) as BoardEvent;
+      onEvent(boardEvent);
+    });
+
+    socket.addEventListener('close', () => {
+      if (disposed) return;
+      scheduleReconnect();
+    });
+
+    socket.addEventListener('error', () => {
+      socket?.close();
+    });
+  }
+
+  function scheduleReconnect(): void {
+    const delay = Math.min(RECONNECT_BASE_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS);
+    attempt += 1;
+    reconnectTimer = setTimeout(connect, delay);
+  }
+
+  connect();
+
+  return () => {
+    disposed = true;
+    clearTimeout(reconnectTimer);
+    socket?.close();
+  };
+}
+```
+
+`import.meta.env.PUBLIC_API_URL.replace(/^http/, 'ws')` แปลง `http://localhost:8080` ให้เป็น `ws://localhost:8080` (และใน production แปลง `https://` เป็น `wss://`) — ไม่ต้องมี environment variable ใหม่ แค่ derive WebSocket origin จากตัวเดียวกับที่ [api-client](/taskflow/th/frontend/api-client/) สร้างไว้แล้ว แบบเดียวกับที่ [ws-endpoint](/taskflow/th/realtime/ws-endpoint/) ใส่ JWT ไว้ใน query parameter เพราะ constructor `WebSocket` ของ browser ไม่มี argument สำหรับ header ให้ใส่แทน `import.meta.env.PUBLIC_API_URL` type-check ผ่านตรงนี้โดยไม่ต้องประกาศอะไรใหม่ — `frontend/src/env.d.ts` ([auth-pages](/taskflow/th/frontend/auth-pages/)) ประกาศมันไว้ทั้ง project แล้ว
+
+`onReconnect` fire จาก listener `open` แบบไม่มีเงื่อนไข — ตั้งแต่การเชื่อมต่อสำเร็จครั้งแรก ไม่ใช่แค่ตอน reconnect หลังจากหลุด นั่นตั้งใจ ไม่ใช่ความผิดพลาด doc comment เรียกมันว่า "(re)connect" ด้วยเหตุผลนี้เป๊ะ ๆ มันหมายความว่าการเรียก `fetchBoard()` เริ่มต้นของ `Board.tsx` เองกับ event `open` แรกนี้ ทั้งคู่ trigger การ fetch ในเวลาไล่เลี่ยกัน — ความซ้ำซ้อนเล็ก ๆ ที่ไม่เป็นอันตราย ไม่ใช่บั๊กที่ต้อง special-case ทิ้งไป [reconnect](/taskflow/th/realtime/reconnect/) เคยพูดข้อโต้แย้งแบบนี้ไว้แล้วฝั่ง server เกี่ยวกับตัว refetch เอง: "ไม่ใช่สิ่งที่คุ้มค่าจะพยายามข้ามตอน 'คงไม่มีอะไรเปลี่ยนหรอก' ... มันคือ request เดียวกันเป๊ะกับที่ client จะยิงตอนโหลดหน้าปกติ แค่ถูก trigger ด้วย event คนละตัว" เหตุผลเดียวกันนี้ใช้ได้ตรงนี้ อีกชั้นหนึ่ง โดยไม่ต้องอนุมานใหม่
+
+`disposed` ที่เช็คใน listener `close` คือสิ่งที่ทำให้ disposer function ที่ return กลับไปหยุด reconnect ได้จริง แทนที่จะแค่ปิด socket ปัจจุบันแล้วปล่อยให้ event `close` ถัดไปตั้ง reconnect ใหม่อยู่ดี — ถ้าไม่มีมัน การเรียก disposer ตอน unmount จะปิด socket ที่ยังเปิดอยู่ trigger event `close` ของมันเองทันที แล้ว handler นั้นก็จะตั้ง reconnect ให้กับ component ที่ไม่มีอยู่แล้วอย่างขยันขันแข็ง
+
+### 2. ต่อ `connectBoard` เข้า `Board.tsx`
+
+สามส่วนที่เพิ่มเข้าไปในไฟล์ที่ [drag-drop](/taskflow/th/kanban-island/drag-drop/) สร้างไว้: import ใหม่, ฟังก์ชัน `reconcile` ใหม่, และ mount effect ที่เขียนใหม่ นี่คือไฟล์เต็มพร้อมทุกอย่างในที่ของมัน:
+
+```tsx
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { apiFetch, getToken, ApiError, type BoardTree, type Column, type Card } from '../lib/api';
+import { connectBoard, type BoardEvent } from '../lib/ws';
+
+export interface BoardProps {
+  boardId: string;
+}
+
+function sortCards(cards: Card[]): Card[] {
+  return [...cards].sort((a, b) => a.position - b.position);
+}
+
+function sortColumns(columns: Column[]): Column[] {
+  return [...columns].sort((a, b) => a.position - b.position);
+}
+
+function sortTree(tree: BoardTree): BoardTree {
+  return {
+    ...tree,
+    columns: sortColumns(tree.columns).map((column) => ({
+      ...column,
+      cards: sortCards(column.cards),
+    })),
+  };
+}
+
+function findCard(tree: BoardTree, cardId: string): Card | undefined {
+  for (const column of tree.columns) {
+    const card = column.cards.find((c) => c.id === cardId);
+    if (card) return card;
+  }
+  return undefined;
+}
+
+function updateColumn(
+  tree: BoardTree,
+  columnId: string,
+  updateCards: (column: Column) => Card[],
+): BoardTree {
+  return {
+    ...tree,
+    columns: tree.columns.map((column) =>
+      column.id === columnId ? { ...column, cards: updateCards(column) } : column,
+    ),
+  };
+}
+
+function applyMove(tree: BoardTree, card: Card): BoardTree {
+  const withoutCard: BoardTree = {
+    ...tree,
+    columns: tree.columns.map((column) => ({
+      ...column,
+      cards: column.cards.filter((c) => c.id !== card.id),
+    })),
+  };
+  return updateColumn(withoutCard, card.column_id, (column) => sortCards([...column.cards, card]));
+}
+
+function computeDropIndex(columnEl: HTMLElement, clientY: number, excludeCardId: string): number {
+  const cardEls = Array.from(columnEl.querySelectorAll<HTMLElement>('[data-card-id]')).filter(
+    (el) => el.dataset.cardId !== excludeCardId,
+  );
+
+  for (let i = 0; i < cardEls.length; i++) {
+    const rect = cardEls[i].getBoundingClientRect();
+    if (clientY < rect.top + rect.height / 2) {
+      return i;
+    }
+  }
+
+  return cardEls.length;
+}
+
+export default function Board({ boardId }: BoardProps) {
+  const [board, setBoard] = useState<BoardTree | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const pendingRef = useRef<Set<string>>(new Set());
+
+  async function fetchBoard(): Promise<void> {
+    try {
+      const tree = await apiFetch<BoardTree>(`/boards/${boardId}`);
+      setBoard(sortTree(tree));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      setError(err instanceof ApiError ? err.message : 'Could not load this board.');
+    }
+  }
+
+  function reconcile(event: BoardEvent): void {
+    setBoard((current) => {
+      if (!current) return current;
+
+      switch (event.type) {
+        case 'card.created': {
+          const { columnId, card } = event.payload as { columnId: string; card: Card };
+          return updateColumn(current, columnId, (column) =>
+            sortCards([...column.cards.filter((c) => c.id !== card.id), card]),
+          );
+        }
+        case 'card.updated': {
+          const { card } = event.payload as { card: Card };
+          return updateColumn(current, card.column_id, (column) =>
+            sortCards(column.cards.map((c) => (c.id === card.id ? card : c))),
+          );
+        }
+        case 'card.moved': {
+          const { card } = event.payload as { card: Card };
+          if (pendingRef.current.has(card.id)) return current;
+          return applyMove(current, card);
+        }
+        case 'card.deleted': {
+          const { cardId, columnId } = event.payload as { cardId: string; columnId: string };
+          return updateColumn(current, columnId, (column) =>
+            column.cards.filter((c) => c.id !== cardId),
+          );
+        }
+        case 'column.created': {
+          const { column } = event.payload as { column: Column };
+          return {
+            ...current,
+            columns: sortColumns([...current.columns, { ...column, cards: [] }]),
+          };
+        }
+        case 'column.updated': {
+          const { column } = event.payload as { column: Column };
+          return {
+            ...current,
+            columns: current.columns.map((c) => (c.id === column.id ? { ...c, ...column } : c)),
+          };
+        }
+        case 'column.deleted': {
+          const { columnId } = event.payload as { columnId: string };
+          return { ...current, columns: current.columns.filter((c) => c.id !== columnId) };
+        }
+        default:
+          return current;
+      }
+    });
+  }
+
+  useEffect(() => {
+    const token = getToken();
+    if (!token) {
+      window.location.href = '/login';
+      return;
+    }
+
+    void fetchBoard();
+
+    const disconnect = connectBoard(boardId, token, reconcile, () => {
+      void fetchBoard();
+    });
+
+    return disconnect;
+  }, [boardId]);
+
+  function handleDragStart(cardId: string) {
+    return (event: DragEvent) => {
+      if (!event.dataTransfer) return;
+      event.dataTransfer.setData('text/plain', cardId);
+      event.dataTransfer.effectAllowed = 'move';
+    };
+  }
+
+  function handleDragOver(event: DragEvent): void {
+    event.preventDefault();
+  }
+
+  function handleDrop(targetColumnId: string) {
+    return async (event: DragEvent) => {
+      event.preventDefault();
+
+      const cardId = event.dataTransfer?.getData('text/plain');
+      if (!cardId || !board) return;
+
+      const targetColumn = board.columns.find((column) => column.id === targetColumnId);
+      const movedCard = findCard(board, cardId);
+      if (!targetColumn || !movedCard) return;
+
+      const columnEl = event.currentTarget as HTMLElement;
+      const dropIndex = computeDropIndex(columnEl, event.clientY, cardId);
+      const siblings = targetColumn.cards.filter((c) => c.id !== cardId);
+      const beforeCard = siblings[dropIndex - 1];
+      const afterCard = siblings[dropIndex];
+
+      const position =
+        beforeCard && afterCard
+          ? (beforeCard.position + afterCard.position) / 2
+          : beforeCard
+            ? beforeCard.position + 1
+            : afterCard
+              ? afterCard.position - 1
+              : 1;
+
+      const optimisticCard: Card = { ...movedCard, column_id: targetColumnId, position };
+      const previousBoard = board;
+
+      pendingRef.current.add(cardId);
+      setBoard((current) => (current ? applyMove(current, optimisticCard) : current));
+
+      try {
+        await apiFetch<Card>(`/cards/${cardId}/move`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            target_column_id: targetColumnId,
+            before_id: beforeCard?.id,
+            after_id: afterCard?.id,
+          }),
+        });
+      } catch {
+        setBoard(previousBoard);
+      } finally {
+        pendingRef.current.delete(cardId);
+      }
+    };
+  }
+
+  if (error) {
+    return <p role="alert">{error}</p>;
+  }
+
+  if (!board) {
+    return <p>Loading board…</p>;
+  }
+
+  return (
+    <div class="board">
+      <h1>{board.title}</h1>
+      <div class="columns">
+        {board.columns.map((column) => (
+          <div
+            key={column.id}
+            class="column"
+            data-column-id={column.id}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop(column.id)}
+          >
+            <h2>{column.title}</h2>
+            <ul>
+              {column.cards.map((card) => (
+                <li
+                  key={card.id}
+                  data-card-id={card.id}
+                  class="card"
+                  draggable
+                  onDragStart={handleDragStart(card.id)}
+                >
+                  {card.title}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+mount effect ตอนนี้ทำสามอย่างเรียงกัน ตรงกับลำดับที่ canonical contract ของโมดูลนี้ระบุไว้เป๊ะ: อ่าน token แล้ว guard ก่อน (ไม่เปลี่ยนจาก [drag-drop](/taskflow/th/kanban-island/drag-drop/)); ยิง `fetchBoard()` เริ่มต้น; แล้วเรียก `connectBoard` ส่ง `reconcile` เป็น `onEvent` และ closure เล็ก ๆ ที่ครอบ `fetchBoard` เป็น `onReconnect` cleanup function ของ `useEffect` คือ disposer ที่ `connectBoard` return มาเอง return ตรง ๆ (`return disconnect;`) แทนที่จะห่อด้วย arrow function อีกชั้น — return type ของ `connectBoard` คือ `() => void` ตรงกับสิ่งที่ `useEffect` คาดหวังให้เป็น cleanup function อยู่แล้วเป๊ะ ๆ
+
+`fetchBoard` กับ `reconcile` ทั้งคู่ถูกสร้างใหม่ใน body ของ `Board` ทุก render และไม่มีตัวไหนอยู่ใน dependency array ของ effect เลย — ตรงนี้ปลอดภัย ไม่ใช่ความผิดพลาด เพราะทั้งคู่ไม่ได้ close over state `board` ตรง ๆ: `fetchBoard` เรียก `setBoard` ด้วยค่าที่ fetch มาสด ๆ และ `reconcile` เรียก `setBoard` ด้วยรูปแบบ updater function อ่าน `current` จากสิ่งที่ Preact ส่งเข้ามา ณ ตอนที่มันรันจริง ไม่ใช่จากตัวแปร `board` ที่ถูก capture ไว้ตอน effect fire ครั้งแรก นั่นหลบกับดัก stale-closure ได้เต็ม ๆ — effect ต้องรันแค่ครั้งเดียวต่อ `boardId` และมันก็ทำแบบนั้นจริง ๆ
+
+**ทำไม branch `column.updated` ของ reconcile ถึงทำงานถูกต้อง แม้ type TypeScript ของ `Column` จะอ้างว่า `cards` มีอยู่เสมอ** payload `column.updated` ของ [ws-endpoint](/taskflow/th/realtime/ws-endpoint/) คือ `{ column: Column }` โดยที่ `Column` นั้นคือ struct Rust แบบ *เปล่า* — `id`, `board_id`, `title`, `position` — ไม่มี field `cards` ใน JSON เลย ต่างจาก interface `Column` ของไฟล์นี้ที่มี `cards: Card[]` เสมอ เพราะทุกที่อื่นที่ใช้ `Column` ใน component นี้ต้องการรูปแบบนั้น `{ ...c, ...column }` ไม่ได้ clobber `c.cards` ด้วย `undefined` แม้จะมีความไม่ตรงกันนี้ แต่ไม่ใช่เพราะ TypeScript กำลังเช็คอะไรอยู่ตรงนี้ — เป็นเพราะ object spread จะ override เฉพาะ own property ที่ *มีอยู่จริง* บน source object เท่านั้น และ JSON payload จริงไม่เคยมี key `cards` ให้ spread เข้ามาเลย นี่คือ "คำสัญญาแค่ตอน compile-time" แบบเดียวกับที่ [api-client](/taskflow/th/frontend/api-client/) เคยเรียกเกี่ยวกับ generic ของ `apiFetch<T>` — รูปร่าง TypeScript ของ `Column` เป็น superset ของสิ่งที่ wire format ของ event นี้ส่งมาจริง และความถูกต้องตรงนี้ขึ้นอยู่กับ runtime object-spread semantics ที่บังเอิญตรงกับช่องว่างนั้น ไม่ใช่ type checker ที่จับได้ (มันจับไม่ได้ ไม่มีอะไรให้จับ) branch ของ `column.created` ไม่มีปัญหานี้แบบเดียวกัน เพราะมันสร้าง `{ ...column, cards: [] }` อย่างชัดเจน — column ใหม่จริง ๆ เริ่มต้นด้วยไม่มีการ์ดจริง ๆ ดังนั้นไม่มี `cards` ของ entry เดิมที่จะรักษาไว้หรือทำหายโดยไม่ได้ตั้งใจ
+
+## Verify
+
+```bash
+cd frontend
+npm run build
+npm run preview
+```
+
+ใช้ `$BOARD_ID` เดียวกันกับ column/card ที่ seed ไว้จาก section Verify ของ [drag-drop](/taskflow/th/kanban-island/drag-drop/) เปิด `/boards/$BOARD_ID` ใน browser tab **สอง** อัน (หรือหน้าต่างปกติหนึ่งอันกับ private/incognito อีกอัน ทั้งคู่ login เป็น member คนเดียวกันหรือคนละคนของบอร์ดก็ได้) ลากการ์ดในแท็บหนึ่ง ยืนยันว่ามันย้ายในอีกแท็บภายในไม่กี่วินาที โดยไม่ต้อง reload — นั่นคือ `card.moved` ที่มาทาง WebSocket และ `reconcile` apply มันเข้าไป ไม่เกี่ยวกับ Set `pending` ของแท็บนั้นเลยเพราะการย้ายไม่ได้เกิดที่นั่น
+
+ยืนยันเรื่อง reconnection: ในขณะที่ frontend กับ backend ทั้งคู่รันอยู่ ให้หยุด backend process (`Ctrl+C` ที่ `cargo run -p api`) ดูแท็บ Network ของ devtools ใน browser (filter WS) ว่าการเชื่อมต่อปิดลง แล้วเปิด backend อีกครั้ง `connectBoard` ควรเปิด socket ใหม่ภายในไม่กี่วินาที — delay ที่แน่นอนขึ้นอยู่กับว่าผ่านไปกี่ครั้งก่อนที่ backend จะกลับมา ตามตาราง backoff — และทันทีที่มันเปิดใหม่ ดู HTTP request ปกติในแท็บ Network ว่ามี `GET /boards/$BOARD_ID` ใหม่ยิงออกไปอัตโนมัติ ยืนยันว่า refetch ของ `onReconnect` รันจริง
+
+## Recap
+
+คุณสร้าง `connectBoard` ใน `lib/ws.ts` — เปิด, ฟัง, และเมื่อปิดโดยไม่มีคำขอ ให้ reconnect หลัง delay ที่เพิ่มเป็นสองเท่าในทุกครั้งที่ล้มเหลวติดกัน จำกัดเพดานไว้ที่สิบวินาที รีเซ็ตกลับเป็นศูนย์ทันทีที่การเชื่อมต่อสำเร็จจริง คุณต่อมันเข้ากับ `Board.tsx`: ฟังก์ชัน `reconcile` ใหม่ที่ apply event ทุกตัวใน catalog ของ [protocol](/taskflow/th/realtime/protocol/) เข้า state ตาม id และ mount effect ที่ fetch ครั้งเดียว connect ครั้งเดียว และเคลียร์ socket ของมันตอน unmount คุณให้ Set `pending` จาก [drag-drop](/taskflow/th/kanban-island/drag-drop/) มีงานที่สอง — จำ echo การย้ายของ island ตัวเองได้ — และระบุตรง ๆ ว่า heuristic นี้พังตรงไหน: client สองตัวแข่งกันย้ายการ์ดใบเดียวกัน สถานการณ์ที่โมดูลนี้แก้แบบเดียวกับที่ `UPDATE` ของ Postgres เองแก้มาตลอด last write wins โดยไม่มี version check จับตัวที่แพ้ และคุณเห็นแล้วว่าทำไม `onReconnect` ที่ยิง refetch แบบไม่มีเงื่อนไขในทุกการเชื่อมต่อ (ไม่ใช่แค่ตอน *re*connect) คือเหตุผลแบบ "คุ้มที่จะไม่ special-case ทิ้ง" เดียวกับที่ [reconnect](/taskflow/th/realtime/reconnect/) เคยใช้ฝั่ง server มาแล้ว นำมาใช้ตรงนี้ฝั่ง client Module 9 เสร็จสมบูรณ์แล้ว — บอร์ด Kanban ที่ TaskFlow ตั้งใจจะสร้างตั้งแต่ [introduction](/taskflow/th/introduction/overview/): มี authentication, drag-and-drop, optimistic, และ live ในทุกแท็บที่เปิดดูอยู่
