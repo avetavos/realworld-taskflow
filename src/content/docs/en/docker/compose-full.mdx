@@ -1,0 +1,201 @@
+---
+title: Full Compose Stack
+description: Complete taskflow/infra/docker-compose.yml — db, redis, backend, and frontend wired together with healthcheck-gated depends_on — then the full end-to-end walk from registration to a card dragged live across two browser tabs, plus troubleshooting for ports, CORS, and the db-vs-localhost host trap.
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+The complete `taskflow/infra/docker-compose.yml` — the `db` and `redis` services from [compose-skeleton](/taskflow/en/setup/compose-skeleton/), joined now by `backend` (built from [backend-image](/taskflow/en/docker/backend-image/)) and `frontend` (built from [frontend-image](/taskflow/en/docker/frontend-image/)). One command, `docker compose up --build`, brings up all four containers in the order they actually depend on each other, and the whole product — register, log in, create a board, drag a card, watch it move live in a second tab — runs entirely inside Docker, no native `cargo run` or `npm run dev` anywhere.
+
+```
+taskflow/
+├── .env
+├── backend/
+├── frontend/
+├── infra/
+│   ├── backend.Dockerfile
+│   ├── frontend.Dockerfile
+│   └── docker-compose.yml    # complete now: db, redis, backend, frontend
+└── migrations/
+```
+
+## Why
+
+Four services now start from one `docker compose up`, but they can't all start at once and expect things to work. `backend`'s very first action — before it even opens a listening socket — is `sqlx::migrate!(...).run(&db).await?` from [backend-image](/taskflow/en/docker/backend-image/), which needs Postgres not just *running* but actually accepting connections. Start `backend` the instant `db`'s container process begins, and the migration call hits a socket nobody's listening on yet — a real, common failure mode with plain `depends_on` (which by default only waits for a container to *start*, not for whatever's inside it to be *ready*). This is exactly why `db` and `redis` got healthchecks all the way back in [compose-skeleton](/taskflow/en/setup/compose-skeleton/), even though nothing depended on them yet at the time — this lesson is where that groundwork finally pays off, via `depends_on: { condition: service_healthy }`.
+
+`frontend` depending on `backend` is a different, weaker kind of dependency. The `frontend` *container* never calls `backend` directly — [frontend-image](/taskflow/en/docker/frontend-image/) already established that `PUBLIC_API_URL` points browsers at `http://localhost:8080`, and it's the **browser**, not the Node server inside the `frontend` container, that makes every `/auth/register`, `/boards`, and `/ws/boards/:id` call. `frontend`'s `depends_on: backend` exists purely so `docker compose up`'s log output and startup order read sensibly to a human watching it boot — not because the frontend container has any technical need for `backend` to answer requests.
+
+## Pros & cons
+
+**`depends_on` gated on `condition: service_healthy` (what we're using for `backend`) vs. plain `depends_on` (a container-started-only wait) plus retry logic in the app itself**
+
+- Pros: the ordering guarantee lives in one declarative place — the compose file — instead of being re-implemented as connection-retry-with-backoff logic inside `main.rs`. It's also strictly correct for the failure mode that actually matters here: "Postgres's container process exists" and "Postgres is accepting connections" are genuinely different moments, sometimes by several seconds, and `pg_isready`-backed healthchecks are exactly what tells them apart.
+- Cons: it only guarantees `db` and `redis` were healthy at the **moment `backend` started** — if Postgres becomes unreachable ten minutes into a long-running `backend` process (a network blip, a restart of just the `db` container), `depends_on` does nothing to help; that has to be handled by connection-pool retry logic inside the app itself, which SQLx's pool already does on a per-query basis. Compose's dependency ordering and an app's own resilience to a dependency *going away later* are two different problems, and this lesson only solves the first one.
+
+**One `.env` shared by `env_file`, with `backend`'s `environment:` block overriding just `DATABASE_URL`/`REDIS_URL` (what we're using) vs. two separate env files — one for native `cargo run`, one for Compose**
+
+- Pros: one file remains the single source of truth for `JWT_SECRET`, `APP_PORT`, and `FRONTEND_ORIGIN` — the values that don't change between running the backend natively and running it in a container. Compose's own precedence rule (`environment:` wins over `env_file:` for a key defined in both) does the rest: `DATABASE_URL` and `REDIS_URL` from `.env` still say `localhost`, correct for [migrations](/taskflow/en/database/migrations/)'s native `sqlx-cli` usage, and get overridden only for the containerized `backend` service, to `db`/`redis` — the hostnames Docker's internal DNS actually resolves.
+- Cons: it's not obvious at a glance that `backend`'s effective `DATABASE_URL` differs from what's written in `.env` — a learner grepping `.env` for the connection string and not noticing the `environment:` override in `docker-compose.yml` will get confused the first time. `docker compose config` (used in this lesson's Verify section) is the direct way to see the fully resolved value.
+
+## Build it
+
+### 1. `infra/docker-compose.yml` — complete
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: taskflow
+      POSTGRES_PASSWORD: taskflow
+      POSTGRES_DB: taskflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build:
+      context: ..
+      dockerfile: infra/backend.Dockerfile
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgres://taskflow:taskflow@db:5432/taskflow
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: infra/frontend.Dockerfile
+      args:
+        PUBLIC_API_URL: http://localhost:8080
+    depends_on:
+      - backend
+    ports:
+      - "4321:4321"
+
+volumes:
+  pgdata: {}
+```
+
+What changed since [compose-skeleton](/taskflow/en/setup/compose-skeleton/): `db` and `redis` are untouched, byte for byte. `backend` and `frontend` are new — both `build:` from the images the last two lessons wrote, both reachable from your host at the same ports [app-skeleton](/taskflow/en/backend-foundations/app-skeleton/) and [board-page](/taskflow/en/kanban-island/board-page/) always used, `8080` and `4321`.
+
+- **`env_file: [../.env]`** on `backend` loads every variable from the root `.env` [repo-layout](/taskflow/en/setup/repo-layout/) created — `JWT_SECRET`, `APP_PORT`, `FRONTEND_ORIGIN`, and, initially, `DATABASE_URL`/`REDIS_URL` too.
+- **`environment:`** on `backend`, listed after `env_file`, overrides exactly those last two keys — Compose merges the two, with `environment:` winning on any key present in both. This is the `db`-not-`localhost` fact from this course's very first environment table, made concrete: inside the Compose network, Postgres and Redis are reachable at their **service names**, not `localhost`.
+- **`backend`'s own `healthcheck`** curls its own `/health` route from [app-skeleton](/taskflow/en/backend-foundations/app-skeleton/) — the same endpoint this whole course has used since Module 3 to mean "this process is up and its router is live." `start_period: 10s` gives the container a grace window (compiling nothing at this point, but connecting to Postgres and running migrations still takes a moment) before a slow-but-not-actually-broken first check counts against `retries`.
+- **`frontend`'s `build.args: { PUBLIC_API_URL: http://localhost:8080 }`** is the build-time `ARG` [frontend-image](/taskflow/en/docker/frontend-image/) wired up — `localhost`, not `backend`, because [frontend-image](/taskflow/en/docker/frontend-image/) already established the browser is what reads this value, and a learner's browser has no way to resolve Docker's internal `backend` hostname.
+- **No top-level `version:` key** — same note as [compose-skeleton](/taskflow/en/setup/compose-skeleton/): modern Compose doesn't need it.
+
+### 2. Bring the whole stack up
+
+From `taskflow/infra/`:
+
+```bash
+cd taskflow/infra
+docker compose up --build
+```
+
+`--build` forces `backend` and `frontend` to (re)build their images from the current source before starting — necessary the first time, and any time you've changed backend or frontend code since the last build. Compose brings services up respecting `depends_on`: `db` and `redis` start first and Compose waits for both healthchecks to pass, *then* `backend` starts (waits for its own healthcheck), and `frontend` starts once `backend`'s container has started (not necessarily healthy, per the Why section above).
+
+## Verify
+
+### Confirm all four containers are healthy
+
+```bash
+docker compose ps
+```
+
+Expected — `db`, `redis`, and `backend` all show `healthy`; `frontend` has no healthcheck defined here, so it shows `Up`:
+
+```
+NAME              IMAGE               STATUS                    PORTS
+infra-backend-1   infra-backend       Up 20 seconds (healthy)   0.0.0.0:8080->8080/tcp
+infra-db-1        postgres:16         Up 30 seconds (healthy)   0.0.0.0:5432->5432/tcp
+infra-frontend-1  infra-frontend      Up 15 seconds             0.0.0.0:4321->4321/tcp
+infra-redis-1     redis:7             Up 30 seconds (healthy)   0.0.0.0:6379->6379/tcp
+```
+
+If `backend` never reaches `healthy`, check its logs before anything else:
+
+```bash
+docker compose logs backend
+```
+
+### End-to-end acceptance walk
+
+This is the whole product, running entirely from `docker compose up`, exercised the way an actual user would — register, log in, create a board, and watch a drag-and-drop move sync live across two tabs.
+
+1. **Register.** Open `http://localhost:4321/register` ([auth-pages](/taskflow/en/frontend/auth-pages/)), fill in an email, password, and display name, and submit. You should land on `/` with the nav bar showing "Boards / Log out" — `localStorage.getItem('token')` in devtools holds the JWT the backend issued.
+2. **Create a board.** Still on `/` ([boards-list](/taskflow/en/frontend/boards-list/)), use the create-board form to make a board titled `Sprint 1`. It appears in the list immediately; click it. The URL bar now reads `http://localhost:4321/boards/<uuid>` — copy that `<uuid>`, you'll need it in a moment. The page itself loads with no columns yet, since none exist.
+3. **Seed columns and cards.** [drag-drop](/taskflow/en/kanban-island/drag-drop/) built the drag-and-drop interaction but deliberately never built a column/card creation UI — that's a real, documented boundary of this course's frontend, not an oversight here. Seed the board you just created through the API directly, reusing the same account (log in via `curl` to get a token for it, rather than registering a second one):
+
+   ```bash
+   TOKEN=$(curl -s -X POST http://localhost:8080/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{"email":"<the email you registered with>","password":"<the password you used>"}' \
+     | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
+   BOARD_ID=<the uuid you copied from the URL bar in step 2>
+
+   TODO=$(curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"title":"To Do"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+   DOING=$(curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"title":"Doing"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+   curl -s -X POST http://localhost:8080/columns/$TODO/cards \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"title":"Card A"}'
+   curl -s -X POST http://localhost:8080/columns/$TODO/cards \
+     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"title":"Card B"}'
+   ```
+
+4. **Reload the board.** Back in the browser tab from step 2, reload `http://localhost:4321/boards/$BOARD_ID`. Both columns now render with their cards.
+5. **Open a second tab.** Open the same `http://localhost:4321/boards/$BOARD_ID` URL in a **second** browser tab (`localStorage` is shared across tabs in the same browser, so it's already logged in — no second login needed).
+6. **Drag, and watch it sync.** In tab 1, drag "Card A" from "To Do" into "Doing." It moves instantly in tab 1 ([drag-drop](/taskflow/en/kanban-island/drag-drop/)'s optimistic update). Within a moment, with no reload, it moves in **tab 2** as well — that's [ws-endpoint](/taskflow/en/realtime/ws-endpoint/)'s `card.moved` event, published through [redis-backplane](/taskflow/en/realtime/redis-backplane/), arriving over the WebSocket [live-sync](/taskflow/en/kanban-island/live-sync/) wired into `Board.tsx`, and `reconcile` applying it to tab 2's state by id.
+
+That last step is the payoff of the entire course: two independent browser tabs, two independent WebSocket connections, two independent `Hub` subscribers on the backend, all agreeing on one board's state in real time — running from a single `docker compose up --build`.
+
+### Troubleshooting
+
+**Port already in use.** `docker compose up` fails immediately with something like `Bind for 0.0.0.0:5432 failed: port is already allocated`. Something else on your machine — a native Postgres or Redis from [compose-skeleton](/taskflow/en/setup/compose-skeleton/)'s earlier `docker compose up -d db redis` still running, or an unrelated project — already holds that port. Find it with `lsof -i :5432` (swap in whichever port failed) and stop it, or change the host side of that service's `ports:` mapping (e.g. `"5433:5432"`) if you'd rather keep both running.
+
+**CORS errors in the browser console.** A failed `fetch` from `/register` or `/login` with a browser console error mentioning `Access-Control-Allow-Origin` means `FRONTEND_ORIGIN` in `.env` doesn't exactly match the origin the browser is actually running on — scheme, host, *and* port all have to match [app-skeleton](/taskflow/en/backend-foundations/app-skeleton/)'s exact-origin `CorsLayer`. It should read `FRONTEND_ORIGIN=http://localhost:4321`. Confirm what `backend` actually sees at runtime with `docker compose exec backend env | grep FRONTEND_ORIGIN`, then `docker compose restart backend` after fixing `.env` — no rebuild needed, since `FRONTEND_ORIGIN` is read from the environment at process start, not baked into the image the way `PUBLIC_API_URL` is.
+
+**`db` vs. `localhost` — the classic gotcha.** If `backend` restarts in a loop and `docker compose logs backend` shows something like `error connecting to server: Connection refused` or `failed to lookup address information: Name or service not known`, the most likely cause is `DATABASE_URL` (or `REDIS_URL`) pointing at `localhost` *inside the `backend` container* — where `localhost` means the `backend` container itself, not the `db` container, so nothing is listening there. This is exactly what the `environment:` override in `docker-compose.yml` exists to prevent; if you've edited the compose file and that override block is gone, `backend` falls back to `.env`'s native-dev value (`@localhost:5432`) and breaks the moment it runs inside Docker's network instead of on your host. The fix is always the same: anything running **inside** the Compose network reaches Postgres and Redis by **service name** (`db`, `redis`); `localhost` is only correct for a process — `sqlx-cli`, a native `cargo run` — running directly on your host machine, outside Docker entirely.
+
+## Recap
+
+`taskflow/infra/docker-compose.yml` is complete: `db` and `redis` from Module 1, joined by `backend` (waiting on both via `condition: service_healthy` before it ever runs its embedded migration) and `frontend` (waiting only on `backend` having started, since the browser — not the frontend container — is what actually calls the API). `docker compose up --build` brings up all four from one command, `docker compose ps` confirms three real healthchecks passing, and the end-to-end walk proved the whole point of this course: register and log in through real forms, create a board through a real form, seed columns and cards through the same API [move-reorder](/taskflow/en/rest-api/move-reorder/) and [drag-drop](/taskflow/en/kanban-island/drag-drop/) already used in their own Verify sections, then watch a drag in one browser tab sync live to a second one with no reload — authentication, a REST API, Postgres, Redis, and a WebSocket realtime layer, all running from containers built by this module. That's TaskFlow, end to end.

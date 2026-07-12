@@ -1,0 +1,202 @@
+---
+title: Backend Image
+description: บรรจุ taskflow-api ลงใน infra/backend.Dockerfile — multi-stage build ของ Rust, ทำไม runtime image ถึงไม่มี Rust toolchain, ตัวแปร cargo-chef สำหรับ caching, และการฝัง migration ไว้ใน main.rs ด้วย sqlx::migrate!
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`taskflow/infra/backend.Dockerfile` — Dockerfile แบบ multi-stage ที่แปลง Rust workspace ที่สร้างมาตลอดโมดูล [backend-foundations](/taskflow/th/backend-foundations/app-skeleton/), [auth](/taskflow/th/auth/handlers/), [rest-api](/taskflow/th/rest-api/design/), [caching](/taskflow/th/caching/rate-limit/) และ [realtime](/taskflow/th/realtime/redis-backplane/) ให้กลายเป็น container image เดียวที่รัน binary `taskflow-api` ที่ compile แล้ว พร้อมกันนั้นก็มี `.dockerignore` ที่ root ของ repo และการเพิ่มโค้ดหนึ่งบรรทัดใน `main.rs` — เรียก `sqlx::migrate!` แบบฝังไว้ในตัว ทำให้ container ที่เพิ่งเริ่มทำงานอัปเดต schema ฐานข้อมูลให้ตัวเองได้เลย ไม่ต้องมีขั้นตอน migration แยก และไม่ต้องมี `sqlx-cli` อยู่ใกล้ๆ production เลย
+
+```
+taskflow/
+├── .dockerignore
+├── backend/
+│   └── api/
+│       └── src/
+│           └── main.rs      # one new line
+├── infra/
+│   └── backend.Dockerfile
+└── migrations/
+```
+
+เมื่อจบบทเรียนนี้ การรัน `docker build -f infra/backend.Dockerfile -t taskflow-backend .` จาก `taskflow/` จะได้ image ที่ไม่มี Rust compiler ไม่มี `cargo` ไม่มี source code ใดๆ นอกจากสิ่งที่ฝังอยู่ใน binary แล้ว — มีแค่ executable `taskflow-api` ที่ compile แล้ว กับ shared library สองตัวที่มันลิงก์ตอน runtime
+
+## Why
+
+ทุกโมดูลก่อนหน้านี้รัน backend ด้วย `cargo run -p api` บนเครื่องของคุณเอง ที่ซึ่ง Rust toolchain ติดตั้งอยู่แล้ว แต่ container ที่ส่งไปให้เพื่อนร่วมทีม, CI runner หรือ production host ไม่สามารถสมมติแบบนั้นได้ — มันต้องพกทุกอย่างที่ binary ต้องการเพื่อรัน และ *เท่านั้น* ไม่งั้นมันจะแบกคอมไพเลอร์และ build tooling หลายร้อย MB ที่ไม่มีใครแตะต้องตอน runtime เลย
+
+**ทำไม runtime image ถึงไม่ต้องมี `sqlx-cli` หรือฐานข้อมูลจริงตอน build** [migrations](/taskflow/th/database/migrations/) ใช้ `sqlx-cli` และ `sqlx migrate run` เป็นขั้นตอน manual กับฐานข้อมูลที่รันอยู่ แต่ทุก query ใน codebase นี้เขียนด้วย `sqlx::query_as::<_, T>()` — สไตล์ที่ตรวจสอบตอน runtime ไม่ใช่ macro `query!`/`query_as!` — โดยตั้งใจเพื่อให้ `cargo build` ไม่ต้องการ `DATABASE_URL` ที่ใช้งานได้จริงเลย ([auth/handlers](/taskflow/th/auth/handlers/) พูดถึง trade-off นี้ตรงๆ) การตัดสินใจนั้นได้ผลตอบแทนอีกครั้งที่นี่ — builder stage ของ Docker ด้านล่างสามารถรัน `cargo build --release` โดยไม่ต้องมีฐานข้อมูลใดๆ เข้าถึงได้เลย เพราะไม่มีอะไรเกี่ยวกับการ compile `taskflow-api` ที่แตะ Postgres เลย แต่ migration ก็ยังต้องรันที่ไหนสักแห่ง — นั่นคือสิ่งที่บรรทัด `sqlx::migrate!` ที่เพิ่มเข้าไปใน `main.rs` ในบทเรียนนี้มีไว้ทำ ย้ายจากขั้นตอน manual ก่อน deploy มาเป็นสิ่งที่ binary ทำให้ตัวเอง ครั้งเดียว ทุกครั้งที่มันเริ่มทำงาน
+
+## Pros & cons
+
+**Multi-stage build — builder เป็น `rust:1-bookworm`, runtime เป็น `debian:bookworm-slim` (แบบที่เราใช้) เทียบกับ single-stage image ที่สร้างบน `rust:1-bookworm` ตลอด**
+
+- ข้อดี: image ที่คุณ deploy จริงไม่มี compiler ไม่มี `cargo` registry cache ไม่มี `~/.rustup` toolchain — ไม่มีอันไหนที่ถูกเข้าถึงได้ตอน runtime เลย ดังนั้นไม่มีอันไหนควรอยู่ใน image ที่เข้าถึงได้ตอน runtime พูดให้เป็นรูปธรรม นั่นคือความต่างระหว่าง image ขนาดหลักร้อย MB (`debian:bookworm-slim` บวก binary หนึ่งตัวบวก shared library สองตัว) กับ image ขนาดหลาย GB (Rust toolchain เต็มรูปแบบเพียงอย่างเดียวก็เกินหนึ่ง GB แล้ว) แพ็กเกจที่น้อยลงใน image สุดท้ายยังหมายถึงพื้นที่ให้ CVE scanner ตรวจเจอน้อยลง และไม่มีอะไรที่ผู้โจมตีที่ได้ code execution ใน container จะใช้ compile และรันโค้ดใหม่ตามใจชอบได้
+- ข้อเสีย: มี base image สองตัวที่ต้อง patch แทนที่จะเป็นตัวเดียว builder stage ก็ยังต้อง compile workspace ทั้งหมดให้เสร็จก่อนที่บรรทัด `COPY --from=builder` จะรันได้ ดังนั้น build จากศูนย์ไม่ได้เร็วกว่า single-stage เลย — ข้อได้เปรียบเรื่องขนาดและความปลอดภัยอยู่ที่สิ่งที่ถูก ship ทั้งหมด ไม่ใช่เวลาที่ใช้ build Dockerfile ก็ยาวขึ้นอีกไม่กี่บรรทัด และต้องเข้าใจ named stage (`AS builder`, `AS runtime`) กับ syntax `COPY --from=` ซึ่งเป็นอีกส่วนหนึ่งของโมเดล Docker ที่ต้องเรียนรู้
+
+**ฝัง migration ด้วย `sqlx::migrate!` ตอน binary เริ่มทำงาน (แบบที่เราใช้) เทียบกับขั้นตอน `sqlx migrate run` แยกต่างหาก (migrate service เฉพาะ, init container, หรือคำสั่ง manual ก่อน deploy)**
+
+- ข้อดี: มีชิ้นส่วนที่เคลื่อนไหวได้ในทั้ง stack น้อยลงหนึ่งชิ้น — ไม่ต้องติดตั้ง binary `sqlx-cli` ที่ไหนใน production เลย ไม่มี service แยกหรือขั้นตอน CI ที่ต้องรัน *ก่อน* container ของแอปและอาจถูกลืมได้ migration ที่รันจะตรงกับ binary ที่คุณกำลังเริ่มเสมอ เพราะ `sqlx::migrate!` ฝังไฟล์ SQL ลงใน executable ตอน compile time — คุณไม่มีทางเผลอเริ่ม binary ใหม่กับ schema เก่าที่ยังไม่ migrate หรือ binary เก่ากับ schema ที่ migration ใหม่เปลี่ยนไปแล้วโดยไม่รู้ตัว
+- ข้อเสีย: migration ที่ล้มเหลวตอนนี้ทำให้ *การเริ่มทำงานของทั้งแอป* ล้มเหลวไปด้วย แทนที่จะเป็นขั้นตอนแยกที่วินิจฉัยได้เอง — แยกยากขึ้นว่า "แอปไม่ยอมเริ่ม" กับ "migration พัง" ต่างกันแค่ไหนเมื่อมองผ่านๆ ทุกครั้งที่ restart จะตรวจสอบ `_sqlx_migrations` ใหม่ (ถูก แต่ก็ไม่ได้ฟรี) และไม่มี rollback อัตโนมัติ — migration ที่แย่ที่ apply ไปแล้วต้องแก้ไปข้างหน้าด้วย migration ใหม่ ข้อจำกัดเดียวกับที่ [migrations](/taskflow/th/database/migrations/) เคยพูดถึงสำหรับ `sqlx-cli` เอง
+
+## Build it
+
+### 1. `main.rs` — ฝัง migration
+
+เพิ่มหนึ่งบรรทัดใน `taskflow/backend/api/src/main.rs` ทันทีหลังจากสร้าง connection pool (`main.rs` ที่บทเรียนนี้ต่อยอดมาคือตัวที่สร้างขึ้นตลอด [realtime/ws-endpoint](/taskflow/th/realtime/ws-endpoint/)):
+
+```rust
+let db = db::create_pg_pool(&config.database_url).await?;
+let redis = db::create_redis_pool(&config.redis_url)?;
+
+// Apply any pending migrations before the server starts accepting
+// connections. Safe to run on every boot — SQLx records applied
+// migrations in `_sqlx_migrations` and skips anything already run.
+sqlx::migrate!("../../migrations").run(&db).await?;
+```
+
+path ตรงนี้สำคัญและพลาดง่าย: argument ของ `sqlx::migrate!` ถูก resolve แบบ relative กับ `CARGO_MANIFEST_DIR` — โฟลเดอร์ที่มี `Cargo.toml` ของ *crate นี้* คือ `taskflow/backend/api/` ไม่ใช่ workspace root และไม่ใช่ที่ที่คุณสั่ง `cargo` จากตรงนั้น `migrations/` อยู่สูงขึ้นไปสองระดับจากตรงนั้น (`api/` → `backend/` → `taskflow/`) ดังนั้น `"../../migrations"` คือ path แบบ relative ที่ถูกต้อง ตรงกับโครงสร้างที่ [repo-layout](/taskflow/th/setup/repo-layout/) วางไว้ตั้งแต่โมดูล 1 macro นี้อ่านไฟล์ `.sql` เหล่านั้น **ตอน compile time** และฝัง content ของมันลงใน binary โดยตรง — นี่คือเหตุผลที่ builder stage ของ Docker ด้านล่างต้อง `COPY` โฟลเดอร์ `migrations/` เข้าไป *ก่อน* รัน `cargo build` ทั้งที่ตอน runtime ไม่มีอะไรต้องการมันตรงนั้นอีกแล้วจริงๆ
+
+### 2. `.dockerignore` ที่ root ของ repo
+
+`context: ..` ที่ Dockerfile ทั้งสองใช้ (backend และ frontend เชื่อมกันใน [compose-full](/taskflow/th/docker/compose-full/)) หมายความว่า build context คือ `taskflow/` เอง — ดังนั้น `.dockerignore` ที่ตัดมันออกจึงอยู่ที่ `taskflow/.dockerignore` ข้างๆ `.gitignore` ที่ root จาก [repo-layout](/taskflow/th/setup/repo-layout/):
+
+```txt
+# Rust
+backend/target/
+**/*.rs.bk
+
+# Node / Astro
+frontend/node_modules/
+frontend/dist/
+frontend/.astro/
+
+# Environment & secrets — never let these reach a build context or a layer
+.env
+
+# VCS / OS
+.git/
+.DS_Store
+```
+
+ถ้าไม่มีไฟล์นี้ ทุก `docker build` จะ tar โฟลเดอร์ `backend/target/` (ซึ่งอาจโตถึงหลาย GB หลังจาก `cargo build` ไม่กี่ครั้ง) ก่อนแล้วส่งให้ Docker daemon ก่อนที่คำสั่งแรกจะรันด้วยซ้ำ — ช้าในทุก build และเป็นความเสี่ยงจริงถ้า `.env` เผลอไปอยู่ใน image layer ที่ถูก push ไปที่ไหนสักแห่ง
+
+### 3. `infra/backend.Dockerfile`
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+# ---- Builder ----
+FROM rust:1-bookworm AS builder
+WORKDIR /app
+
+# Copy the whole backend workspace and the migrations it embeds at compile
+# time — both need to be present before `cargo build` runs.
+COPY backend/ ./backend/
+COPY migrations/ ./migrations/
+
+WORKDIR /app/backend
+RUN cargo build --release -p taskflow-api
+
+# ---- Runtime ----
+FROM debian:bookworm-slim AS runtime
+WORKDIR /app
+
+# ca-certificates: TLS root certs, needed for any outbound HTTPS call.
+# curl: only so Compose's healthcheck (compose-full) can poll GET /health
+#   from inside this container — not needed by the binary itself.
+# libssl3: sqlx's TLS backend links against the system OpenSSL at
+#   runtime; without it the binary fails to start with a missing .so.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/backend/target/release/taskflow-api /usr/local/bin/taskflow-api
+COPY migrations/ ./migrations/
+
+EXPOSE 8080
+CMD ["taskflow-api"]
+```
+
+เดินผ่านส่วนที่ไม่ชัดเจนในตัวเอง:
+
+- **`WORKDIR /app` แล้ว `COPY backend/ ./backend/` และ `COPY migrations/ ./migrations/`** — การ copy ทั้งสองรักษาความสัมพันธ์แบบ sibling ที่ `backend/` กับ `migrations/` มีอยู่แล้วใน repo tree จริง ดังนั้น path `"../../migrations"` ที่ฝังอยู่ใน `sqlx::migrate!` จึง resolve เหมือนกันทั้งใน container และบนเครื่องคุณเอง
+- **`cargo build --release -p taskflow-api`** — `-p taskflow-api` เลือก package จากชื่อ `[package] name` ของมัน (จาก [backend-init](/taskflow/th/setup/backend-init/) โฟลเดอร์ crate คือ `api/` แต่ชื่อ package คือ `taskflow-api`) ไม่ใช่จากชื่อโฟลเดอร์ `--release` สำคัญ — debug build ช้ากว่ามากตอน runtime และ compiler flag ก็ไม่ใช่แบบที่คุณอยากใช้กับ traffic จริง
+- **`COPY --from=builder /app/backend/target/release/taskflow-api /usr/local/bin/taskflow-api`** — ไฟล์เดียวจาก build ทั้งหมดนี้ที่ runtime image ต้องการจริงๆ `/usr/local/bin` อยู่ใน `PATH` ของ `debian:bookworm-slim` อยู่แล้ว นั่นคือเหตุผลที่ `CMD ["taskflow-api"]` ด้านล่างเรียกมันด้วยชื่อได้เลยแทนที่จะต้องใช้ full path
+- **`COPY migrations/ ./migrations/` ใน runtime stage** — จริงๆ แล้วไม่จำเป็นสำหรับให้ `sqlx::migrate!` ทำงาน เพราะ migration ถูกฝังใน binary จาก builder stage อยู่แล้ว มันอยู่ตรงนี้เพื่อความโปร่งใสในการปฏิบัติงาน — operator ที่ exec เข้าไปใน container ที่กำลังรันแล้วสั่ง `ls migrations/` จะเห็น SQL ตรงกับที่ถูกฝังจริงๆ และเป็นโฟลเดอร์ที่พร้อมใช้สำหรับใครก็ตามที่ต้องรัน `sqlx-cli` แบบ manual กับ schema version นี้เพื่อ query วินิจฉัยแบบครั้งเดียว
+- **ไม่มีคำสั่ง `USER` ที่นี่** — ขั้นตอน production-hardening (user ที่ไม่ใช่ root โดยเฉพาะ) ที่เป็นก้าวต่อไปที่สมเหตุสมผลแต่อยู่นอกขอบเขตของคอร์สนี้ ขอตั้งข้อสังเกตไว้ว่าเป็นสิ่งที่ deployment จริงจะเพิ่มเข้าไป
+
+### 4. Optional: ตัวแปร `cargo-chef`
+
+Dockerfile ด้านบน compile dependency ทุกตัวของ `taskflow-api` ใหม่ตั้งแต่ต้นทุกครั้งที่ source file ใดๆ เปลี่ยน — layer cache ของ Docker ช่วยได้ก็ต่อเมื่อ layer `COPY backend/ ./backend/` ไม่เปลี่ยน และการแก้ไขที่ไหนก็ตามใน `backend/` จะทำให้มัน invalidate ไปด้วยทั้งหมด รวม dependency ด้วย [`cargo-chef`](https://github.com/LukeMathWalker/cargo-chef) แยก "หา dependency graph" ออกจาก "compile มัน" ให้เป็น layer ที่ cache ได้ของตัวเอง ดังนั้นการแก้ `main.rs` จะไม่บังคับให้ dependency ทุกตัว compile ใหม่อีกต่อไป:
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+FROM lukemathwalker/cargo-chef:latest-rust-1-bookworm AS chef
+WORKDIR /app/backend
+
+# ---- Plan: work out exactly which dependencies this workspace needs ----
+FROM chef AS planner
+COPY backend/ .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ---- Build: cache dependencies, then compile our code on top ----
+FROM chef AS builder
+COPY --from=planner /app/backend/recipe.json recipe.json
+# Dependency-only layer — rebuilds only when recipe.json changes, i.e.
+# only when a Cargo.toml/Cargo.lock in the workspace actually changed.
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY backend/ .
+COPY migrations/ ../migrations/
+RUN cargo build --release -p taskflow-api
+
+# ---- Runtime ----
+FROM debian:bookworm-slim AS runtime
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/backend/target/release/taskflow-api /usr/local/bin/taskflow-api
+COPY migrations/ ./migrations/
+
+EXPOSE 8080
+CMD ["taskflow-api"]
+```
+
+`cargo chef prepare` ตรวจสอบ workspace แล้วเขียน `recipe.json` — คำอธิบาย dependency graph ที่ไม่มีโค้ดของคุณเองอยู่เลย จากนั้น `cargo chef cook` จะ build *เฉพาะ* dependency เหล่านั้น และเพราะ cache key ของ `RUN` layer นี้คือ `recipe.json` (ไม่ใช่ source file ของคุณ) การแก้ handler ใน `boards.rs` จะไม่ invalidate มันอีกต่อไป — มีแค่การเปลี่ยน `Cargo.toml`/`Cargo.lock` จริงๆ เท่านั้นที่ทำได้ นี่เป็นการ optimize ล้วนๆ สำหรับ workspace ที่ dependency list แทบไม่เปลี่ยนแต่โค้ดเปลี่ยนตลอดเวลา ส่วน builder ธรรมดาด้านบนอ่านง่ายกว่าและเพียงพอสำหรับคอร์สนี้แล้ว
+
+## Verify
+
+จาก `taskflow/`:
+
+```bash
+docker build -f infra/backend.Dockerfile -t taskflow-backend .
+```
+
+ที่คาดหวัง: builder stage compile `taskflow-api` (ครั้งแรกจะใช้เวลาสักพัก — dependency crate ทุกตัว compile จากศูนย์) จากนั้น runtime stage ติดตั้งสามแพ็กเกจของมันแล้ว copy binary เข้าไป และ build จบด้วยอะไรประมาณนี้:
+
+```
+=> exporting to image
+=> => naming to docker.io/library/taskflow-backend
+```
+
+ยืนยันว่า image เล็กจริงๆ — นี่คือผลตอบแทนที่เป็นรูปธรรมของการแยก multi-stage:
+
+```bash
+docker images taskflow-backend
+```
+
+ที่คาดหวัง: คอลัมน์ `SIZE` ต่ำกว่า 200MB มาก — ลองเทียบในใจกับ `rust:1-bookworm` เพียวๆ ซึ่งเกินหนึ่ง GB ก่อนที่โค้ด `taskflow-api` แม้แต่บรรทัดเดียวจะถูก compile ด้วยซ้ำ
+
+## Recap
+
+`taskflow/infra/backend.Dockerfile` เป็น build สองสเตจ: `rust:1-bookworm` compile `taskflow-api` แบบ release mode, `debian:bookworm-slim` รัน binary ที่ได้พร้อมแค่ `ca-certificates`, `curl` และ `libssl3` ติดตั้งไปด้วย — ไม่มี compiler ไม่มี source ไม่มี `sqlx-cli` `main.rs` เพิ่มมาหนึ่งบรรทัด `sqlx::migrate!("../../migrations").run(&db).await?` ดังนั้นทุกครั้งที่ container เริ่มทำงาน schema จะถูกอัปเดตให้ตัวเอง เป็นไปได้เพราะสไตล์ `sqlx::query_as` ที่ตรวจสอบตอน runtime ของ codebase นี้ไม่เคยต้องการฐานข้อมูลจริงตอน `cargo build` ตั้งแต่แรกอยู่แล้ว คุณเห็นตัวแปร `cargo-chef` เป็นการปรับปรุง layer-caching แบบ optional และเห็นว่าทำไม runtime stage ยังคง copy `migrations/` เข้าไปทั้งที่ macro ฝังมันไว้แล้ว — เป็นความสะดวกในการวินิจฉัย ไม่ใช่ข้อบังคับ ต่อไป [frontend-image](/taskflow/th/docker/frontend-image/) ทำแบบเดียวกันสำหรับ Astro frontend ที่ซึ่ง `ARG` ตอน build สำหรับ `PUBLIC_API_URL` มาแทนที่การฝัง migration ตอน compile time ในฐานะจุดที่ต้องเข้าใจ

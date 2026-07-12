@@ -1,0 +1,110 @@
+---
+title: Frontend Image
+description: Package the Astro frontend into infra/frontend.Dockerfile — the @astrojs/node standalone server, why PUBLIC_API_URL has to be a build-time ARG, and how the built Node server is actually served.
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`taskflow/infra/frontend.Dockerfile` — a multi-stage Dockerfile for the Astro frontend, mirroring the shape [backend-image](/taskflow/en/docker/backend-image/) just built: a builder stage that installs dependencies and runs `npm run build`, and a slim runtime stage that runs only the built output. The one genuinely new subtlety here has nothing to do with Docker itself — it's that `PUBLIC_API_URL`, the environment variable [board-page](/taskflow/en/kanban-island/board-page/) and the rest of the frontend rely on to know where the API lives, gets *baked into the built JavaScript* the moment `npm run build` runs, not read fresh every time the container starts. That single fact shapes almost everything about how this Dockerfile is structured.
+
+```
+taskflow/
+├── frontend/
+│   ├── astro.config.mjs   # from board-page: @astrojs/node, mode: 'standalone'
+│   └── package.json
+└── infra/
+    └── frontend.Dockerfile
+```
+
+By the end, `docker build --build-arg PUBLIC_API_URL=http://localhost:8080 -f infra/frontend.Dockerfile -t taskflow-frontend .` produces an image that runs the same `node ./dist/server/entry.mjs` command [board-page](/taskflow/en/kanban-island/board-page/) verified locally with `npm run preview` — just inside a container, on `0.0.0.0:4321`.
+
+## Why
+
+[board-page](/taskflow/en/kanban-island/board-page/) already made the frontend a real Node server, not a folder of static files: `export const prerender = false` on `boards/[id].astro` means Astro can't build that one route as a fixed HTML file, so `@astrojs/node` in `mode: 'standalone'` ships a small, self-starting Node HTTP server as part of the build output. Every other route in this frontend is still prerendered to plain HTML — `dist/client/` holds those, and Astro's Node server serves them itself alongside the one on-demand route, no separate static file server needed.
+
+**Why `PUBLIC_API_URL` has to be a build `ARG`, not a runtime `environment:` value.** Astro (via Vite) treats any environment variable prefixed `PUBLIC_` as safe to expose to browser code, and it does that exposure by textually substituting `import.meta.env.PUBLIC_API_URL` with the variable's actual value *while bundling* — the same way a `sed` replace would, not by reading `process.env` when a page is later requested. By the time `npm run build` finishes, every reference to `PUBLIC_API_URL` in the client bundle is already the literal string `http://localhost:8080` (or whatever it was at build time); there is no code left at runtime that goes looking for an environment variable by that name. Setting `PUBLIC_API_URL` in the *runtime* container's `environment:` block, after the image is already built, would have zero effect — the value the browser actually gets was decided permanently back when `npm run build` ran, inside the builder stage.
+
+## Pros & cons
+
+**A build-time `ARG` piping into a `PUBLIC_` env var during `npm run build` (what we're using) vs. reading `PUBLIC_API_URL` from a runtime-injected `<script>` tag or a `/config.js` fetched by the browser at page load**
+
+- Pros: this is exactly how Astro/Vite's `PUBLIC_` convention is designed to be used — no extra machinery, no extra network request on every page load just to learn where the API is, and the value is guaranteed consistent with whatever else got compiled into that same build (no risk of a stale runtime config drifting from the bundle that reads it).
+- Cons: the API URL is now frozen into the image itself — deploying the *same* frontend image against a different backend URL (a staging environment, a second region) means rebuilding the image with a different `--build-arg`, not just changing a `docker run -e` flag. A team deploying to many environments from one image often reaches for the runtime-injected-config alternative specifically to avoid a rebuild per environment; TaskFlow has exactly one environment in this course, so that flexibility isn't worth the added complexity here.
+
+**Copying `dist/` and doing a fresh `npm ci --omit=dev` in the runtime stage (what we're using) vs. copying `node_modules` straight from the builder stage**
+
+- Pros: the runtime image never contains `devDependencies` — nothing needed only for `astro build` itself lingers in the image that actually serves traffic — and a fresh install in the runtime stage guarantees any platform-specific native bindings match the runtime base image exactly, rather than trusting whatever `npm ci` resolved in the builder stage to also be correct in a different (if closely related) base image.
+- Cons: `npm ci` runs twice across the two stages instead of once, so total build time is a little longer than a straight `COPY --from=builder node_modules`. For a frontend with no native/binary dependencies, copying `node_modules` once would work fine and build faster — the extra install here is a small, deliberate trade for not having to reason about which packages in `node_modules` are actually needed by the running server versus only by the Astro build step.
+
+## Build it
+
+### `infra/frontend.Dockerfile`
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+# ---- Builder ----
+FROM node:20 AS builder
+WORKDIR /app/frontend
+
+# PUBLIC_ vars are inlined into the client bundle at build time by
+# Astro/Vite, so this has to be a build ARG, not a runtime environment
+# variable — see the Why section above.
+ARG PUBLIC_API_URL
+ENV PUBLIC_API_URL=${PUBLIC_API_URL}
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+# ---- Runtime ----
+FROM node:20-slim AS runtime
+WORKDIR /app/frontend
+
+ENV HOST=0.0.0.0
+ENV PORT=4321
+ENV NODE_ENV=production
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/frontend/dist ./dist
+
+EXPOSE 4321
+CMD ["node", "./dist/server/entry.mjs"]
+```
+
+Walking through the parts worth pausing on:
+
+- **`ARG PUBLIC_API_URL` then `ENV PUBLIC_API_URL=${PUBLIC_API_URL}`** — `ARG` alone only exists during the build and isn't visible to the `RUN npm run build` step as a process environment variable; re-exporting it with `ENV` makes it an actual environment variable that Vite's `import.meta.env` machinery can read while bundling. Without the `ENV` line, `npm run build` would run with `PUBLIC_API_URL` unset.
+- **`COPY frontend/package.json frontend/package-lock.json ./` before `COPY frontend/ ./`** — same Docker layer-caching principle [backend-image](/taskflow/en/docker/backend-image/) touched on: copying the lockfile and running `npm ci` in their own layer, before the rest of the source, means editing a `.astro` file doesn't force a full `npm ci` to rerun on the next build — only an actual `package.json`/`package-lock.json` change does.
+- **`RUN npm run build`** — this is the exact command [board-page](/taskflow/en/kanban-island/board-page/) ran locally with `npm run preview` right after; it produces `dist/client/` (every prerendered route, served as static files) and `dist/server/entry.mjs` (the `@astrojs/node` standalone server, handling `boards/[id].astro` on demand and serving everything in `dist/client/` alongside it).
+- **`ENV HOST=0.0.0.0` / `ENV PORT=4321`** — the `@astrojs/node` standalone server reads these two environment variables to decide what to bind to. `0.0.0.0`, not `127.0.0.1`, for the same reason [app-skeleton](/taskflow/en/backend-foundations/app-skeleton/) bound the Rust server to `0.0.0.0`: `127.0.0.1` only accepts connections from inside the same container, which is nobody once this runs behind Docker's network.
+- **`CMD ["node", "./dist/server/entry.mjs"]`** — no `npm` involved at runtime, no `astro preview` — just plain `node` running the bundled server entry point directly, the smallest possible thing that can start it.
+
+## Verify
+
+From `taskflow/`:
+
+```bash
+docker build --build-arg PUBLIC_API_URL=http://localhost:8080 \
+  -f infra/frontend.Dockerfile -t taskflow-frontend .
+```
+
+Expected: `npm ci` and `npm run build` run in the builder stage (the first `npm ci` — dev dependencies included — will be the slower of the two), then a second, faster `npm ci --omit=dev` in the runtime stage, and the build finishes tagging `taskflow-frontend`.
+
+Confirm the bundle actually inlined the URL you passed, not a placeholder:
+
+```bash
+docker run --rm taskflow-frontend grep -r "localhost:8080" dist/client/_astro/ | head -1
+```
+
+Expected: at least one match — some `_astro/*.js` chunk containing the literal string `http://localhost:8080`, proof `PUBLIC_API_URL` was baked in at build time rather than left as a runtime lookup. If this comes back empty, double-check the `--build-arg` was actually passed on the `docker build` command — a missing `ARG` value silently builds with `PUBLIC_API_URL` undefined rather than failing.
+
+## Recap
+
+`taskflow/infra/frontend.Dockerfile` builds the same Node server [board-page](/taskflow/en/kanban-island/board-page/) ran locally with `npm run preview`, now inside a container: a `node:20` builder stage runs `npm ci` and `npm run build` with `PUBLIC_API_URL` passed in as a build `ARG` (re-exported as `ENV` so Vite's bundler can actually see it), and a `node:20-slim` runtime stage does its own `npm ci --omit=dev` before copying in just `dist/` and running `node ./dist/server/entry.mjs` on `HOST=0.0.0.0`, `PORT=4321`. The one idea worth carrying forward: `PUBLIC_` variables are a *build-time* concern for Astro, baked into the bundle the instant `npm run build` finishes, never a runtime lookup — get the URL wrong at build time and no amount of `docker run -e` afterward fixes it. Next, [compose-full](/taskflow/en/docker/compose-full/) wires both images — `backend` and `frontend` — into the same `docker-compose.yml` that already has `db` and `redis`, and walks the whole stack end to end: register, log in, create a board, and watch a drag-and-drop move sync live across two browser tabs.

@@ -1,0 +1,110 @@
+---
+title: Frontend Image
+description: บรรจุ Astro frontend ลงใน infra/frontend.Dockerfile — server แบบ standalone ของ @astrojs/node, ทำไม PUBLIC_API_URL ต้องเป็น build-time ARG, และวิธีที่ Node server ที่ build แล้วถูกเสิร์ฟจริงๆ
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`taskflow/infra/frontend.Dockerfile` — Dockerfile แบบ multi-stage สำหรับ Astro frontend สะท้อนรูปแบบเดียวกับที่ [backend-image](/taskflow/th/docker/backend-image/) เพิ่งสร้างไป: builder stage ที่ติดตั้ง dependency แล้วรัน `npm run build` และ runtime stage ที่บางเบาซึ่งรันแค่ output ที่ build แล้ว จุดที่ต่างออกไปจริงๆ ที่นี่ไม่เกี่ยวกับ Docker เองเลย — คือ `PUBLIC_API_URL` ตัวแปรที่ [board-page](/taskflow/th/kanban-island/board-page/) และส่วนที่เหลือของ frontend ใช้เพื่อรู้ว่า API อยู่ที่ไหน จะถูก *ฝังลงใน JavaScript ที่ build แล้ว* ทันทีที่ `npm run build` รัน ไม่ใช่ถูกอ่านใหม่ทุกครั้งที่ container เริ่มทำงาน ข้อเท็จจริงเดียวนี้กำหนดโครงสร้างเกือบทั้งหมดของ Dockerfile นี้
+
+```
+taskflow/
+├── frontend/
+│   ├── astro.config.mjs   # from board-page: @astrojs/node, mode: 'standalone'
+│   └── package.json
+└── infra/
+    └── frontend.Dockerfile
+```
+
+เมื่อจบบทเรียนนี้ `docker build --build-arg PUBLIC_API_URL=http://localhost:8080 -f infra/frontend.Dockerfile -t taskflow-frontend .` จะได้ image ที่รันคำสั่ง `node ./dist/server/entry.mjs` เดียวกับที่ [board-page](/taskflow/th/kanban-island/board-page/) ตรวจสอบบนเครื่อง local ด้วย `npm run preview` — แค่อยู่ใน container บน `0.0.0.0:4321`
+
+## Why
+
+[board-page](/taskflow/th/kanban-island/board-page/) ทำให้ frontend เป็น Node server จริงไปแล้ว ไม่ใช่แค่โฟลเดอร์ static file: `export const prerender = false` บน `boards/[id].astro` หมายความว่า Astro ไม่สามารถ build route นั้นเป็นไฟล์ HTML คงที่ได้ ดังนั้น `@astrojs/node` แบบ `mode: 'standalone'` จึงส่ง Node HTTP server เล็กๆ ที่เริ่มทำงานเองเป็นส่วนหนึ่งของ build output route อื่นทุกตัวใน frontend นี้ยังคงถูก prerender เป็น HTML ธรรมดา — `dist/client/` เก็บไฟล์เหล่านั้นไว้ และ Node server ของ Astro ก็เสิร์ฟมันเองควบคู่ไปกับ route แบบ on-demand ตัวเดียว ไม่ต้องมี static file server แยกเลย
+
+**ทำไม `PUBLIC_API_URL` ต้องเป็น build `ARG` ไม่ใช่ค่า `environment:` ตอน runtime** Astro (ผ่าน Vite) ถือว่าตัวแปร environment ที่ขึ้นต้นด้วย `PUBLIC_` ปลอดภัยที่จะเปิดเผยให้โค้ดฝั่ง browser เห็น และมันทำแบบนั้นด้วยการแทนที่ `import.meta.env.PUBLIC_API_URL` ด้วยค่าจริงของตัวแปร *ตอน bundle* — เหมือนกับที่ `sed` replace จะทำ ไม่ใช่ด้วยการอ่าน `process.env` ตอนที่ page ถูก request ในภายหลัง เมื่อ `npm run build` จบ ทุกการอ้างอิงถึง `PUBLIC_API_URL` ใน client bundle จะเป็น literal string `http://localhost:8080` (หรือค่าอะไรก็ตามที่มันเป็นตอน build) ไปแล้ว ไม่มีโค้ดเหลืออยู่ตอน runtime ที่จะไปหาตัวแปร environment ชื่อนั้นอีก การตั้งค่า `PUBLIC_API_URL` ใน `environment:` ของ container ตอน *runtime* หลังจาก image build เสร็จแล้ว จะไม่มีผลอะไรเลย — ค่าที่ browser ได้จริงถูกตัดสินใจแบบถาวรไปแล้วตอนที่ `npm run build` รัน อยู่ใน builder stage
+
+## Pros & cons
+
+**build-time `ARG` ที่ pipe เข้าไปในตัวแปร `PUBLIC_` ระหว่าง `npm run build` (แบบที่เราใช้) เทียบกับการอ่าน `PUBLIC_API_URL` จาก `<script>` tag ที่ inject ตอน runtime หรือไฟล์ `/config.js` ที่ browser fetch ตอนโหลด page**
+
+- ข้อดี: นี่คือวิธีที่ convention `PUBLIC_` ของ Astro/Vite ถูกออกแบบมาให้ใช้จริงๆ — ไม่มีกลไกเพิ่มเติม ไม่มี network request เพิ่มทุกครั้งที่โหลด page แค่เพื่อรู้ว่า API อยู่ที่ไหน และค่าที่ได้ก็รับประกันว่าสอดคล้องกับทุกอย่างที่ compile เข้าไปใน build เดียวกันนั้น (ไม่มีความเสี่ยงที่ runtime config จะ drift ออกจาก bundle ที่อ่านมัน)
+- ข้อเสีย: URL ของ API ถูกแช่แข็งไว้ใน image เองแล้ว — การ deploy frontend image *เดียวกัน* กับ backend URL คนละตัว (staging environment, region ที่สอง) หมายถึงต้อง rebuild image ด้วย `--build-arg` คนละค่า ไม่ใช่แค่เปลี่ยน flag `docker run -e` ทีมที่ deploy ไปหลาย environment จาก image เดียวมักจะเลือกทางเลือกแบบ inject config ตอน runtime เพื่อหลีกเลี่ยง rebuild ต่อ environment โดยเฉพาะ TaskFlow มีแค่ environment เดียวในคอร์สนี้ ความยืดหยุ่นนั้นจึงไม่คุ้มกับความซับซ้อนที่เพิ่มเข้ามาตรงนี้
+
+**copy `dist/` แล้วทำ `npm ci --omit=dev` ใหม่ใน runtime stage (แบบที่เราใช้) เทียบกับ copy `node_modules` ตรงๆ จาก builder stage**
+
+- ข้อดี: runtime image ไม่มี `devDependencies` อยู่เลย — ไม่มีอะไรที่ต้องใช้แค่ตอน `astro build` เองหลงเหลืออยู่ใน image ที่เสิร์ฟ traffic จริง และการติดตั้งใหม่ใน runtime stage รับประกันว่า native binding เฉพาะแพลตฟอร์มใดๆ ตรงกับ runtime base image เป๊ะๆ แทนที่จะเชื่อว่าอะไรก็ตามที่ `npm ci` resolve ไว้ใน builder stage จะถูกต้องใน base image ที่ต่างออกไป (แม้จะใกล้เคียงกัน) ด้วย
+- ข้อเสีย: `npm ci` รันสองครั้งข้ามสองสเตจแทนที่จะรันครั้งเดียว ดังนั้นเวลา build รวมนานกว่าการ `COPY --from=builder node_modules` ตรงๆ เล็กน้อย สำหรับ frontend ที่ไม่มี native/binary dependency การ copy `node_modules` ครั้งเดียวก็ใช้ได้และ build เร็วกว่า — การติดตั้งเพิ่มตรงนี้เป็นการแลกเปลี่ยนเล็กๆ ที่ตั้งใจทำ เพื่อไม่ต้องมานั่งคิดว่า package ไหนใน `node_modules` ที่ server ที่กำลังรันต้องการจริงๆ เทียบกับที่ขั้นตอน build ของ Astro ต้องการเท่านั้น
+
+## Build it
+
+### `infra/frontend.Dockerfile`
+
+```dockerfile
+# syntax=docker/dockerfile:1
+
+# ---- Builder ----
+FROM node:20 AS builder
+WORKDIR /app/frontend
+
+# PUBLIC_ vars are inlined into the client bundle at build time by
+# Astro/Vite, so this has to be a build ARG, not a runtime environment
+# variable — see the Why section above.
+ARG PUBLIC_API_URL
+ENV PUBLIC_API_URL=${PUBLIC_API_URL}
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+# ---- Runtime ----
+FROM node:20-slim AS runtime
+WORKDIR /app/frontend
+
+ENV HOST=0.0.0.0
+ENV PORT=4321
+ENV NODE_ENV=production
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/frontend/dist ./dist
+
+EXPOSE 4321
+CMD ["node", "./dist/server/entry.mjs"]
+```
+
+เดินผ่านส่วนที่ควรหยุดพิจารณา:
+
+- **`ARG PUBLIC_API_URL` แล้ว `ENV PUBLIC_API_URL=${PUBLIC_API_URL}`** — `ARG` เดี่ยวๆ มีอยู่แค่ระหว่าง build เท่านั้นและไม่ visible กับขั้นตอน `RUN npm run build` ในฐานะตัวแปร environment ของ process การ re-export มันด้วย `ENV` ทำให้มันเป็นตัวแปร environment จริงที่กลไก `import.meta.env` ของ Vite อ่านได้ตอน bundle ถ้าไม่มีบรรทัด `ENV` `npm run build` จะรันโดยที่ `PUBLIC_API_URL` ไม่ถูกตั้งค่า
+- **`COPY frontend/package.json frontend/package-lock.json ./` ก่อน `COPY frontend/ ./`** — หลักการ layer-caching เดียวกับที่ [backend-image](/taskflow/th/docker/backend-image/) พูดถึง: การ copy lockfile แล้วรัน `npm ci` ใน layer ของตัวเอง ก่อน source ที่เหลือ หมายความว่าการแก้ไฟล์ `.astro` จะไม่บังคับให้ `npm ci` เต็มรูปแบบรันใหม่ใน build ครั้งถัดไป — มีแค่การเปลี่ยน `package.json`/`package-lock.json` จริงๆ เท่านั้นที่ทำได้
+- **`RUN npm run build`** — นี่คือคำสั่งเดียวกับที่ [board-page](/taskflow/th/kanban-island/board-page/) รันบนเครื่อง local ด้วย `npm run preview` ตามมาทันที มันสร้าง `dist/client/` (ทุก route ที่ prerender แล้ว เสิร์ฟเป็น static file) และ `dist/server/entry.mjs` (server แบบ standalone ของ `@astrojs/node` ที่จัดการ `boards/[id].astro` แบบ on-demand และเสิร์ฟทุกอย่างใน `dist/client/` ควบคู่ไปด้วย)
+- **`ENV HOST=0.0.0.0` / `ENV PORT=4321`** — server แบบ standalone ของ `@astrojs/node` อ่านตัวแปร environment สองตัวนี้เพื่อตัดสินใจว่าจะ bind กับอะไร `0.0.0.0` ไม่ใช่ `127.0.0.1` ด้วยเหตุผลเดียวกับที่ [app-skeleton](/taskflow/th/backend-foundations/app-skeleton/) bind server ของ Rust กับ `0.0.0.0`: `127.0.0.1` ยอมรับ connection จากภายใน container เดียวกันเท่านั้น ซึ่งไม่มีใครเลยเมื่อสิ่งนี้รันอยู่หลัง network ของ Docker
+- **`CMD ["node", "./dist/server/entry.mjs"]`** — ไม่มี `npm` เกี่ยวข้องตอน runtime เลย ไม่มี `astro preview` — แค่ `node` ธรรมดารัน entry point ของ server ที่ bundle แล้วโดยตรง สิ่งที่เล็กที่สุดที่จะเริ่มมันได้
+
+## Verify
+
+จาก `taskflow/`:
+
+```bash
+docker build --build-arg PUBLIC_API_URL=http://localhost:8080 \
+  -f infra/frontend.Dockerfile -t taskflow-frontend .
+```
+
+ที่คาดหวัง: `npm ci` และ `npm run build` รันใน builder stage (`npm ci` ครั้งแรก — รวม dev dependency — จะช้ากว่าในสองครั้ง) จากนั้น `npm ci --omit=dev` ครั้งที่สองที่เร็วกว่าใน runtime stage และ build จบด้วยการ tag `taskflow-frontend`
+
+ยืนยันว่า bundle ฝัง URL ที่คุณส่งเข้าไปจริงๆ ไม่ใช่ placeholder:
+
+```bash
+docker run --rm taskflow-frontend grep -r "localhost:8080" dist/client/_astro/ | head -1
+```
+
+ที่คาดหวัง: match อย่างน้อยหนึ่งรายการ — chunk `_astro/*.js` บางตัวที่มี literal string `http://localhost:8080` อยู่ เป็นหลักฐานว่า `PUBLIC_API_URL` ถูกฝังไว้ตอน build time แทนที่จะเหลือเป็น runtime lookup ถ้าตรงนี้ว่างเปล่า ให้เช็กก่อนว่า `--build-arg` ถูกส่งเข้าไปใน `docker build` command จริงๆ — ค่า `ARG` ที่หายไปจะ build แบบเงียบๆ โดยที่ `PUBLIC_API_URL` ไม่ถูกกำหนด แทนที่จะ fail
+
+## Recap
+
+`taskflow/infra/frontend.Dockerfile` build Node server ตัวเดียวกับที่ [board-page](/taskflow/th/kanban-island/board-page/) รันบนเครื่อง local ด้วย `npm run preview` ตอนนี้อยู่ใน container: builder stage แบบ `node:20` รัน `npm ci` และ `npm run build` โดยส่ง `PUBLIC_API_URL` เข้าไปเป็น build `ARG` (re-export เป็น `ENV` เพื่อให้ bundler ของ Vite เห็นมันได้จริง) และ runtime stage แบบ `node:20-slim` ทำ `npm ci --omit=dev` ของตัวเองก่อน copy เอาแค่ `dist/` เข้ามาแล้วรัน `node ./dist/server/entry.mjs` บน `HOST=0.0.0.0`, `PORT=4321` แนวคิดหนึ่งที่ควรจำไว้: ตัวแปร `PUBLIC_` เป็นเรื่องของ *build time* สำหรับ Astro ถูกฝังลง bundle ทันทีที่ `npm run build` จบ ไม่เคยเป็น runtime lookup เลย — ได้ URL ผิดตอน build แล้ว ไม่มี `docker run -e` ไหนแก้ได้ในภายหลัง ต่อไป [compose-full](/taskflow/th/docker/compose-full/) เชื่อม image ทั้งสอง — `backend` และ `frontend` — เข้ากับ `docker-compose.yml` เดียวกันที่มี `db` และ `redis` อยู่แล้ว และเดินผ่านทั้ง stack ตั้งแต่ต้นจนจบ: register, login, สร้าง board และดูการลาก-วางย้ายแบบ live sync กันระหว่าง browser tab สองแท็บ
