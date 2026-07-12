@@ -1,0 +1,203 @@
+---
+title: Migrations with sqlx-cli
+description: Version the TaskFlow schema with sqlx-cli — create the database, add a migration, write the full 0001_init.sql that builds all 7 tables and 3 indexes in FK-safe order, run it against DATABASE_URL, and verify with psql.
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+We take the schema designed in the [previous lesson](/taskflow/en/database/schema/) and turn it into a real, versioned **migration** — a numbered SQL file, checked into git, that builds the entire database from scratch. We'll use `sqlx-cli`, the command-line companion to the SQLx crate the Rust backend already depends on.
+
+By the end you'll have:
+
+- a `taskflow` database created on your local PostgreSQL,
+- a `migrations/0001_init.sql` file that creates the `pgcrypto` extension, all seven tables, and all three indexes,
+- that migration applied and verified with `psql`.
+
+## Why
+
+A **migration** is a versioned, ordered change to your database schema, stored as a file alongside your code. Instead of clicking around a GUI or running ad-hoc `CREATE TABLE` statements that no one else can reproduce, you write the change once, commit it, and every environment — your laptop, a teammate's laptop, CI, production — applies the exact same steps in the exact same order.
+
+Why bother versioning the schema at all?
+
+- **Reproducibility.** A fresh checkout plus `sqlx migrate run` gives everyone a byte-identical database. No "works on my machine" schema drift.
+- **History.** The `migrations/` directory is a chronological record of how the schema evolved. `0001_init.sql` today, `0002_add_due_date.sql` next month — the story is right there in git.
+- **Safety.** SQLx records which migrations have already run in a `_sqlx_migrations` tracking table, so running the command twice is safe: applied migrations are skipped.
+- **CI/CD.** The same command that sets up your local database sets up the test database in CI and the real one on deploy.
+
+## Pros & cons
+
+**File-based migrations with `sqlx-cli` (what we're using)**
+
+- Pros: plain SQL you fully control, no ORM abstraction hiding what actually runs; migrations live in git next to the code; SQLx checks them against the database at compile time in later modules; one small binary, no extra runtime service.
+- Cons: you write SQL by hand (a feature for a course, arguably a chore on a huge team); `sqlx-cli` ships only forward "up" migrations by default in its simplest mode, so rolling back means writing a new migration; you must keep the migration order FK-safe yourself.
+
+**ORM-generated / auto-diff migrations (the alternative)**
+
+- Pros: the tool diffs your models against the database and writes the migration for you; less hand-written SQL.
+- Cons: generated SQL can be surprising or unsafe on large tables, you're coupled to that ORM's conventions, and the abstraction makes it harder to reason about exactly what hits the database — the opposite of what we want while learning.
+
+For a course whose goal is to understand the stack top to bottom, hand-written SQL migrations are the right call.
+
+## Build it
+
+### Install `sqlx-cli`
+
+If you don't already have it, install the CLI with just the PostgreSQL driver:
+
+```bash
+cargo install sqlx-cli --no-default-features --features rustls,postgres
+```
+
+### Point it at your database
+
+`sqlx-cli` reads the connection string from the `DATABASE_URL` environment variable. It's already in the `.env` you created back in the setup module:
+
+```bash
+export DATABASE_URL=postgres://taskflow:taskflow@localhost:5432/taskflow
+```
+
+Make sure the PostgreSQL container from the Docker Compose module is running before you continue.
+
+### Create the database
+
+```bash
+sqlx database create
+```
+
+This creates the `taskflow` database named in `DATABASE_URL` if it doesn't already exist. (There's a matching `sqlx database drop` for when you want a clean slate.)
+
+### Add the first migration
+
+```bash
+sqlx migrate add init
+```
+
+This creates a `migrations/` directory (if it isn't there yet) and drops in an empty, timestamp-or-sequence-prefixed file. For clarity across this course we refer to it as `migrations/0001_init.sql`. Open that file and fill it in.
+
+### Write `migrations/0001_init.sql`
+
+This is the whole schema in one migration. The order matters: a table with a foreign key must be created **after** the table it points at, and join tables come last of all. Indexes go at the very end, once their tables exist.
+
+```sql
+-- 0001_init.sql — initial TaskFlow schema
+
+-- gen_random_uuid() lives in the pgcrypto extension.
+-- It ships with PostgreSQL 13+ but must be enabled per-database.
+create extension if not exists pgcrypto;
+
+-- Accounts
+create table users (
+    id            uuid primary key default gen_random_uuid(),
+    email         text unique not null,
+    password_hash text not null,
+    display_name  text not null,
+    created_at    timestamptz not null default now()
+);
+
+-- Boards owned by a user
+create table boards (
+    id         uuid primary key default gen_random_uuid(),
+    owner_id   uuid not null references users(id) on delete cascade,
+    title      text not null,
+    created_at timestamptz not null default now()
+);
+
+-- Board membership (many-to-many: users <-> boards)
+create table board_members (
+    board_id uuid not null references boards(id) on delete cascade,
+    user_id  uuid not null references users(id) on delete cascade,
+    role     text not null default 'member',
+    primary key (board_id, user_id)
+);
+
+-- Columns (lanes) on a board
+create table columns (
+    id       uuid primary key default gen_random_uuid(),
+    board_id uuid not null references boards(id) on delete cascade,
+    title    text not null,
+    position double precision not null
+);
+
+-- Cards inside a column
+create table cards (
+    id          uuid primary key default gen_random_uuid(),
+    column_id   uuid not null references columns(id) on delete cascade,
+    title       text not null,
+    description text,
+    position    double precision not null,
+    created_at  timestamptz not null default now()
+);
+
+-- Labels defined on a board
+create table labels (
+    id       uuid primary key default gen_random_uuid(),
+    board_id uuid not null references boards(id) on delete cascade,
+    name     text not null,
+    color    text not null
+);
+
+-- Card <-> label tagging (many-to-many)
+create table card_labels (
+    card_id  uuid not null references cards(id) on delete cascade,
+    label_id uuid not null references labels(id) on delete cascade,
+    primary key (card_id, label_id)
+);
+
+-- Indexes for the hot lookup paths
+create index on board_members(user_id);
+create index on columns(board_id);
+create index on cards(column_id, position);
+```
+
+A few things worth pausing on:
+
+- **`create extension if not exists pgcrypto;`** must come first, because every `create table` below leans on `gen_random_uuid()` for its default. On PostgreSQL 13+ the function is bundled — the extension just needs enabling once per database.
+- **FK-safe order.** `users` before `boards` before `columns` before `cards`; the join tables `board_members` and `card_labels` last, since they reference two parents each. Reverse this order and PostgreSQL rejects the migration with a "relation does not exist" error.
+- **Indexes at the end** — you can only index a table that already exists. These three cover the queries we'll actually run a lot; the [next lesson](/taskflow/en/database/indexes-ordering/) explains why each one is shaped the way it is.
+
+### Run the migration
+
+```bash
+sqlx migrate run
+```
+
+SQLx applies every pending migration in order and records it in a `_sqlx_migrations` table. Run it a second time and it prints nothing to do — already-applied migrations are skipped, so this is safe to re-run in CI and on deploy.
+
+## Verify
+
+Open a `psql` session against the same database and list the tables:
+
+```bash
+psql "$DATABASE_URL" -c '\dt'
+```
+
+You should see all seven tables plus the SQLx bookkeeping table:
+
+```txt
+              List of relations
+ Schema |      Name        | Type  |  Owner
+--------+------------------+-------+----------
+ public | board_members    | table | taskflow
+ public | boards           | table | taskflow
+ public | card_labels      | table | taskflow
+ public | cards            | table | taskflow
+ public | columns          | table | taskflow
+ public | labels           | table | taskflow
+ public | users            | table | taskflow
+ public | _sqlx_migrations | table | taskflow
+(8 rows)
+```
+
+Spot-check one table's columns to confirm the shape landed correctly:
+
+```bash
+psql "$DATABASE_URL" -c '\d cards'
+```
+
+That should list `id`, `column_id`, `title`, `description`, `position`, and `created_at`, with the `cards_column_id_position_idx` index attached at the bottom. If both commands look right, the schema is live.
+
+## Recap
+
+You installed `sqlx-cli`, created the `taskflow` database, and added your first migration. You wrote `migrations/0001_init.sql` — the `pgcrypto` extension, all seven tables in foreign-key-safe order, and the three indexes — then applied it with `sqlx migrate run` and confirmed the result with `psql \dt`. The schema is now versioned in git and reproducible on any machine. Next, we dig into the ordering strategy behind those `position` columns in [indexes & ordering](/taskflow/en/database/indexes-ordering/).

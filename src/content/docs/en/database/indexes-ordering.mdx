@@ -1,0 +1,133 @@
+---
+title: Indexes & Card Ordering
+description: The fractional-position ordering strategy for cards and columns — averaging neighbors, inserting at the ends, float-precision exhaustion, periodic renormalization, and the two indexes that make membership and ordering queries fast.
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+TaskFlow lets users drag cards up and down a column and drag columns left and right. Every one of those moves has to persist an *order* to the database that survives a reload and stays consistent across every connected client. This lesson explains the strategy we chose — a `position double precision` column — how to compute new positions on insert and reorder, how it can eventually degrade, how to fix that, and the two indexes that keep the whole thing fast.
+
+## Why
+
+The naive approach is to store an integer `position` of 0, 1, 2, 3 on each card. It reads nicely, but it falls apart on the operation Kanban does most: **reorder**. Drop a card between positions 1 and 2 and there is no integer between them — you have to renumber every card below it and write all those rows back. On a busy board, a single drag becomes a storm of updates, and in a realtime app every one of those updates fans out to every connected client.
+
+We want the opposite: a reorder should touch **one row**. The trick is to stop thinking of positions as consecutive integers and start thinking of them as points on a number line. Between any two distinct real numbers there is always another real number, so there is always room to slot a card between two neighbors without disturbing anyone else. That's why `columns.position` and `cards.position` are `double precision` (a 64-bit float), not integers.
+
+## Pros & cons
+
+**Fractional `double precision` positions (what we're using)**
+
+- Pros: a reorder or insert writes exactly one row; no renumbering cascade; dead simple to query (`order by position`); works identically for columns and cards.
+- Cons: floats have finite precision, so repeatedly inserting between the *same* two neighbors eventually runs out of representable values and forces a renormalization; positions aren't human-readable; two clients inserting at the same spot concurrently can land very close together.
+
+**Integer-gap positions (leave gaps: 10, 20, 30…)**
+
+- Pros: human-readable, and you get a handful of free insertions between items before you must renumber.
+- Cons: the gaps are finite — once you've used them up between two items, you're back to renumbering a range of rows. It only postpones the problem fractional positions avoid entirely.
+
+**Array / linked-list order (store the whole order in one place)**
+
+- Pros: the order is explicit and unambiguous; a single `board.column_order` array or `next_card_id` pointer defines the sequence exactly.
+- Cons: an ordering array is a contention hotspot — every reorder rewrites one big row, which serializes concurrent edits and fights the realtime model; a linked list needs multiple row updates per move and is painful to sort in SQL. Both are a poor fit for a collaborative board where many people reorder at once.
+
+Fractional positions give us single-row writes and trivial sorting, at the cost of an occasional cleanup pass. For a realtime board, that's the right trade.
+
+## Build it
+
+The rule is always the same: **a card's new position is a number that sorts it where the user dropped it.** There are three cases.
+
+### Inserting between two cards
+
+Average the positions of the card above and the card below the drop point:
+
+```txt
+new_position = (before.position + after.position) / 2
+```
+
+If the card above has `position = 2.0` and the card below has `position = 3.0`, the dropped card gets `2.5`. Drop another card between `2.0` and `2.5` and it becomes `2.25`. Only that one card's row is written.
+
+### Inserting at the ends
+
+There's no neighbor on one side, so step past the existing extreme by a fixed amount.
+
+Dropping at the **top** of the column, before the current first card:
+
+```txt
+new_position = first.position - 1.0
+```
+
+Dropping at the **bottom**, after the current last card:
+
+```txt
+new_position = last.position + 1.0
+```
+
+An empty column's first card can just take `position = 1.0`. Columns on a board work exactly the same way, ordered left-to-right by `columns.position`.
+
+### The float-precision exhaustion caveat
+
+A 64-bit float has about 15–17 significant decimal digits. Each time you insert between the *same two neighbors*, the gap halves: `2.5`, `2.25`, `2.125`, `2.0625`… After roughly 50 consecutive inserts into the same shrinking gap, the two neighboring positions become so close that the float can no longer represent a distinct value between them — the average rounds to equal one of the endpoints, and the new card's order becomes ambiguous. In everyday use nobody drags into the identical spot 50 times in a row, but a schema you don't have to babysit is worth designing for.
+
+### Periodic renormalization
+
+The fix is a cleanup pass that spreads everything back out. Periodically — say, whenever the smallest gap in a column falls below a threshold, or on a nightly job — reassign clean, evenly spaced positions in the current visual order:
+
+```sql
+-- Renormalize one column's cards to 1.0, 2.0, 3.0, ...
+with ordered as (
+    select id,
+           row_number() over (order by position) as rn
+    from cards
+    where column_id = $1
+)
+update cards
+set position = ordered.rn
+from ordered
+where cards.id = ordered.id;
+```
+
+After this runs, the cards are `1.0, 2.0, 3.0, …` again, so every gap is a full `1.0` wide and the halving budget resets. The visible order never changes — only the underlying numbers do. Do the same per board for `columns.position` when needed.
+
+## Verify
+
+The queries that make ordering feel instant depend on two indexes from `0001_init.sql`.
+
+### `cards(column_id, position)`
+
+```sql
+create index on cards(column_id, position);
+```
+
+Rendering a column is exactly *"give me every card in this column, in order"*:
+
+```sql
+select * from cards where column_id = $1 order by position;
+```
+
+This composite index serves both halves of that query at once: the leading `column_id` narrows to one column, and the trailing `position` means the rows come back already sorted — PostgreSQL reads them straight off the index with no separate sort step. Confirm it with:
+
+```bash
+psql "$DATABASE_URL" -c 'explain select * from cards where column_id = gen_random_uuid() order by position;'
+```
+
+On a populated table the plan uses an `Index Scan` on `cards_column_id_position_idx` and shows no `Sort` node.
+
+### `board_members(user_id)`
+
+```sql
+create index on board_members(user_id);
+```
+
+The authorization path asks the mirror-image question: *"which boards is this user a member of?"* — used on nearly every API request to check access.
+
+```sql
+select board_id from board_members where user_id = $1;
+```
+
+The composite primary key `(board_id, user_id)` is ordered board-first, so it can't answer a `user_id`-only lookup efficiently. This dedicated index on `user_id` makes that per-request membership check an index scan instead of a full table scan.
+
+## Recap
+
+You learned why TaskFlow stores order as a `double precision` `position` instead of consecutive integers: a reorder writes a single row. You compute a new position by averaging neighbors, or by stepping `±1.0` past the ends, you understand that repeatedly splitting the same gap eventually exhausts float precision, and you fix that with a periodic renormalization back to `1.0, 2.0, 3.0…`. You also saw why `cards(column_id, position)` serves ordered column reads without a sort step, and why `board_members(user_id)` powers the per-request membership check. That completes the database module — next up, [Backend Foundations](/taskflow/en/backend-foundations/) wires this schema into Rust.
