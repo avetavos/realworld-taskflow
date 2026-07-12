@@ -1,0 +1,318 @@
+---
+title: การเทสต์ฝั่ง Frontend
+description: ดึง switch ของ reconcile ใน Board.tsx ออกมาเป็น reducer แบบ pure reduceBoard(state, event) ใน lib/board-reducer.ts ครอบทุก BoardEvent type ด้วย vitest (card ที่ย้ายตกลงในคอลัมน์และลำดับที่ถูกต้อง, delete ลบออก, update แทนที่), ตั้งค่า vitest.config.ts ด้วย jsdom และ refactor reconcile ของ Board.tsx ให้เหลือการเรียกครั้งเดียว — พร้อมอธิบาย trade-off ระหว่างการเทสต์ reducer แบบแยกกับการ render แบบ full-DOM
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+`frontend/src/lib/board-reducer.ts` ที่ export ฟังก์ชัน pure หนึ่งตัว — `reduceBoard(state: Column[], event: BoardEvent): Column[]` — ที่รับรายการคอลัมน์ปัจจุบันกับ `BoardEvent` หนึ่งตัว ([protocol](/taskflow/th/realtime/protocol/)) แล้วคืนรายการคอลัมน์ถัดไป โดย apply event นั้นตาม id มันคือ `switch` เป๊ะ ๆ ที่ตอนนี้อยู่ใน `reconcile` ของ `Board.tsx` ([live-sync](/taskflow/th/kanban-island/live-sync/)) ยกออกมาเป็นฟังก์ชันที่ไม่ขึ้นกับอะไรเลยนอกจาก argument สองตัวของมัน — ไม่มี `setBoard` ไม่มี `useRef` ไม่มี DOM ไม่มี WebSocket
+
+จากนั้น `frontend/src/lib/board-reducer.test.ts` — เทสต์ vitest ที่ครอบ event ทั้งเจ็ด type: card ที่ย้ายตกลงในคอลัมน์ที่ถูกต้อง *และ* ในลำดับตาม position, card ที่ลบถูกเอาออก, card ที่ update ถูกแทนที่ในตำแหน่งเดิม, คอลัมน์ที่สร้างใหม่มาแบบว่าง, คอลัมน์ที่ลบหายไป และการ update คอลัมน์เก็บ card ของมันไว้ พร้อมกับการเปลี่ยนเล็กน้อยใน `vitest.config.ts` และ `package.json` เพื่อรันมัน และการ refactor `reconcile` ของ `Board.tsx` ให้เหลือการเรียกเดียวที่ delegate ไปยัง reducer ตัวใหม่
+
+## Why
+
+`reconcile` ของ `Board.tsx` เป็นชิ้นที่แน่น logic ที่สุดของทั้ง frontend — event เจ็ด type แต่ละตัวทำการแปลง board tree แบบ immutable ต่างกัน — และตอนนี้มัน **ถูกขังอยู่ใน component** เพื่อจะเทสต์มันตามที่เขียนไว้ คุณต้อง render `<Board>` ใน DOM ปลอม mock WebSocket ป้อน message ให้มัน แล้วตรวจ output ที่ render ออกมา: การ setup ที่ช้าและซับซ้อนเพื่อเช็ค logic ที่แท้จริงแล้วเป็นแค่ *ข้อมูลเข้า ข้อมูลออก* ปัญหาไม่ใช่ว่า logic นั้นเทสต์ยาก แต่คือมันพันกันอยู่กับ `setBoard`, `useRef` และ render cycle ของ Preact ซึ่งไม่มีตัวไหนที่ logic นั้นต้องการจริง ๆ เลย
+
+การดึง `switch` นั้นออกมาเป็น `reduceBoard(state, event)` — ฟังก์ชัน **pure** input เดิม output เดิมเสมอ ไม่มี side effect — เปลี่ยน "เทสต์ logic ของ reconcile" ให้เป็นเทสต์ที่ง่ายที่สุดเท่าที่มี: เรียกฟังก์ชันด้วย array กับ event แล้ว assert บน array ที่มันคืนมา ไม่มี DOM ไม่มี mock ไม่มี async ไม่มี component นี่คือภาพสะท้อนฝั่ง frontend ของข้อโต้แย้งเรื่อง `hash_password` แบบ pure ของ module ฝั่ง backend: [passwords](/taskflow/th/auth/passwords/) ทำให้ฟังก์ชันเหล่านั้นเป็นแบบแยกตัวเพื่อให้มัน test ได้ง่าย ๆ พอดี และ `reduceBoard` ได้คุณสมบัติเดียวกันมาให้ logic ของ reconcile component เก็บไว้เฉพาะสิ่งที่เป็นของมันจริง ๆ — การอ่าน state การเรียก `setBoard` การปรึกษา `pending` ref — และส่งการคำนวณจริงให้ฟังก์ชันที่เทสต์แบบแยกตัวได้อย่างสมบูรณ์
+
+## Pros & cons
+
+**Unit-test reducer ที่ดึงออกมาแบบแยกตัว (ตัวที่เราใช้) เทียบกับ full-DOM render test ด้วย `@testing-library/preact`**
+
+- ข้อดี: เทสต์ `reduceBoard` เป็นการเรียกฟังก์ชันธรรมดา — สร้าง `Column[]` ส่ง event แล้ว assert บนผลลัพธ์ มันรันในหลักมิลลิวินาทีหลักเดียว ไม่เคย flake และชี้ bug ของ reconcile ไปยัง event type และ branch ที่แน่นอน โดยไม่มีการ render ไม่มี mock `WebSocket` ไม่มี `waitFor` ไม่มี async timing เพราะ reducer ครอบ event *ทั้งเจ็ด* type เทสต์จิ๋ว ๆ ไม่กี่ตัวจึงใช้งานพื้นผิว realtime-reconcile ทั้งหมด — ส่วนที่มีแนวโน้มจะซ่อน bug เรื่อง immutability หรือลำดับที่แยบยลมากที่สุด — ได้ถี่ถ้วนและเร็วกว่าการขับ path เดียวกันผ่าน component ที่ render แล้วจะทำได้มาก
+- ข้อเสีย: เทสต์ reducer พิสูจน์ว่า *การแปลง state* ถูกต้อง แต่ไม่บอกอะไรเลยว่า `Board.tsx` render state นั้นจริงหรือไม่ ต่อ `onDrop` เข้ากับคอลัมน์ที่ถูกต้องหรือไม่ หรือเรียก `reduceBoard` จาก `reconcile` เลยหรือเปล่า — component อาจคำนวณ state ได้สมบูรณ์แบบแต่ก็ยัง display ผิดได้ ช่องว่างนั้นคือสิ่งที่ full-DOM render test ด้วย `@testing-library/preact` (render ชิ้น presentational เล็ก ๆ แล้ว assert บน output) ครอบไว้ และมันเป็น *ส่วนเสริม* ที่มีประโยชน์จริง — เพียงแค่ช้ากว่า หนักกว่า และคุณอยากมีมัน *น้อย* ตัว วางอยู่เหนือเทสต์ reducer ที่เร็วจำนวนมาก module นี้รวม `@testing-library/preact` กับ `jsdom` ไว้ใน setup เพื่อให้ชั้นนั้นพร้อมใช้ เทสต์ reducer คือแกนหลัก และ render test เป็นส่วนเสริมเลือกได้ ไม่ใช่ตัวแทน
+
+**เก็บ `reduceBoard` ให้ pure และยกการเช็ค echo ของ `pending` ออกไปที่ `reconcile` (ตัวที่เราใช้) เทียบกับส่ง Set `pending` เข้าไปใน reducer**
+
+- ข้อดี: `reduceBoard` ยังเป็นฟังก์ชันของ `(state, event)` เท่านั้น — ไม่มีอะไรให้ mock ไม่มีอะไรที่มี state ทุกเทสต์เป็น `reduceBoard(cols, evt)` โดยไม่มี argument ที่สามให้ set up ชิ้นเดียวของ `reconcile` ที่ *มี* state — การข้าม event `card.moved` ที่ id ยังอยู่ใน `pending` ref จาก drag-drop ([live-sync](/taskflow/th/kanban-island/live-sync/)) — ยังอยู่ใน component ที่ ref อยู่ ในฐานะ guard *ก่อน* ที่ reducer จะถูกเรียก reducer apply event; component ตัดสินว่าควร apply event หรือไม่เลยตั้งแต่แรก
+- ข้อเสีย: การตัดสิน "ควรข้าม echo นี้หรือไม่" ตอนนี้อยู่ใน `reconcile` แทนที่จะเดินทางไปกับ reducer ดังนั้นคนอ่านที่ตาม logic การกด echo จะดูใน `Board.tsx` ไม่ใช่ `board-reducer.ts` นั่นคือการแบ่งที่ถูกต้อง — การกด echo โดยเนื้อแท้เกี่ยวกับ state แบบ optimistic ที่ยัง in-flight *ของ client นี้* ซึ่งเป็น state ของ component/ref ไม่ใช่การแปลง board แบบ pure — แต่มันหมายความว่าสองครึ่งของ "จัดการ event `card.moved`" อยู่ในสองไฟล์ เชื่อมด้วย comment ใน `reconcile`
+
+## Build it
+
+### 1. `frontend/src/lib/board-reducer.ts`
+
+สร้างไฟล์ใหม่ ทุก helper ที่มันต้องการ (`sortCards`, `sortColumns`, `updateColumn`, `applyMove`) ย้ายมาที่นี่ข้าง reducer ดังนั้นไฟล์จึงแยกตัวได้และขึ้นกับแค่ type `Card`/`Column` จาก [api-client](/taskflow/th/frontend/api-client/) และ `BoardEvent` จาก [live-sync](/taskflow/th/kanban-island/live-sync/):
+
+```ts
+import type { Card, Column } from './api';
+import type { BoardEvent } from './ws';
+
+function sortCards(cards: Card[]): Card[] {
+  return [...cards].sort((a, b) => a.position - b.position);
+}
+
+function sortColumns(columns: Column[]): Column[] {
+  return [...columns].sort((a, b) => a.position - b.position);
+}
+
+function updateColumn(
+  columns: Column[],
+  columnId: string,
+  updateCards: (column: Column) => Card[],
+): Column[] {
+  return columns.map((column) =>
+    column.id === columnId ? { ...column, cards: updateCards(column) } : column,
+  );
+}
+
+function applyMove(columns: Column[], card: Card): Column[] {
+  const withoutCard = columns.map((column) => ({
+    ...column,
+    cards: column.cards.filter((c) => c.id !== card.id),
+  }));
+  return updateColumn(withoutCard, card.column_id, (column) => sortCards([...column.cards, card]));
+}
+
+export function reduceBoard(state: Column[], event: BoardEvent): Column[] {
+  switch (event.type) {
+    case 'card.created': {
+      const { columnId, card } = event.payload as { columnId: string; card: Card };
+      return updateColumn(state, columnId, (column) =>
+        sortCards([...column.cards.filter((c) => c.id !== card.id), card]),
+      );
+    }
+    case 'card.updated': {
+      const { card } = event.payload as { card: Card };
+      return updateColumn(state, card.column_id, (column) =>
+        sortCards(column.cards.map((c) => (c.id === card.id ? card : c))),
+      );
+    }
+    case 'card.moved': {
+      const { card } = event.payload as { card: Card };
+      return applyMove(state, card);
+    }
+    case 'card.deleted': {
+      const { cardId, columnId } = event.payload as { cardId: string; columnId: string };
+      return updateColumn(state, columnId, (column) =>
+        column.cards.filter((c) => c.id !== cardId),
+      );
+    }
+    case 'column.created': {
+      const { column } = event.payload as { column: Column };
+      return sortColumns([...state, { ...column, cards: [] }]);
+    }
+    case 'column.updated': {
+      const { column } = event.payload as { column: Column };
+      return state.map((c) => (c.id === column.id ? { ...c, ...column } : c));
+    }
+    case 'column.deleted': {
+      const { columnId } = event.payload as { columnId: string };
+      return state.filter((c) => c.id !== columnId);
+    }
+    default:
+      return state;
+  }
+}
+```
+
+นี่คือ `switch` ของ `reconcile` จาก [live-sync](/taskflow/th/kanban-island/live-sync/) เป๊ะ ๆ พร้อมสองการเปลี่ยน: มันทำงานบน `Column[]` โดยตรงแทน `BoardTree` (ดังนั้นมันคืน array คอลัมน์ใหม่ และ component ห่อมันกลับเข้า tree) และ branch `card.moved` ไม่ปรึกษา `pendingRef` อีก — การเช็คที่มี state นั้นคือสิ่งที่อยู่ต่อใน component พอดี ทำให้ฟังก์ชันนี้ยัง pure
+
+### 2. Dev dependency และ `vitest.config.ts`
+
+เพิ่ม tooling สำหรับเทสต์เป็น dev dependency:
+
+```bash
+cd frontend
+npm install -D vitest @testing-library/preact jsdom
+```
+
+`vitest` คือ test runner (native ของ Vite ดังนั้นมันเข้าใจ TypeScript และ config ของ Astro ในโปรเจกต์โดยไม่ต้อง setup transform เพิ่ม); `jsdom` ให้ DOM จำลองแก่เทสต์เพื่อให้อะไรที่แตะ DOM มี environment ให้รัน; `@testing-library/preact` อยู่ที่นั่นสำหรับชั้น render test เลือกได้ที่อธิบายใน Pros & cons เพิ่ม script `test` เข้าไปใน `frontend/package.json`:
+
+```json
+{
+  "scripts": {
+    "test": "vitest run"
+  }
+}
+```
+
+`vitest run` รัน suite หนึ่งครั้งแล้วออก (ตรงข้ามกับ `vitest` เปล่า ๆ ที่อยู่ใน watch mode — เหมาะกับ development ในเครื่อง ผิดสำหรับ CI หรือการเช็คครั้งเดียว) สร้าง `frontend/vitest.config.ts`:
+
+```ts
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    environment: 'jsdom',
+  },
+});
+```
+
+`environment: 'jsdom'` ทำให้ `document`/`window` แบบ browser พร้อมใช้กับทุกเทสต์ เทสต์ reducer ข้างล่างไม่ต้องการมันจริง ๆ — ฟังก์ชัน pure ไม่มี DOM ให้แตะ — แต่การตั้งมันทั้งโปรเจกต์หมายความว่า render test ของ `@testing-library/preact` เลือกได้จะทำงานโดยไม่ต้องตั้งค่าต่อไฟล์ และมันคือค่าที่ frontend test suite เกือบทุกอันอยากได้เป็น default
+
+### 3. `frontend/src/lib/board-reducer.test.ts`
+
+สร้างไฟล์เทสต์ข้าง reducer:
+
+```ts
+import { describe, expect, it } from 'vitest';
+import { reduceBoard } from './board-reducer';
+import type { Card, Column } from './api';
+
+function card(id: string, column_id: string, position: number, title = id): Card {
+  return { id, column_id, title, description: null, position, created_at: '2026-01-01T00:00:00Z' };
+}
+
+function board(): Column[] {
+  return [
+    {
+      id: 'todo',
+      board_id: 'b',
+      title: 'To Do',
+      position: 1,
+      cards: [card('a', 'todo', 1), card('b', 'todo', 2)],
+    },
+    { id: 'doing', board_id: 'b', title: 'Doing', position: 2, cards: [] },
+  ];
+}
+
+const titles = (columns: Column[], columnId: string): string[] =>
+  columns.find((c) => c.id === columnId)!.cards.map((c) => c.id);
+
+describe('reduceBoard', () => {
+  it('moves a card into another column', () => {
+    const next = reduceBoard(board(), {
+      type: 'card.moved',
+      boardId: 'b',
+      payload: { card: card('a', 'doing', 1) },
+    });
+
+    expect(titles(next, 'todo')).toEqual(['b']);
+    expect(titles(next, 'doing')).toEqual(['a']);
+  });
+
+  it('lands a moved card in position order within its column', () => {
+    const start = reduceBoard(board(), {
+      type: 'card.created',
+      boardId: 'b',
+      payload: { columnId: 'todo', card: card('c', 'todo', 3) },
+    });
+
+    const next = reduceBoard(start, {
+      type: 'card.moved',
+      boardId: 'b',
+      payload: { card: card('c', 'todo', 1.5) },
+    });
+
+    expect(titles(next, 'todo')).toEqual(['a', 'c', 'b']);
+  });
+
+  it('deletes a card', () => {
+    const next = reduceBoard(board(), {
+      type: 'card.deleted',
+      boardId: 'b',
+      payload: { cardId: 'a', columnId: 'todo' },
+    });
+
+    expect(titles(next, 'todo')).toEqual(['b']);
+  });
+
+  it('replaces an updated card in place', () => {
+    const next = reduceBoard(board(), {
+      type: 'card.updated',
+      boardId: 'b',
+      payload: { card: { ...card('a', 'todo', 1), title: 'Renamed' } },
+    });
+
+    const updated = next.find((c) => c.id === 'todo')!.cards.find((c) => c.id === 'a')!;
+    expect(updated.title).toBe('Renamed');
+    expect(titles(next, 'todo')).toEqual(['a', 'b']);
+  });
+
+  it('creates a column with no cards', () => {
+    const next = reduceBoard(board(), {
+      type: 'column.created',
+      boardId: 'b',
+      payload: { column: { id: 'done', board_id: 'b', title: 'Done', position: 3 } },
+    });
+
+    expect(next.map((c) => c.id)).toEqual(['todo', 'doing', 'done']);
+    expect(next.find((c) => c.id === 'done')!.cards).toEqual([]);
+  });
+
+  it('deletes a column', () => {
+    const next = reduceBoard(board(), {
+      type: 'column.deleted',
+      boardId: 'b',
+      payload: { columnId: 'doing' },
+    });
+
+    expect(next.map((c) => c.id)).toEqual(['todo']);
+  });
+
+  it('keeps a column’s cards when only its own fields change', () => {
+    const next = reduceBoard(board(), {
+      type: 'column.updated',
+      boardId: 'b',
+      payload: { column: { id: 'todo', board_id: 'b', title: 'In Progress', position: 1 } },
+    });
+
+    const col = next.find((c) => c.id === 'todo')!;
+    expect(col.title).toBe('In Progress');
+    expect(col.cards.map((c) => c.id)).toEqual(['a', 'b']);
+  });
+});
+```
+
+แต่ละเทสต์ตรึงอะไรไว้:
+
+- **`moves a card into another column`** — behavior แกนของ `card.moved`: card ออกจาก `todo` แล้วไปโผล่ใน `doing` `applyMove` ก่อนอื่นถอด card ออกจากทุกคอลัมน์ แล้วใส่มันกลับเข้าคอลัมน์ที่ระบุด้วย `column_id` ของมันเอง ดังนั้นการย้ายข้ามคอลัมน์จึงเป็น remove-แล้ว-add ไม่เคยซ้ำ
+- **`lands a moved card in position order`** — การรับประกันลำดับ: card C ที่ย้ายไป `position: 1.5` เรียง *ระหว่าง* A (`1`) กับ B (`2`) ดังนั้นคอลัมน์อ่านเป็น `a, c, b` นี่คือคู่ฝั่ง frontend ของเทสต์ลำดับ `move_card` ฝั่ง backend — fractional position เดียวกัน ตรวจบน reconcile ของ client เอง
+- **`deletes a card` / `replaces an updated card`** — สอง mutation ของ card ที่เหลือ: delete เอาออกด้วย id และ update สลับ card ที่ตรงกันเป็นเวอร์ชันใหม่ของมันโดยทิ้ง sibling (และลำดับของมัน) ไว้ไม่แตะ
+- **สามเทสต์ของคอลัมน์** — `column.created` ต่อคอลัมน์ว่างเข้าไป (คอลัมน์ใหม่เอี่ยมไม่มี card จริง ๆ); `column.deleted` เอามันออก; `column.updated` เปลี่ยน field ของคอลัมน์เองโดย **เก็บ `cards` ของมันไว้** เคสเป๊ะ ๆ ที่ [live-sync](/taskflow/th/kanban-island/live-sync/) ชี้ไว้ ที่ payload ของ event แบบ bare-`Column` ไม่มี key `cards` และ object spread ต้องไม่ทับตัวที่มีอยู่
+
+### 4. Refactor `reconcile` ของ `Board.tsx`
+
+เมื่อ logic ถูกดึงออกมาแล้ว `reconcile` หดลงเหลือ guard บวกการเรียก `reduceBoard` เดียว เพิ่ม import ที่ด้านบนของ `Board.tsx`:
+
+```tsx
+import { reduceBoard } from '../lib/board-reducer';
+```
+
+จากนั้นแทนที่ฟังก์ชัน `reconcile` ทั้งอัน — `switch` ~50 บรรทัดจาก [live-sync](/taskflow/th/kanban-island/live-sync/) — ด้วย:
+
+```tsx
+function reconcile(event: BoardEvent): void {
+  if (event.type === 'card.moved') {
+    const { card } = event.payload as { card: Card };
+    if (pendingRef.current.has(card.id)) return;
+  }
+
+  setBoard((current) =>
+    current ? { ...current, columns: reduceBoard(current.columns, event) } : current,
+  );
+}
+```
+
+ทุกอย่างที่ component ยังเป็นเจ้าของอยู่ต่อที่นี่: guard echo ของ `pending` (ข้าม `card.moved` ที่ client นี้เพิ่ง apply แบบ optimistic ไปเอง) และการเรียก `setBoard` ที่ห่อคอลัมน์ใหม่ของ `reduceBoard` กลับเข้า `BoardTree` ทุกอย่างที่เคยเป็นการคำนวณแบบ pure — `switch` เจ็ดทาง — ตอนนี้อยู่ใน `board-reducer.ts` ถูกเทสต์โดยตรง helper `sortCards`/`sortColumns`/`updateColumn`/`applyMove` ที่ย้ายเข้าไฟล์ reducer สามารถลบออกจาก `Board.tsx` ได้ถ้าไม่มีอะไรอื่นที่นั่นใช้มัน `sortTree` ที่ `fetchBoard` ใช้ ยังใช้ `sortColumns`/`sortCards` ของมันเอง ดังนั้นเก็บตัวไหนก็ตามที่ path fetch ยังต้องการไว้
+
+## Verify
+
+```bash
+cd frontend
+npm test
+```
+
+Output ที่คาดหวัง — เทสต์ reducer ทั้งเจ็ดเขียว:
+
+```txt
+ ✓ src/lib/board-reducer.test.ts (7 tests)
+
+ Test Files  1 passed (1)
+      Tests  7 passed (7)
+```
+
+จากนั้นยืนยันว่าการ refactor ไม่ทำให้ type-check และ build ของแอปเองพัง:
+
+```bash
+npx astro check
+npm run build
+```
+
+ทั้งสองควรผ่าน — `reconcile` ตอนนี้ delegate ไปยัง `reduceBoard` แต่ behavior ที่สังเกตได้จากภายนอก (การ apply event ใส่ state `board`) ไม่เปลี่ยน ดังนั้นส่วนที่เหลือของ `Board.tsx` compile และ render เป๊ะแบบเดียวกับที่ [live-sync](/taskflow/th/kanban-island/live-sync/) ทิ้งไว้
+
+## Recap
+
+คุณดึง `switch` ของ `reconcile` ใน `Board.tsx` ออกมาเป็น `reduceBoard(state: Column[], event: BoardEvent): Column[]` แบบ pure ใน `lib/board-reducer.ts` — ข้อมูลเข้า ข้อมูลออก ไม่มี `setBoard` ไม่มี ref ไม่มี DOM — และครอบ `BoardEvent` ทั้งเจ็ด type ด้วยเทสต์ vitest ที่เร็ว: card ที่ย้ายตกลงในคอลัมน์และในลำดับตาม position ที่ถูกต้อง, delete เอาออก, update แทนที่ในตำแหน่งเดิม และสามเคสของคอลัมน์รวมถึง `column.updated` ที่เก็บ `cards` ไว้ คุณเพิ่ม `vitest`, `@testing-library/preact` และ `jsdom` เป็น dev dependency, `vitest.config.ts` ที่มี `environment: 'jsdom'` และ script `"test": "vitest run"` สุดท้ายคุณ refactor `reconcile` ให้เหลือ guard echo ของ `pending` บวกการเรียก `reduceBoard` เดียว เก็บการกด echo แบบมี state ไว้ใน component และการแปลงแบบ pure ไว้ใน reducer ที่ถูกเทสต์ คุณได้เห็นว่าทำไมการเทสต์ reducer นั้นแบบแยกตัว — หลักมิลลิวินาที ไม่ flake ครอบทุก branch — จึงเป็นแกนหลักที่เร็วของ frontend suite โดยมี full-DOM render test ด้วย `@testing-library/preact` ที่หนักกว่าเป็นส่วนเสริมเลือกได้เหนือมัน ไม่ใช่ตัวแทน นั่นทำให้ Module 10 เสร็จสมบูรณ์: TaskFlow ตอนนี้มี integration test ฝั่ง backend บน Postgres จริง และ unit test ฝั่ง frontend เหนือ logic ฝั่ง client ที่ยากที่สุดของมัน ต่อไป [Docker & Compose](/taskflow/th/docker/) แพ็กทั้ง stack เพื่อการ deploy

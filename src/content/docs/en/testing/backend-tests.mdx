@@ -1,0 +1,248 @@
+---
+title: Backend Tests
+description: Test taskflow-api at three levels — a pure password round-trip unit test, and two #[sqlx::test] integration tests (register/login at the data layer, and move_card's fractional-position ordering) that run against a fresh, disposable, migrated Postgres per test — plus the testing-pyramid reasoning for why real-Postgres integration beats mocking the database.
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+Three tests for `taskflow-api`, one at each of the two lower levels of the testing pyramid:
+
+1. A pure **unit test** — the `hash_password`/`verify_password` round trip from [passwords](/taskflow/en/auth/passwords/), a plain `#[test]` that touches no database, no Redis, no Axum. It already lives in `auth/password.rs`; we look at it again here as the base of the pyramid.
+2. An **integration test** for the register-then-login flow, at the data layer: insert a user with a hashed password exactly as `register` does, fetch the row back by email as `login` does, and verify the attempt against the stored hash.
+3. An **integration test** for `move_card`: build a board, a column, and three cards, drop the middle one between its two new neighbors through the real `cards::service::move_card`, and assert both that its `position` lands strictly between them and that the column reads back in the intended order.
+
+Tests 2 and 3 are `#[sqlx::test]` functions — SQLx's own test macro, which spins up a **fresh, migrated PostgreSQL database for every single test**, hands the test an already-connected `PgPool`, and drops that database when the test finishes. They go in one new file, `taskflow/backend/api/src/tests.rs`, wired into the crate with a single `#[cfg(test)] mod tests;` line in `main.rs`. The only build change is enabling SQLx's `migrate` feature.
+
+## Why
+
+The **testing pyramid** is the shape a healthy test suite tends toward: a wide base of fast, isolated **unit tests** over pure logic; a narrower middle of **integration tests** that exercise real collaborators (here, a real Postgres); and a thin top of slow, end-to-end tests over the whole running system — which, for TaskFlow, is exactly what every earlier lesson's `curl`-against-a-running-server "Verify" section already was. This module fills in the two lower, code-level tiers.
+
+`hash_password`/`verify_password` sit at the wide base because they're **pure** — same input, same output, no I/O — so a test over them is instantaneous and can never flake. That's the property you want as much of your logic to have as possible, and it's why [passwords](/taskflow/en/auth/passwords/) built them as standalone functions that "don't talk to the database, Redis, or Axum at all" in the first place: pure code is trivially testable code.
+
+The middle tier is where a real decision lives: **how do you test code that talks to Postgres?** The tempting answer is to *mock* the database — hand the code a fake `PgPool` that returns canned rows. TaskFlow deliberately doesn't. A mock only proves your code behaves correctly against *your own assumptions about what Postgres does* — it can't catch a typo'd column name, a real `NOT NULL` violation, a foreign-key cascade, or the actual ordering `ORDER BY position` produces, because the mock never runs any SQL. `#[sqlx::test]` takes the opposite stance: every integration test gets a **real** Postgres, migrated from the very same `migrations/0001_init.sql` production uses, so the test exercises the real query, the real types, the real constraints. The cost is that the tests need a Postgres server to connect to; the payoff is they test what actually ships.
+
+## Pros & cons
+
+**`#[sqlx::test]` against a real, disposable Postgres (what we're using) vs. mocking `PgPool` with canned responses**
+
+- Pros: the test runs the *actual* SQL string against the *actual* schema. A query that references a column that doesn't exist, binds the wrong type, or relies on an `ORDER BY` the test cares about, fails in the test exactly as it would in production — none of which a mock returning hand-written rows can catch, because a mock never parses or plans a query. Each test also gets its **own** freshly-created, freshly-migrated database, so tests are fully isolated: one test's inserts are invisible to another's, they can run in parallel without colliding, and there's no shared-fixture teardown to get wrong.
+- Cons: the test suite needs a running PostgreSQL server it has permission to create databases on — it won't run on a machine with nothing installed, unlike a pure-unit test. That's a real setup cost, paid once (the same Docker Compose Postgres the app already uses), and it buys tests that catch a whole class of bug a mock structurally cannot. For genuinely pure logic — the position `match`, the password round trip — you still write a plain fast `#[test]` and skip the database entirely; not everything belongs at this tier.
+
+**Integration tests as in-crate `#[cfg(test)]` modules (what we're using) vs. a `tests/` integration-test directory**
+
+- Pros: `taskflow-api` is a **binary** crate (it has `main.rs`, no `lib.rs`), and Rust's `tests/` directory can only reach a crate's *public library* API — a binary's internal modules (`auth::password`, `cards::service`, `boards::repo`) simply aren't importable from `tests/`. A `#[cfg(test)] mod tests;` inside the crate has full access to every internal item, no `pub` widening required, and `#[cfg(test)]` means the module and its dependencies compile only under `cargo test`, never into the shipping binary.
+- Cons: the tests live alongside the code rather than in a separate directory, so "where are the tests" is answered by convention (`src/tests.rs` plus co-located `#[cfg(test)] mod tests` blocks like the one in `password.rs`) rather than a single top-level folder. For a binary crate that wants to test its internals, that's the standard trade — the alternative is carving out a `lib.rs` purely to make `tests/` work, a larger restructuring than this module needs.
+
+**Test 3 exercising the full `cards::service::move_card` (what we're using) vs. testing `cards::repo::move_card` plus the position math directly**
+
+- Pros: `service::move_card` is where the real behavior lives — the `match (&before, &after)` that decides the fractional position, the authorization, and (since [redis-backplane](/taskflow/en/realtime/redis-backplane/)) the cache-invalidation and `card.moved` broadcast. Testing the service function tests the thing that actually runs in production, end to end, rather than a hand-copied fragment of it. Re-deriving the `(a + b) / 2` average inside the test itself would only assert that the test author can do arithmetic, not that `move_card` does.
+- Cons: because `move_card` gained a `cache::invalidate` and a `realtime::publish` call in Modules 6 and 7, the test now needs **Redis reachable too**, not just Postgres — the same `redis` container the app already runs. `#[sqlx::test]` provisions the throwaway Postgres but knows nothing about Redis, so the test builds an `AppState` around a real Redis pool. That's the honest shape of an integration test at this point in the course: the service layer talks to both stores, so a test of the service layer talks to both stores — which is precisely the "test against real infrastructure, don't mock it" argument, applied one collaborator further.
+
+## Build it
+
+### 1. The unit test (already in `auth/password.rs`)
+
+The base of the pyramid was written back in [passwords](/taskflow/en/auth/passwords/) — a plain `#[test]`, no `async`, no database, living in a `#[cfg(test)] mod tests` at the bottom of `auth/password.rs`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_and_verify_round_trip() {
+        let hash = hash_password("correct horse battery staple").unwrap();
+        assert!(verify_password("correct horse battery staple", &hash));
+        assert!(!verify_password("wrong password", &hash));
+    }
+}
+```
+
+Nothing to add here — it's shown to name what it is: a pure unit test, the fast wide base every other test sits above. `cargo test` runs it alongside the two below with no extra setup, because it needs none.
+
+### 2. Enable SQLx's `migrate` feature
+
+`#[sqlx::test]`'s automatic per-test migration support is gated behind SQLx's `migrate` feature. Add it to the existing `sqlx` line in `api/Cargo.toml`:
+
+```toml
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros", "migrate"] }
+```
+
+That's the only dependency change this module needs — `#[sqlx::test]` provides its own async-runtime harness (no `#[tokio::test]`), and the `macros` feature that was already there is what enables the `#[sqlx::test]` attribute itself.
+
+### 3. `api/src/tests.rs`
+
+Create the new file `taskflow/backend/api/src/tests.rs`:
+
+```rust
+use std::sync::Arc;
+
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::{
+    auth::password, boards, cards, columns, config::Config, db, realtime::hub::Hub,
+    state::AppState,
+};
+
+/// Builds an `AppState` around a test `PgPool`. `move_card` reaches into
+/// `state.redis` to publish its `card.moved` event, so the Redis pool is a
+/// real one pointed at the local dev instance; `config` and `hub` are only
+/// here to satisfy the struct — this code path never reads them.
+fn test_state(db: PgPool) -> AppState {
+    AppState {
+        db,
+        redis: db::create_redis_pool("redis://127.0.0.1:6379").expect("redis pool"),
+        config: Arc::new(Config {
+            database_url: String::new(),
+            redis_url: String::new(),
+            jwt_secret: "test-secret".to_string(),
+            app_port: 0,
+            frontend_origin: String::new(),
+        }),
+        hub: Arc::new(Hub::new()),
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn register_then_login_round_trip(pool: PgPool) {
+    let user_id = Uuid::new_v4();
+    let stored_hash = password::hash_password("correct horse battery staple").unwrap();
+
+    // "Register": persist the user with a hashed password, exactly the
+    // INSERT the register handler runs.
+    sqlx::query("INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)")
+        .bind(user_id)
+        .bind("ada@example.com")
+        .bind(&stored_hash)
+        .bind("Ada")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // "Login": fetch the row back by email and verify a login attempt
+    // against the stored hash — the exact check `login` performs.
+    let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE email = $1")
+        .bind("ada@example.com")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert!(password::verify_password("correct horse battery staple", &hash));
+    assert!(!password::verify_password("wrong password", &hash));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn move_card_lands_between_its_new_neighbors(pool: PgPool) {
+    // Seed a user, a board they own, one column, and three cards A/B/C at
+    // positions 1.0, 2.0, 3.0 — straight through the repo layer.
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $2, $3, $4)")
+        .bind(user_id)
+        .bind("ada@example.com")
+        .bind("unused-hash")
+        .bind("Ada")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let board = boards::repo::insert_board(&pool, Uuid::new_v4(), user_id, "Sprint 12")
+        .await
+        .unwrap();
+    boards::repo::insert_owner_member(&pool, board.id, user_id)
+        .await
+        .unwrap();
+
+    let column = columns::repo::insert_column(&pool, Uuid::new_v4(), board.id, "To Do", 1.0)
+        .await
+        .unwrap();
+
+    let card_a = cards::repo::insert_card(&pool, Uuid::new_v4(), column.id, "Card A", None, 1.0)
+        .await
+        .unwrap();
+    let card_b = cards::repo::insert_card(&pool, Uuid::new_v4(), column.id, "Card B", None, 2.0)
+        .await
+        .unwrap();
+    let card_c = cards::repo::insert_card(&pool, Uuid::new_v4(), column.id, "Card C", None, 3.0)
+        .await
+        .unwrap();
+
+    // Exercise the real service function: drop C between A and B.
+    let state = test_state(pool.clone());
+    let moved = cards::service::move_card(
+        &state,
+        user_id,
+        card_c.id,
+        column.id,
+        Some(card_a.id),
+        Some(card_b.id),
+    )
+    .await
+    .unwrap();
+
+    // Its new position is strictly between A's and B's.
+    assert!(moved.position > card_a.position);
+    assert!(moved.position < card_b.position);
+
+    // And the column reads back A, C, B — the intended order.
+    let ordered = boards::repo::find_cards_for_column(&pool, column.id)
+        .await
+        .unwrap();
+    let titles: Vec<&str> = ordered.iter().map(|card| card.title.as_str()).collect();
+    assert_eq!(titles, ["Card A", "Card C", "Card B"]);
+}
+```
+
+A few things worth calling out:
+
+- **`#[sqlx::test(migrations = "./migrations")]`** does three things before your test body runs: creates a brand-new, uniquely-named database on the server in `DATABASE_URL`, applies every file in `./migrations` (the same `0001_init.sql` from [migrations](/taskflow/en/database/migrations/)) to it, and injects the connected `PgPool` as the test's `pool` argument. When the test returns, that database is dropped. Every test is therefore fully isolated on its own throwaway schema — no shared state, no cleanup code, safe to run in parallel. The path is relative to the crate root (`api/`), which is where the `migrations/` directory lives.
+- **The register/login test works at the data layer, not the HTTP handler**, because `register`/`login` take Axum extractors (`State`, `Json`) that are awkward to construct by hand — and the interesting thing to test isn't Axum's extraction, it's that a password hashed on the way in verifies on the way back out, through a real `users` row. Inserting and selecting with the same SQL those handlers use exercises exactly that, with none of the HTTP ceremony.
+- **The `move_card` test seeds its fixtures through the `repo` layer** (`insert_board`, `insert_owner_member`, `insert_column`, `insert_card`) — plain, Redis-free `INSERT`s — so the only function under test that touches Redis is the one whose behavior we actually care about here: `move_card` itself. Cards A, B, C get positions `1.0`, `2.0`, `3.0`; moving C with `before_id = A`, `after_id = B` triggers the `(1.0 + 2.0) / 2.0 = 1.5` branch, and the final `find_cards_for_column` — the real `ORDER BY position` query — proves the column now reads `A, C, B`.
+- **`assert!(moved.position > card_a.position)` and `< card_b.position`** deliberately assert the *invariant* ("strictly between the neighbors") rather than hard-coding `== 1.5`. The invariant is what the fractional-position strategy from [indexes-ordering](/taskflow/en/database/indexes-ordering/) actually promises; pinning the exact float would be a more brittle test that breaks if the averaging rule is ever refined, without testing anything more.
+
+### 4. Wire the module into `main.rs`
+
+Add one line to `taskflow/backend/api/src/main.rs`, next to the other `mod` declarations:
+
+```rust
+#[cfg(test)]
+mod tests;
+```
+
+`#[cfg(test)]` means `tests.rs` — and everything it pulls in — is compiled only when you run `cargo test`, and is completely absent from the release binary `cargo build` produces. This is the same attribute the inline `mod tests` in `password.rs` already uses, applied at the crate root to bring in a whole test file instead of a single inline block.
+
+## Verify
+
+`#[sqlx::test]` needs a PostgreSQL server to create its per-test databases on, and test 3 needs Redis, so bring both up first — the same containers from the [Docker Compose](/taskflow/en/setup/compose-skeleton/) module — and point `DATABASE_URL` at that Postgres:
+
+```bash
+cd taskflow/infra && docker compose up -d db redis
+export DATABASE_URL=postgres://taskflow:taskflow@localhost:5432/taskflow
+```
+
+`DATABASE_URL` here names the Postgres *server* (and a database the connecting role may create others alongside) — `#[sqlx::test]` never touches your real `taskflow` data, because each test runs entirely inside its own freshly-created, uniquely-named, dropped-afterward database. It's a disposable scratch database per test, not your development one.
+
+Then run the whole suite from `taskflow/backend/`:
+
+```bash
+cargo test -p api
+```
+
+Expected output — the pure unit test plus the two integration tests, all green:
+
+```txt
+running 3 tests
+test auth::password::tests::hash_and_verify_round_trip ... ok
+test tests::register_then_login_round_trip ... ok
+test tests::move_card_lands_between_its_new_neighbors ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+To run just one, pass a filter — `cargo test -p api move_card` runs only the move test. To see `println!`/`dbg!` output from a passing test (hidden by default), add `-- --nocapture`.
+
+## Recap
+
+You tested `taskflow-api` at the two code-level tiers of the testing pyramid: a pure `#[test]` over the `hash_password`/`verify_password` round trip (the fast, I/O-free base, already living in `auth/password.rs`), and two `#[sqlx::test]` integration tests in a new `src/tests.rs` — one proving a hashed password survives a real `INSERT`/`SELECT` round trip through the `users` table, one driving `cards::service::move_card` end to end and asserting a card dropped between two neighbors lands strictly between their positions and reorders the column to `A, C, B`. You saw why real-Postgres integration via `#[sqlx::test]` — a fresh, migrated, disposable database per test — catches a class of bug mocking the database structurally cannot, why a binary crate keeps its integration tests in-crate under `#[cfg(test)]` rather than in `tests/`, and why `DATABASE_URL` at test time points at a throwaway scratch database, not your development data. Next, [frontend-tests](/taskflow/en/testing/frontend-tests/) does the mirror-image job on the Astro side — extracting the board reconcile logic into a pure, unit-testable reducer and covering it with vitest.
