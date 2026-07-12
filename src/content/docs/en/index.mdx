@@ -1,6 +1,78 @@
 ---
 title: TaskFlow
-description: Realtime Kanban board — a real-world project guide.
+description: A hands-on, bilingual course where you build TaskFlow, a realtime Kanban board, with Rust, Axum, PostgreSQL, Redis, and Astro.
+template: splash
+hero:
+  tagline: Build TaskFlow, a realtime multi-user Kanban board, from an empty repo to a running Docker Compose stack. Along the way you'll work with Rust (Axum), PostgreSQL, Redis, WebSockets, and Astro.
+  actions:
+    - text: Start here
+      link: /taskflow/en/introduction/
+      icon: right-arrow
+      variant: primary
+    - text: Jump to the REST API
+      link: /taskflow/en/rest-api/
+      icon: rocket
 ---
 
-Placeholder — full landing added in a later task.
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What you'll build
+
+<CardGrid>
+  <Card title="Introduction" icon="open-book">
+    Why TaskFlow, how the course is structured, and what you'll have built by the end. [Open →](/taskflow/en/introduction/)
+  </Card>
+  <Card title="Setup & Tooling" icon="setting">
+    Install Rust, Node, Docker, and the rest of the toolchain, and scaffold the project. [Open →](/taskflow/en/setup/)
+  </Card>
+  <Card title="Database Design" icon="database">
+    Model boards, columns, and cards in PostgreSQL, with migrations from day one. [Open →](/taskflow/en/database/)
+  </Card>
+  <Card title="Backend Foundations" icon="server">
+    Stand up the Axum server, routing, config, and error handling. [Open →](/taskflow/en/backend-foundations/)
+  </Card>
+  <Card title="Authentication" icon="padlock">
+    Add signup, login, and session handling so boards belong to real users. [Open →](/taskflow/en/auth/)
+  </Card>
+  <Card title="REST API" icon="list-format">
+    Build the CRUD endpoints for boards, columns, and cards. [Open →](/taskflow/en/rest-api/)
+  </Card>
+  <Card title="Caching" icon="clock">
+    Speed up reads and protect PostgreSQL with a Redis caching layer. [Open →](/taskflow/en/caching/)
+  </Card>
+  <Card title="Realtime" icon="comment-alt">
+    Push live board updates to every connected client over WebSocket. [Open →](/taskflow/en/realtime/)
+  </Card>
+  <Card title="Frontend" icon="laptop">
+    Build the Astro UI that talks to your API and renders the board. [Open →](/taskflow/en/frontend/)
+  </Card>
+  <Card title="The Kanban Island" icon="puzzle">
+    Wire up drag-and-drop and realtime sync in an interactive Astro island. [Open →](/taskflow/en/kanban-island/)
+  </Card>
+  <Card title="Testing" icon="approve-check">
+    Cover the backend and frontend with automated tests you can trust. [Open →](/taskflow/en/testing/)
+  </Card>
+  <Card title="Docker & Compose" icon="cloud-download">
+    Containerize every service and bring the whole stack up with one command. [Open →](/taskflow/en/docker/)
+  </Card>
+  <Card title="Wrap-up" icon="star">
+    Review what you built and where to take TaskFlow next. [Open →](/taskflow/en/wrap-up/)
+  </Card>
+</CardGrid>
+
+## How this guide works
+
+<CardGrid>
+  <Card title="Real, copy-pasteable code" icon="code-branch">
+    Every snippet is real, runnable code you can copy straight into your project — no pseudo-code.
+  </Card>
+  <Card title="Adapts the Learn Hub courses" icon="notes">
+    Built on patterns from the Learn Hub Rust and Astro courses, applied to one real project end to end.
+  </Card>
+  <Card title="Bilingual EN / ไทย" icon="translate">
+    Available in English and ไทย — switch anytime from the top bar.
+  </Card>
+  <Card title="You build it by following along" icon="rocket">
+    This is a build-along guide: you write the code yourself, step by step, not just read about it.
+  </Card>
+</CardGrid>

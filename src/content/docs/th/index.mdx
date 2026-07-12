@@ -1,6 +1,78 @@
 ---
 title: TaskFlow
-description: Realtime Kanban board — a real-world project guide.
+description: คอร์สเรียนแบบลงมือทำจริง สองภาษา ที่คุณจะได้สร้าง TaskFlow บอร์ด Kanban แบบเรียลไทม์ ด้วย Rust, Axum, PostgreSQL, Redis และ Astro
+template: splash
+hero:
+  tagline: สร้าง TaskFlow บอร์ด Kanban แบบเรียลไทม์ที่รองรับผู้ใช้หลายคนพร้อมกัน ตั้งแต่ repo เปล่า ๆ ไปจนถึงสแตกที่รันได้จริงด้วย Docker Compose ระหว่างทางคุณจะได้ลงมือทำงานกับ Rust (Axum), PostgreSQL, Redis, WebSocket และ Astro
+  actions:
+    - text: เริ่มที่นี่
+      link: /taskflow/th/introduction/
+      icon: right-arrow
+      variant: primary
+    - text: ข้ามไปที่ REST API
+      link: /taskflow/th/rest-api/
+      icon: rocket
 ---
 
-เพลสโฮลเดอร์ — หน้าแนะนำเต็มจะเพิ่มในขั้นตอนถัดไป
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## สิ่งที่คุณจะได้สร้าง
+
+<CardGrid>
+  <Card title="Introduction" icon="open-book">
+    รู้จัก TaskFlow ว่าทำไมต้องสร้าง คอร์สนี้จัดโครงสร้างยังไง และสุดท้ายคุณจะได้อะไร [เปิดดู →](/taskflow/th/introduction/)
+  </Card>
+  <Card title="Setup & Tooling" icon="setting">
+    ติดตั้ง Rust, Node, Docker และเครื่องมือที่เหลือ พร้อมสร้างโปรเจกต์ตั้งต้น [เปิดดู →](/taskflow/th/setup/)
+  </Card>
+  <Card title="Database Design" icon="database">
+    ออกแบบโมเดลข้อมูล boards, columns และ cards ใน PostgreSQL พร้อม migration ตั้งแต่วันแรก [เปิดดู →](/taskflow/th/database/)
+  </Card>
+  <Card title="Backend Foundations" icon="server">
+    วางรากฐานเซิร์ฟเวอร์ Axum ระบบ routing, การตั้งค่า และการจัดการ error [เปิดดู →](/taskflow/th/backend-foundations/)
+  </Card>
+  <Card title="Authentication" icon="padlock">
+    เพิ่มระบบสมัครสมาชิก ล็อกอิน และจัดการ session เพื่อให้บอร์ดผูกกับผู้ใช้จริง [เปิดดู →](/taskflow/th/auth/)
+  </Card>
+  <Card title="REST API" icon="list-format">
+    สร้าง endpoint แบบ CRUD สำหรับ boards, columns และ cards [เปิดดู →](/taskflow/th/rest-api/)
+  </Card>
+  <Card title="Caching" icon="clock">
+    เร่งความเร็วการอ่านข้อมูลและช่วยลดภาระ PostgreSQL ด้วยเลเยอร์ cache จาก Redis [เปิดดู →](/taskflow/th/caching/)
+  </Card>
+  <Card title="Realtime" icon="comment-alt">
+    ส่งข้อมูลอัปเดตของบอร์ดแบบเรียลไทม์ไปยังทุก client ที่เชื่อมต่ออยู่ผ่าน WebSocket [เปิดดู →](/taskflow/th/realtime/)
+  </Card>
+  <Card title="Frontend" icon="laptop">
+    สร้างหน้าบ้านด้วย Astro ให้คุยกับ API ของคุณและแสดงผลบอร์ด [เปิดดู →](/taskflow/th/frontend/)
+  </Card>
+  <Card title="The Kanban Island" icon="puzzle">
+    ต่อระบบ drag-and-drop และซิงก์แบบเรียลไทม์เข้ากับ Astro island แบบอินเทอร์แอกทีฟ [เปิดดู →](/taskflow/th/kanban-island/)
+  </Card>
+  <Card title="Testing" icon="approve-check">
+    คลุมทั้งฝั่ง backend และ frontend ด้วยการทดสอบอัตโนมัติที่วางใจได้ [เปิดดู →](/taskflow/th/testing/)
+  </Card>
+  <Card title="Docker & Compose" icon="cloud-download">
+    ทำ container ให้ทุกเซอร์วิส และรันทั้งสแตกด้วยคำสั่งเดียว [เปิดดู →](/taskflow/th/docker/)
+  </Card>
+  <Card title="Wrap-up" icon="star">
+    ทบทวนสิ่งที่คุณสร้างมา และก้าวต่อไปของ TaskFlow [เปิดดู →](/taskflow/th/wrap-up/)
+  </Card>
+</CardGrid>
+
+## คู่มือนี้ทำงานยังไง
+
+<CardGrid>
+  <Card title="Real, copy-pasteable code" icon="code-branch">
+    ทุกโค้ดในคอร์สนี้เป็นโค้ดจริงที่รันได้ คัดลอกไปใช้ในโปรเจกต์ของคุณได้เลย ไม่มี pseudo-code
+  </Card>
+  <Card title="Adapts the Learn Hub courses" icon="notes">
+    ต่อยอดจากแพทเทิร์นของคอร์ส Rust และ Astro ใน Learn Hub มาประยุกต์ใช้กับโปรเจกต์จริงแบบครบวงจร
+  </Card>
+  <Card title="Bilingual EN / ไทย" icon="translate">
+    มีทั้งภาษาอังกฤษและไทย สลับได้ตลอดจากแถบด้านบน
+  </Card>
+  <Card title="You build it by following along" icon="rocket">
+    นี่คือคอร์สแบบลงมือทำ คุณจะได้เขียนโค้ดเองทีละขั้นตอน ไม่ใช่แค่อ่านผ่าน ๆ
+  </Card>
+</CardGrid>
