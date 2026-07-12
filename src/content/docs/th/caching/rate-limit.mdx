@@ -1,0 +1,295 @@
+---
+title: Rate Limiting
+description: สร้าง api/src/middleware/rate_limit.rs — fixed-window Redis limiter สำหรับ /auth/* ด้วย INCR + EXPIRE ต่อเป็น axum from_fn_with_state middleware คืน 429 พร้อม Retry-After
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+`api/src/middleware/rate_limit.rs`: Axum middleware ชื่อ `rate_limit` ที่นับ request ต่อ client IP ต่อนาทีใน Redis แล้วปฏิเสธ request ที่เกิน limit ที่กำหนดไว้ด้วย `429 Too Many Requests` มันถูก mount ด้วย `axum::middleware::from_fn_with_state` เฉพาะบน `/auth/*` เท่านั้น — `register` กับ `login` คือสอง endpoint ที่ผู้โจมตีจะอยากถล่มจริง ๆ ไม่ว่าจะเพื่อ brute-force รหัสผ่าน หรือยิง junk account เข้าตาราง `users`
+
+มีการเปลี่ยนแปลงเล็ก ๆ อีกสองจุดตามมาด้วย: `error.rs` ได้ variant ใหม่ `AppError::RateLimited { retry_after_secs }` พร้อม `IntoResponse` ของตัวเอง (variant เดียวที่ต้องการ response header ไม่ใช่แค่ JSON body) และ `main.rs` เปลี่ยนจาก `axum::serve(listener, app)` เป็น `axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())` — การเปลี่ยนที่ทำให้ IP จริงของ client เข้าถึงได้จาก handler หรือ middleware ใด ๆ ผ่าน extractor `ConnectInfo<SocketAddr>`
+
+## Why
+
+การใช้งาน Redis ทุกจุดอื่นใน module นี้ปกป้องข้อมูลที่อยู่หลัง authentication อยู่แล้ว — `cache:board:{id}` ถูกอ่านหลัง `assert_member` ผ่านเท่านั้น Rate limiting ปกป้องจุดเดียวใน API ที่รันก่อนที่จะมี authentication ใด ๆ ให้เช็คด้วยซ้ำ: `register` กับ `login` ทั้งคู่จำเป็นต้องเปิดให้ทุกคนเข้าถึงได้โดยตั้งใจ นี่แหละคือสิ่งที่ทำให้สอง endpoint นี้คุ้มค่าที่จะปกป้องจากการโจมตีอีกแบบหนึ่ง — ไม่ใช่ "request นี้มีสิทธิ์เห็นข้อมูลนี้ไหม" แต่เป็น "client นี้ส่ง request บ่อยผิดปกติหรือเปล่า" เต็ม ๆ
+
+`INCR` แล้วตามด้วย `EXPIRE` (เฉพาะครั้งแรกที่ hit) คือกลไกทั้งหมด: `ratelimit:{ip}:{unix_minute}` เป็น key ที่มีอยู่แค่สำหรับหน้าต่างเวลาหนึ่งนาทีที่เจาะจงหนึ่งช่วง สำหรับ IP หนึ่งตัวที่เจาะจง request แรกในหน้าต่างใหม่จะสร้าง key ที่ count `1` และตั้งให้หมดอายุใน 60 วินาที ทุก request ถัดไปในหน้าต่างเดียวกันแค่ increment key เดิม ไม่ต้องตั้ง expiry ใหม่อีก เมื่อนาทีเปลี่ยน ชื่อ key เองก็เปลี่ยนไปด้วย (`unix_minute` ขยับไปข้างหน้า) ดังนั้น key ของหน้าต่างก่อนหน้าก็แค่หมดอายุไปเองตามธรรมชาติ — ไม่มีอะไรต้องเก็บกวาด และไม่มี counter ให้ต้อง reset เอง
+
+## Pros & cons
+
+**Fixed window (ตัวที่เราใช้) เทียบกับ sliding window และ token bucket**
+
+- ข้อดี: fixed window คือกลไกทั้งหมดข้างบนนี้เลย — `INCR` หนึ่งครั้ง, `EXPIRE` แบบมีเงื่อนไขหนึ่งครั้ง, การเปรียบเทียบกับ limit หนึ่งครั้ง ไม่มีประวัติต้องเก็บไว้เกินกว่า count เดี่ยว ๆ ของหน้าต่างปัจจุบัน ไม่มี timestamp log ต้อง prune ไม่มี background refill process สำหรับ `/auth/*` ที่เป้าหมายจริง ๆ คือ "หยุด script ที่ถล่ม `/login` เป็น loop รัว ๆ" ความเรียบง่ายของ fixed window มีค่ามากกว่าความแม่นยำที่ทางเลือกอื่นให้ได้มาก
+- ข้อเสีย: fixed window มีปัญหาที่รู้กันดีคือ **boundary-burst** — client สามารถส่ง `limit` request ในวินาทีสุดท้ายของหน้าต่างหนึ่ง แล้วส่ง `limit` request อีกชุดทันทีในวินาทีแรกของหน้าต่างถัดไป รวมเป็น `2 × limit` request ในเวลาประมาณสองวินาที โดยไม่เคยเกิน count ต่อหน้าต่างในทางเทคนิคเลย **Sliding window** (ถ่วงน้ำหนัก count ของหน้าต่างก่อนหน้าตามสัดส่วนที่มันทับกับช่วงเวลาปัจจุบัน หรือ track timestamp ของ request แต่ละอันใน sorted set) ปิดช่องว่างนี้ได้ แลกกับ Redis state ที่มากขึ้นและการเช็คต่อ request ที่แพงขึ้นเล็กน้อย **Token bucket** (allowance ที่ค่อย ๆ เติมกลับมาช้า ๆ ที่รองรับ burst สั้น ๆ ได้ถึงขนาดของ bucket แล้วค่อยจำกัดเหลือ refill rate) จำลอง "อัตราคงที่ระยะยาว, burst เป็นครั้งคราว" ได้แม่นยำกว่าทั้ง fixed และ sliding window แลกกับการ track จำนวน token และ timestamp การ refill ล่าสุดแทนที่จะเป็น counter ตัวเดียว TaskFlow ยอมรับความเสี่ยง boundary-burst นี้: สำหรับแอประดับคอร์ส fixed window ที่บล็อกการโจมตีต่อเนื่องได้เป็นการปรับปรุงที่ใหญ่มากเมื่อเทียบกับไม่มี rate limiting เลย และช่องว่างที่มันทิ้งไว้ก็แคบและเจาะจง คุ้มค่าที่จะพูดถึงมากกว่าจะเป็นเหตุผลให้ต้องหยิบกลไกที่หนักกว่าซึ่งแอปนี้ยังไม่ต้องการ
+
+**`INCR` แล้วตามด้วย `EXPIRE` แบบมีเงื่อนไขในครั้งแรกที่ hit (ตัวที่เราใช้) เทียบกับ Lua script แบบ atomic ตัวเดียวที่รวมทั้งสองอย่าง**
+
+- ข้อดี: สอง command ธรรมดา ทั้งคู่ถูก expose อยู่แล้วโดย `deadpool_redis::redis::AsyncCommands` โดยไม่ต้อง setup อะไรเพิ่ม — ไม่ต้องเขียน Lua script, load มัน, แล้วคอยดูแลให้ตรงกับโค้ด Rust ที่เรียกมัน `INCR` บน key ที่ยังไม่มีอยู่จะสร้างมันขึ้นมาที่ `1` แบบ atomic ดังนั้นจึงไม่มี race บน "key นี้มีอยู่ไหม" แบบที่ pattern `GET`-แล้ว-`SET` ตรง ๆ จะมี
+- ข้อเสีย: `INCR` กับ `EXPIRE` ที่ตามมาเป็นสอง round trip แยกกัน ไม่ใช่ operation แบบ atomic เดียว — ในช่องว่างแคบ ๆ ระหว่างสองคำสั่งนี้ key ที่เพิ่งถูกสร้างโดย `INCR` ในทางเทคนิคยังไม่มี expiry เลย request แรกที่เกิดพร้อมกันสองอันในหน้าต่างใหม่เดียวกันอาจเห็น `count == 1` จาก `INCR` ของตัวเองทั้งคู่ แล้วพยายาม `EXPIRE` ทั้งคู่ ซึ่งไม่เป็นอันตราย (การตั้ง expiry เดิมซ้ำสองครั้งเป็น no-op ไม่ใช่ bug) แต่ request ที่อ่าน key ในช่องว่างนั้นพอดีจะเจอ key ที่ไม่มี TTL ซึ่งจะอยู่ตลอดไปถ้า process crash ระหว่างสองคำสั่งนั้น Lua script แบบ `EVAL` เดียวที่รันทั้งสอง command แบบ atomic จะปิดช่องว่างนี้ได้สนิท TaskFlow ยอมรับความเสี่ยงเล็ก ๆ ที่ self-healing นี้ (ขาด `EXPIRE` ตรงนี้แค่หมายความว่า count key อยู่นานเกินไปนิดหน่อย ไม่ใช่ rate-limiting behavior ที่ผิดพลาด) แทนที่จะเพิ่ม Lua script เพื่อสิ่งนี้
+
+## Build it
+
+### 1. `middleware/mod.rs`
+
+สร้าง `taskflow/backend/api/src/middleware/mod.rs`:
+
+```rust
+pub mod rate_limit;
+```
+
+### 2. `middleware/rate_limit.rs`
+
+สร้าง `taskflow/backend/api/src/middleware/rate_limit.rs`:
+
+```rust
+use std::net::SocketAddr;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use axum::{
+    extract::{ConnectInfo, Request, State},
+    middleware::Next,
+    response::Response,
+};
+use deadpool_redis::redis::AsyncCommands;
+
+use crate::{error::AppError, state::AppState};
+
+const LIMIT: i64 = 10;
+const WINDOW_SECS: u64 = 60;
+
+pub async fn rate_limit(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    let mut conn = state
+        .redis
+        .get()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    let unix_minute = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / WINDOW_SECS;
+
+    let key = format!("ratelimit:{}:{unix_minute}", addr.ip());
+
+    let count: i64 = conn
+        .incr(&key, 1)
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    if count == 1 {
+        conn.expire::<_, ()>(&key, WINDOW_SECS as i64)
+            .await
+            .map_err(|err| AppError::Internal(err.into()))?;
+    }
+
+    if count > LIMIT {
+        return Err(AppError::RateLimited {
+            retry_after_secs: WINDOW_SECS,
+        });
+    }
+
+    Ok(next.run(request).await)
+}
+```
+
+ไล่ดูตามลำดับ:
+
+1. **ขอ Redis connection**: pattern `state.redis.get().await` เดียวกับที่ function อื่นทุกตัวที่แตะ Redis ในคอร์สนี้ใช้อยู่แล้ว
+2. **คำนวณ `unix_minute`**: Unix timestamp ปัจจุบันเป็นวินาที หารด้วย 60 การหารแบบ integer ทำให้ timestamp ใด ๆ ในหน้าต่าง 60 วินาทีเดียวกันได้ค่า `unix_minute` เดียวกัน — นี่คือขอบเขตทั้งหมดของ "fixed window" เขียนเป็นบรรทัดเดียว
+3. **สร้าง key**: `ratelimit:{ip}:{unix_minute}` — key ต่างกันสำหรับทุกคู่ (client, หน้าต่าง) ตรงตามที่ design ต้องการเป๊ะ
+4. **`INCR`**: increment count ของ key นี้แบบ atomic สร้างมันที่ `1` ถ้ายังไม่มี `count` คือค่า *หลัง* increment ดังนั้น request แรกในหน้าต่างจะเห็น `count == 1` ไม่ใช่ `0`
+5. **`EXPIRE` เฉพาะตอน `count == 1`**: เฉพาะ request ที่เพิ่งสร้าง key เท่านั้นที่ตั้ง expiry ของมัน — request ที่มาทีหลังในหน้าต่างเดียวกันแค่ increment key ที่จะหมดอายุตามกำหนดอยู่แล้ว ไม่ต้องแตะ TTL ของมันอีก
+6. **เทียบกับ `LIMIT`**: ถ้า request นี้ดัน count เกิน `10` ให้ปฏิเสธด้วย `AppError::RateLimited` ก่อน `next.run(...)` — handler ปลายทาง (`register` หรือ `login`) จะไม่รันเลยสำหรับ request ที่ถูกปฏิเสธ
+7. **ไม่งั้นก็ call ต่อไป**: `next.run(request).await` ส่ง request ต่อไปยังสิ่งที่ middleware ห่ออยู่ — ตามรูปแบบเดียวกับ middleware `from_fn`/`from_fn_with_state` ทุกตัวใน Axum
+
+### 3. `error.rs` — variant `RateLimited`
+
+เพิ่ม variant ใหม่ให้ enum `AppError` ใน `taskflow/backend/api/src/error.rs`:
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("not found")]
+    NotFound,
+    #[error("unauthorized")]
+    Unauthorized,
+    #[error("forbidden")]
+    Forbidden,
+    #[error("{0}")]
+    Conflict(String),
+    #[error("{0}")]
+    Validation(String),
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+    #[error("internal error")]
+    Internal(#[from] anyhow::Error),
+    #[error("too many requests")]
+    RateLimited { retry_after_secs: u64 },
+}
+```
+
+อัปเดต `impl IntoResponse for AppError` ให้ `RateLimited` มี response ของตัวเอง ก่อนถึง `match` เดิม:
+
+```rust
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        if let AppError::RateLimited { retry_after_secs } = self {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(
+                    axum::http::header::RETRY_AFTER,
+                    retry_after_secs.to_string(),
+                )],
+                Json(json!({ "error": "rate_limited", "message": "too many requests" })),
+            )
+                .into_response();
+        }
+
+        let (status, code) = match &self {
+            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
+            AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            AppError::Validation(_) => (StatusCode::UNPROCESSABLE_ENTITY, "validation"),
+            AppError::Db(err) => {
+                tracing::error!(error = %err, "database error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            }
+            AppError::Internal(err) => {
+                tracing::error!(error = %err, "internal error");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+            }
+            AppError::RateLimited { .. } => unreachable!("handled above"),
+        };
+
+        let message = match &self {
+            AppError::Db(_) | AppError::Internal(_) => "internal error".to_string(),
+            _ => self.to_string(),
+        };
+
+        (status, Json(json!({ "error": code, "message": message }))).into_response()
+    }
+}
+```
+
+`RateLimited` ถูกจัดการด้วย `return` แต่เนิ่น ๆ ของตัวเอง ไม่ใช่อีกกิ่งหนึ่งของ `match` หลัก เพราะมันเป็น variant เดียวที่ต้องการ **response header** (`Retry-After`) นอกเหนือจาก JSON body ของมัน — ทุก variant อื่นต้องการแค่ status code กับข้อความเท่านั้น `[(axum::http::header::RETRY_AFTER, retry_after_secs.to_string())]` คือรูปแบบ array-of-tuples ของ header ใน Axum: tuple `(StatusCode, headers, body)` implement `IntoResponse` ตรง ๆ เป็น pattern เดียวกับที่ใช้ทั่ว Axum สำหรับเพิ่ม header โดยไม่ต้องสร้าง `HeaderMap` เอง กิ่ง `AppError::RateLimited { .. } => unreachable!(...)` มีไว้แค่ให้ `match` ยัง exhaustive อยู่ — `return` แต่เนิ่น ๆ ข้างบนรับประกันว่ามันไม่มีทางถูกรันถึงจริง ๆ แต่ compiler รู้แบบนั้นไม่ได้ถ้าไม่มีกิ่งนี้อยู่
+
+### 4. ต่อสายใน `main.rs`
+
+```rust
+mod auth;
+mod boards;
+mod cache;
+mod cards;
+mod columns;
+mod config;
+mod db;
+mod error;
+mod labels;
+mod middleware;
+mod state;
+
+use std::net::SocketAddr;
+
+use axum::{middleware::from_fn_with_state, routing::get, Json, Router};
+use middleware::rate_limit::rate_limit;
+
+let app = Router::new()
+    .route("/health", get(health))
+    .nest(
+        "/auth",
+        auth::routes().route_layer(from_fn_with_state(state.clone(), rate_limit)),
+    )
+    .merge(boards::routes())
+    .merge(columns::routes())
+    .merge(cards::routes())
+    .merge(labels::routes())
+    .layer(cors)
+    .with_state(state);
+
+let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{app_port}")).await?;
+tracing::info!("listening on {}", listener.local_addr()?);
+
+axum::serve(
+    listener,
+    app.into_make_service_with_connect_info::<SocketAddr>(),
+)
+.await?;
+```
+
+มีสามจุดที่เปลี่ยนไปจากเวอร์ชัน `main.rs` ของ [labels](/taskflow/th/rest-api/labels/):
+
+- `.route_layer(from_fn_with_state(state.clone(), rate_limit))` ถูก chain ตรงเข้ากับ `auth::routes()` *ก่อน* ที่ `.nest("/auth", ...)` จะห่อมันไว้ — วิธีนี้จำกัด scope ของ middleware ให้อยู่แค่ `/auth/*` เท่านั้น ไม่มีที่อื่น `state.clone()` ราคาถูก (`Arc`-backed clone แบบเดียวกับที่ `AppState` ถูกออกแบบมาให้เป็นตั้งแต่ [db-pool](/taskflow/th/backend-foundations/db-pool/)) ส่วน `state` ตัวเดิมยังถูก move เข้า `.with_state(state)` ต่อไปตามปกติ
+- `mod middleware;` เป็นการประกาศ module ระดับบนสุดตัวใหม่
+- argument ตัวที่สองของ `axum::serve` เปลี่ยนเป็น `app.into_make_service_with_connect_info::<SocketAddr>()` แทนที่จะเป็น `app` เปล่า ๆ — นี่คือสิ่งที่ทำให้ `ConnectInfo<SocketAddr>` extract ได้เลย ถ้าไม่มีอันนี้ extractor `ConnectInfo<SocketAddr>` ของ `rate_limit` จะ fail ทุก request
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+เปิด stack ขึ้นมาแล้วถล่ม `/auth/login` เกิน limit — 12 request ใช้ email ที่ไม่จำเป็นต้องมีอยู่จริง (`401` จาก credential ผิดก็ยังนับรวมใน limit เพราะ middleware รัน*ก่อน*handler):
+
+```bash
+cd taskflow/infra && docker compose up -d db redis
+cd ../backend && cargo run -p api &
+
+for i in $(seq 1 12); do
+  curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8080/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"email":"nobody@example.com","password":"wrong password"}'
+done
+```
+
+10 request แรกคืน `401` (credential ผิด แต่ยังปล่อยผ่าน) request ที่ 11 กับ 12 คืน `429`:
+
+```
+401
+401
+401
+401
+401
+401
+401
+401
+401
+401
+429
+429
+```
+
+ยืนยันว่า response `429` มี `Retry-After` ติดมาด้วย:
+
+```bash
+curl -s -i -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"nobody@example.com","password":"wrong password"}' | grep -i retry-after
+```
+
+```
+retry-after: 60
+```
+
+ยืนยันว่า `/boards` — ที่อยู่นอก `/auth/*` — ไม่ถูกกระทบจาก client เดียวกันที่ถล่มมันอยู่:
+
+```bash
+for i in $(seq 1 12); do
+  curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/boards \
+    -H "Authorization: Bearer $TOKEN"
+done
+```
+
+ทั้ง 12 request คืน `200` เพราะ rate limiter ถูก mount ไว้แค่บน `/auth` nest เท่านั้น ไม่ใช่ router ชั้นนอก
+
+## Recap
+
+คุณสร้าง `rate_limit` ซึ่งเป็น Axum middleware แบบ fixed-window ที่นับ request ต่อ IP ต่อนาทีใน Redis (`ratelimit:{ip}:{unix_minute}`, `INCR` แล้วตามด้วย `EXPIRE` ในครั้งแรกที่ hit) แล้วปฏิเสธ request ที่ 11 เป็นต้นไปในหน้าต่างใด ๆ ด้วย `429` พร้อม header `Retry-After` — mount ด้วย `.route_layer(from_fn_with_state(...))` บน `auth::routes()` เท่านั้น เพื่อให้มันปกป้องแค่ `/auth/*` ไม่ใช่ที่อื่น คุณเปรียบเทียบ fixed window กับ sliding window และ token bucket แล้วชี้ช่องว่าง boundary-burst ที่เจาะจงซึ่ง fixed window ยอมรับแลกกับความเรียบง่ายของมัน นี่คือการปิด Module 6: Redis instance ของ TaskFlow ตอนนี้ทำงานสามอย่างที่แยกกันชัดเจน — เก็บ session (จาก [Authentication](/taskflow/th/auth/handlers/)), cache response (สองบทแรกของ module นี้), และนับ request (บทนี้) — แต่ละอย่างอยู่ใน key namespace ของตัวเอง ไม่มีใครไปเหยียบใคร บทถัดไป [Realtime](/taskflow/th/realtime/) จะให้ Redis ทำงานที่สี่ — pub/sub สำหรับ broadcast การอัปเดต board แบบสดผ่าน WebSocket

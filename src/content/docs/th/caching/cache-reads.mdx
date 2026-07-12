@@ -1,0 +1,301 @@
+---
+title: Cache Reads
+description: สร้าง api/src/cache.rs — generic get_json/set_json/invalidate helper เหนือ deadpool_redis::Pool — แล้วต่อ cache-aside pattern เข้ากับ GET /boards/:id ด้วย TTL 60 วินาที
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+`api/src/cache.rs`: function เล็ก ๆ generic สามตัว — `get_json`, `set_json`, `invalidate` — ที่อ่านและเขียนค่าแบบ `Serialize`/`DeserializeOwned` ใด ๆ เป็น JSON string ใน Redis ผ่าน `deadpool_redis::Pool` ตัวเดียวกับที่ `AppState` มีอยู่แล้ว จากนั้นเราต่อมันเข้ากับ `boards::service::get_tree` ซึ่งเป็น function เบื้องหลัง `GET /boards/:id` เพื่อให้ request ที่ขอ tree ของ board เดิมซ้ำ ถูก serve จาก Redis แทนที่จะรันขั้นตอนประกอบ tree ที่มี query หกครั้งขึ้นไปจาก [boards](/taskflow/th/rest-api/boards/) ใหม่ทุกครั้ง
+
+struct สามตัวใน `boards::model` — `Board`, `Column`, `Card`, `ColumnWithCards`, `BoardTree` — ได้ derive ตัวที่สองเพิ่มมา คือ `Deserialize` คู่กับ `Serialize` ที่มีอยู่แล้ว ก่อนหน้านี้พวกมันถูก serialize *ออก* ไปเป็น JSON response body เท่านั้น การอ่าน `BoardTree` ที่ cache ไว้กลับออกมาจาก Redis หมายความว่าต้อง deserialize JSON เดียวกันนั้น *เข้า* มา ดังนั้นทุก type ในเส้นทางนี้ต้องรองรับทั้งสองทิศทาง
+
+## Why
+
+`GET /boards/:id` เป็น endpoint ที่ถูกขอมากที่สุดใน TaskFlow — ทุกครั้งที่เปิดดู board, ทุก page load, ทุกครั้งที่ reconnect หลัง connection หลุด ก็ดึง tree เดิมซ้ำ — และ Pros & cons ของ [boards](/taskflow/th/rest-api/boards/) เองก็เคยชี้ไว้แล้วว่าการประกอบ `get_tree` เป็น N+1 query: หนึ่งครั้งสำหรับ column ของ board, อีกหนึ่งครั้งต่อ column สำหรับ card ของ column นั้น board ที่เปิดค้างไว้สาม browser tab จะรัน query set ทั้งชุดนี้ซ้ำสามครั้งต่อนาที สำหรับข้อมูลที่เปลี่ยนอย่างมากแค่ครั้งเดียว การ cache `BoardTree` ที่ประกอบเสร็จแล้ว — ไม่ใช่แถว `Board`/`Column`/`Card` แยกชิ้น แต่เป็น *response body ที่เสร็จสมบูรณ์* — ทำให้ทุก read ซ้ำเหล่านั้นกลายเป็น Redis `GET` ครั้งเดียว ข้าม round trip ไป Postgres (และต้นทุน N+1 query) ไปเลยจนกว่าจะมีอะไรเปลี่ยนแปลงจริง ๆ
+
+function สามตัวใน `cache.rs` ตั้งใจทำให้ generic เหนือ `T: Serialize`/`T: DeserializeOwned` แทนที่จะ hardcode เป็น `BoardTree` — `get_json::<BoardTree>(...)` อ่านเหมือนกับ `get_json::<SomeOtherType>(...)` ทุกประการ ถ้าบทหลัง ๆ อยากจะ cache resource อื่นด้วยวิธีเดียวกันนี้บ้าง ตัว pattern cache-*aside* เอง — เช็ค cache ก่อน ถ้าไม่เจอค่อยไปรัน query จริง แล้วเติม cache ก่อน return — เป็นรูปแบบมาตรฐานสำหรับ read ใด ๆ ที่ module นี้ (หรือ module ในอนาคต) อยากทำให้เร็วขึ้น: `cache.rs` คือกลไกที่ใช้ซ้ำได้ ส่วน `get_tree` คือผู้เรียกใช้คนแรกของมัน
+
+## Pros & cons
+
+**Cache tree ที่ประกอบแล้วของ `GET /boards/:id` (ตัวที่เราใช้) เทียบกับปล่อยให้ทุก read ยิงเข้า Postgres โดยตรง**
+
+- ข้อดี: cache hit ข้าม N+1 query set ทั้งชุด — Redis round trip ครั้งเดียวแทนที่จะเป็น `1 + (จำนวน column)` round trip ไป Postgres — ซึ่งสำคัญที่สุดตรงจุดที่ pattern การใช้งานจริงของ TaskFlow เองทำให้เกิดบ่อย: board เดิมถูก refresh ซ้ำ ๆ โดย member คนเดิมหรือคนอื่น ในขณะที่ไม่มีใครกำลัง edit อยู่จริง ๆ Redis `GET` แบบ in-memory ก็เร็วกว่าต่อครั้งอยู่แล้วแม้จะเทียบกับ Postgres query ที่มี index ตัวเดียว ดังนั้นแม้แต่ board ที่มี column เดียว card เดียวก็ได้ประโยชน์ เพียงแต่ไม่มากเท่า board ที่มียี่สิบ column
+- ข้อเสีย: caching เป็นเครื่องมือที่ผิดสำหรับข้อมูลที่เปลี่ยนทุกครั้งที่อ่าน หรืออ่านแค่ครั้งเดียว — write ที่เติม cache (`set_json`) เป็น overhead ล้วน ๆ ถ้าไม่มีอะไรมาอ่านซ้ำอีกก่อน TTL หมดอายุ และ board ที่ถูก edit พร้อมกันหนัก ๆ (ดู [invalidation](/taskflow/th/caching/invalidation/)) ต้องจ่ายค่า cache write ที่แทบไม่ได้ประโยชน์อะไรก่อนที่ invalidation ครั้งถัดไปจะล้างมันทิ้ง caching ยังเพิ่ม data store ตัวที่สองที่อาจ (ชั่วขณะ) ไม่ตรงกับ source of truth — Postgres ถูกต้องเสมอทันทีที่ write commit สำเร็จ ส่วนสำเนาที่ cache ไว้ถูกต้องแค่จนกว่าจะถูก invalidate หรือ TTL หมดอายุ แล้วแต่อย่างไหนมาก่อน
+
+**TTL 60 วินาที (ตัวที่เราใช้) เทียบกับ TTL ที่ยาวกว่ามาก หรือไม่มี TTL เลย**
+
+- ข้อดี: 60 วินาทีนานพอที่จะรองรับ pattern "board เดิม อ่านรัว ๆ หลายครั้ง" ที่ cache นี้มีไว้เพื่อการนี้โดยเฉพาะ — user refresh, page re-fetch ตอน focus, เพื่อนร่วมทีมสองสามคนแวะดู board เดียวกันภายในนาทีเดียวกัน — ในขณะที่ยังสั้นพอที่แม้แต่การ invalidate ที่พลาดไป (bug, code path ที่ลืมเรียก `cache::invalidate`) จะ self-heal ได้ภายในหนึ่งนาที แทนที่จะ serve ข้อมูล stale ไปเรื่อย ๆ ไม่มีที่สิ้นสุด มันเป็น safety net ใต้การเรียก invalidate แบบ explicit ที่ [invalidation](/taskflow/th/caching/invalidation/) เพิ่มเข้าไปในทุก write ไม่ใช่ตัวแทนของมัน
+- ข้อเสีย: 60 วินาทีก็ยังเป็นช่วงเวลาจริงที่ cache ซึ่งถูก invalidate ถูกต้องแล้ว อาจถูก *เติมใหม่* ด้วยข้อมูลที่ตามหลัง write ไปแล้วหนึ่งครั้ง ถ้า request สอง request แข่งกับ mutation พอดิบพอดี (อธิบายละเอียดใน [invalidation](/taskflow/th/caching/invalidation/) ช่วง stale-read) TTL ที่ยาวกว่านี้มากจะลด overhead การเติม cache ลงไปอีก แต่ก็ขยายช่วงเวลาเดียวกันนั้นให้กว้างขึ้น และพึ่งพา invalidation ให้ไม่พลาดเลยมากขึ้น TaskFlow เลือก 60 วินาทีเป็นจุดที่ "safety net ราคาถูก" กับ "ความ stale ที่สังเกตเห็นได้" ยังจริงทั้งคู่
+
+## Build it
+
+### 1. `cache.rs`
+
+สร้าง `taskflow/backend/api/src/cache.rs`:
+
+```rust
+use deadpool_redis::redis::AsyncCommands;
+use serde::{de::DeserializeOwned, Serialize};
+
+use crate::error::{AppError, AppResult};
+
+pub async fn get_json<T: DeserializeOwned>(
+    pool: &deadpool_redis::Pool,
+    key: &str,
+) -> AppResult<Option<T>> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    let raw: Option<String> = conn
+        .get(key)
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    match raw {
+        Some(json) => {
+            let value =
+                serde_json::from_str(&json).map_err(|err| AppError::Internal(err.into()))?;
+            Ok(Some(value))
+        }
+        None => Ok(None),
+    }
+}
+
+pub async fn set_json<T: Serialize>(
+    pool: &deadpool_redis::Pool,
+    key: &str,
+    value: &T,
+    ttl_secs: u64,
+) -> AppResult<()> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    let json = serde_json::to_string(value).map_err(|err| AppError::Internal(err.into()))?;
+
+    conn.set_ex::<_, _, ()>(key, json, ttl_secs)
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    Ok(())
+}
+
+pub async fn invalidate(pool: &deadpool_redis::Pool, key: &str) -> AppResult<()> {
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    conn.del::<_, ()>(key)
+        .await
+        .map_err(|err| AppError::Internal(err.into()))?;
+
+    Ok(())
+}
+```
+
+`.map_err(|err| AppError::Internal(err.into()))` เป็น pattern เดียวกับที่ `auth::middleware::AuthUser` ใช้กับการ lookup Redis ของตัวเองอยู่แล้ว — `deadpool_redis::PoolError` หรือ `redis::RedisError` แปลงเป็น `anyhow::Error` ผ่าน `.into()` แล้วแปลงเป็น `AppError::Internal` ผ่าน conversion `#[from]` ที่ `error.rs` นิยามไว้อยู่แล้ว turbofish ของ `set_ex` และ `del` (`::<_, _, ()>`, `::<_, ()>`) ตรึง generic return type ของมันให้เป็น `()` — ทั้งสอง command คืนค่า Redis status reply ที่เราไม่ได้ใช้ และถ้าไม่ระบุ type ชัดเจน Rust ก็ไม่มีอะไรให้ infer
+
+**ข้อตกลง cache key**: `cache:board:{board_id}` — Redis **STRING** ที่เก็บ `BoardTree` แบบ serialize เป็น JSON แล้ว key นี้ตั้งใจใส่ namespace `cache:` ไว้ข้างหน้า และควรพูดให้ชัดว่า มัน*ไม่ใช่*สิ่งเดียวกับ `board:{board_id}` ซึ่งเป็น Redis pub/sub **CHANNEL** ที่ [Realtime](/taskflow/th/realtime/) จะสร้างในอีกสองบทข้างหน้า เพื่อ broadcast การอัปเดต board แบบสดผ่าน WebSocket Redis STRING key กับชื่อ pub/sub channel อยู่กันคนละ namespace โดยสิ้นเชิงภายใน — Redis จะไม่มีทางสับสน `GET cache:board:{id}` กับ `PUBLISH board:{id} ...` แม้จะบังเอิญชนกันก็ตาม — แต่ทั้งสองอย่างมันเผลอปนกันได้ง่ายเวลากวาดตาอ่านโค้ดผ่าน ๆ ดังนั้น module นี้จะใส่ prefix `cache:` เสมอ ไม่ย่อทิ้งเด็ดขาด
+
+### 2. `boards/model.rs` — เพิ่ม `Deserialize`
+
+อัปเดต derive ใน `taskflow/backend/api/src/boards/model.rs`:
+
+```rust
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+use uuid::Uuid;
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct Board {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct Column {
+    pub id: Uuid,
+    pub board_id: Uuid,
+    pub title: String,
+    pub position: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct Card {
+    pub id: Uuid,
+    pub column_id: Uuid,
+    pub title: String,
+    pub description: Option<String>,
+    pub position: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ColumnWithCards {
+    #[serde(flatten)]
+    pub column: Column,
+    pub cards: Vec<Card>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BoardTree {
+    #[serde(flatten)]
+    pub board: Board,
+    pub columns: Vec<ColumnWithCards>,
+}
+```
+
+`#[serde(flatten)]` ทำงานเหมือนกันทั้งสองทิศทาง — การ deserialize `BoardTree` กลับออกมาจาก JSON string ที่ cache ไว้ สร้าง field `board: Board` ที่ซ้อนอยู่ขึ้นมาใหม่จาก key ระดับบนสุดอย่าง `id`/`title`/ฯลฯ ที่มันถูก flatten ออกไปตอนขาออก `FromRow` ไม่ได้รับผลกระทบ — มันควบคุมแค่วิธีที่ `sqlx` อ่านแถวจาก Postgres เท่านั้น ซึ่งเป็นคนละเรื่องกับ JSON round trip ผ่าน Redis ของ `serde` โดยสิ้นเชิง
+
+### 3. `boards/service.rs` — `get_tree` แบบ cache-aside
+
+อัปเดต `get_tree` ใน `taskflow/backend/api/src/boards/service.rs` — ต้อง import `crate::{cache, state::AppState}` เพิ่มที่ด้านบนไฟล์ด้วย:
+
+```rust
+pub async fn get_tree(state: &AppState, user_id: Uuid, board_id: Uuid) -> AppResult<BoardTree> {
+    let db = &state.db;
+
+    assert_member(db, user_id, board_id).await?;
+
+    let cache_key = format!("cache:board:{board_id}");
+    if let Some(tree) = cache::get_json::<BoardTree>(&state.redis, &cache_key).await? {
+        return Ok(tree);
+    }
+
+    let board = repo::find_board(db, board_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let columns = repo::find_columns(db, board_id).await?;
+
+    let mut columns_with_cards = Vec::with_capacity(columns.len());
+    for column in columns {
+        let cards = repo::find_cards_for_column(db, column.id).await?;
+        columns_with_cards.push(ColumnWithCards { column, cards });
+    }
+
+    let tree = BoardTree {
+        board,
+        columns: columns_with_cards,
+    };
+
+    cache::set_json(&state.redis, &cache_key, &tree, 60).await?;
+
+    Ok(tree)
+}
+```
+
+`get_tree` รับ `state: &AppState` ตอนนี้ ไม่ใช่ `db: &PgPool` — signature เปลี่ยนแบบเดียวกับที่ [move-reorder](/taskflow/th/rest-api/move-reorder/) เคยทำกับ `move_card` ด้วยเหตุผลเดียวกันเป๊ะ: function นี้ต้องการ resource ตัวที่สองจาก `AppState` (ที่นั่นคือ WebSocket hub ในอนาคต ที่นี่คือ `state.redis`) ซึ่ง `&PgPool` เปล่า ๆ ให้ไม่ได้ `assert_member` — ยังเป็น `db: &PgPool` เหมือนเดิม — รัน**ก่อน**การอ่าน cache ไม่ใช่หลัง: cache hit ต้องไม่มีทางข้าม authorization ไปได้ ดังนั้น membership ถูกเช็คกับ Postgres ทุกครั้งที่เรียก ไม่ว่าจะ hit หรือ miss ต่อเมื่อผ่านตรงนั้นแล้วเท่านั้น `get_tree` ถึงจะแตะ Redis
+
+### 4. `boards/handlers.rs` — ส่ง `&state` ผ่านเข้าไป
+
+อัปเดต `get_board`:
+
+```rust
+pub async fn get_board(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+) -> AppResult<Json<BoardTree>> {
+    let tree = service::get_tree(&state, user_id, board_id).await?;
+    Ok(Json(tree))
+}
+```
+
+ส่วนที่เปลี่ยนไปจากเวอร์ชันใน [boards](/taskflow/th/rest-api/boards/) มีแค่ `&state` แทน `&state.db` — `get_board` ดึง `AppState` ทั้งก้อนออกมาผ่าน `State(state)` อยู่แล้ว จึงไม่ต้องเพิ่ม extractor ใหม่ แค่ส่ง slice อื่นของ value เดิมลงไปแทน
+
+### 5. ประกาศ module ใน `main.rs`
+
+```rust
+mod boards;
+mod cache;
+mod cards;
+mod columns;
+mod config;
+mod db;
+mod error;
+mod labels;
+mod state;
+```
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+เปิด stack ขึ้นมา ขอ token แล้วสร้าง board พร้อม column กับ card (ใช้ pattern เดิมจาก [boards](/taskflow/th/rest-api/boards/), [columns](/taskflow/th/rest-api/columns/), และ [cards](/taskflow/th/rest-api/cards/)):
+
+```bash
+cd taskflow/infra && docker compose up -d db redis
+cd ../backend && cargo run -p api &
+
+TOKEN=$(curl -s -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"correct horse battery staple","display_name":"Ada"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
+BOARD_ID=$(curl -s -X POST http://localhost:8080/boards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Sprint 12"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+ยืนยันว่า cache key ยังไม่มี:
+
+```bash
+docker compose exec redis redis-cli GET cache:board:$BOARD_ID
+```
+
+```
+(nil)
+```
+
+ดึง board — cache **miss** ซึ่งเติม cache เป็นผลข้างเคียง:
+
+```bash
+curl -s http://localhost:8080/boards/$BOARD_ID -H "Authorization: Bearer $TOKEN"
+```
+
+ยืนยันว่า key มีอยู่แล้ว พร้อม TTL ต่ำกว่า 60 วินาที:
+
+```bash
+docker compose exec redis redis-cli GET cache:board:$BOARD_ID
+docker compose exec redis redis-cli TTL cache:board:$BOARD_ID
+```
+
+```json
+{"id":"...","owner_id":"...","title":"Sprint 12","created_at":"...","columns":[]}
+```
+
+```
+(integer) 58
+```
+
+ดึงอีกครั้ง — response body เดิม คราวนี้เป็น cache **hit** serve โดยไม่แตะ Postgres เลย:
+
+```bash
+curl -s http://localhost:8080/boards/$BOARD_ID -H "Authorization: Bearer $TOKEN"
+```
+
+รอให้เกิน TTL (หรือจะ `docker compose exec redis redis-cli DEL cache:board:$BOARD_ID` เพื่อบังคับก็ได้) แล้วยืนยันว่า key หายไป และ `GET` ครั้งถัดไปเติมมันกลับมาใหม่:
+
+```bash
+sleep 61
+docker compose exec redis redis-cli GET cache:board:$BOARD_ID
+```
+
+```
+(nil)
+```
+
+## Recap
+
+คุณสร้าง helper generic สามตัวของ `cache.rs` — `get_json`, `set_json`, `invalidate` — เหนือ `deadpool_redis::Pool` เพิ่ม `Deserialize` คู่กับ `Serialize` ในทุก struct ของ `boards::model` เพื่อให้ `BoardTree` ที่ cache ไว้ round-trip ผ่าน Redis เป็น JSON ได้ แล้วต่อ cache-aside pattern เข้ากับ `get_tree`: เช็ค `cache:board:{board_id}` หลัง authorization ผ่าน ถ้า hit ก็ return เลย ถ้าไม่ก็ประกอบ tree แบบเดิมที่ [boards](/taskflow/th/rest-api/boards/) ทำมาตลอด แล้วเติม cache ด้วย TTL 60 วินาทีก่อน return คุณยังเห็นด้วยว่าทำไม `cache:board:{id}` (STRING) กับ `board:{id}` (pub/sub CHANNEL ที่จะมาใน [Realtime](/taskflow/th/realtime/)) ถึงถูกจัด namespace ไม่ให้ชนกันเลย ทั้งที่หน้าตาแทบจะเหมือนกัน บทถัดไป [invalidation](/taskflow/th/caching/invalidation/) จะทำให้แน่ใจว่า cache นั้นจะไม่มีทาง serve ข้อมูล board ที่ stale เกิน 60 วินาทีหลัง write จริง — ด้วยการลบ key ทิ้ง ไม่ใช่อัปเดตมัน จากทุก mutation ที่แตะ tree ของ board

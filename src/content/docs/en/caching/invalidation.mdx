@@ -1,0 +1,427 @@
+---
+title: Invalidation
+description: Add cache::invalidate one-liners to every Module-5 service function that changes a board's tree — column and card CRUD, move_card, label attach/detach, and patch board — delete-on-write, not write-through.
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+One new line, `cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;`, added to every `boards`/`columns`/`cards`/`labels` service function that changes what `GET /boards/:id` returns: `update_board`, `create_column`, `update_column`, `delete_column`, `create_card`, `update_card`, `delete_card`, `move_card`, `attach_label`, `detach_label`. Each one needs the same small plumbing change first — its first parameter becomes `state: &AppState` instead of `db: &PgPool`, with `let db = &state.db;` as its new first line — so the function has `state.redis` available to invalidate with.
+
+Ten functions, one line of real behavior each. Nothing about *what* they write to Postgres changes — only that, right after a successful write, they now also delete the cached tree for the board that write affected.
+
+## Why
+
+[cache-reads](/taskflow/en/caching/cache-reads/)'s cache-aside `get_tree` has no way to know, on its own, when the data it cached 40 seconds ago has since changed — a Redis key doesn't know what wrote it or when it went stale, it just holds whatever JSON string it was last given until its TTL runs out. Something has to tell the cache "this is wrong now," at the exact moment it becomes wrong, and the only code that knows that moment is the write itself: `update_column` is the one place in the whole system that knows, with certainty, the instant a column's title changed. So that's where the invalidation call lives — one per mutating function, right after its write succeeds, not in some separate background job trying to guess which caches need clearing.
+
+Every one of these ten functions needs `board_id` to build the invalidation key, but most of them only start out with a narrower id — `column_id`, `card_id`, `label_id` — from the URL. That's not new plumbing this lesson introduces: [columns](/taskflow/en/rest-api/columns/), [cards](/taskflow/en/rest-api/cards/), and [labels](/taskflow/en/rest-api/labels/) already resolve `board_id` from those narrower ids for their own `boards_service::assert_member` authorization check. Invalidation reuses the exact same `board_id` each function already had in hand for that check — it's a second use of a value already computed, not a new lookup.
+
+## Pros & cons
+
+**Delete-on-write invalidation (what we're using) vs. write-through (updating the cached value in place on every write)**
+
+- Pros: `cache::invalidate` is one line, the same one line, in every mutating function — delete the key, let the next `GET` rebuild it from scratch via the exact same `get_tree` code path every cache miss already goes through. Write-through would mean every one of these ten functions also has to know how to construct (or patch) a complete, correctly-shaped `BoardTree` JSON blob after its own narrow write — `update_column` would need to fetch the *entire* tree just to update one column's title inside a cached copy, turning a single-row `UPDATE` into the same N+1 assembly `get_tree` already does on a miss, except now paid for by every writer instead of only the next reader.
+- Cons: delete-on-write means the very next read after any write is guaranteed to be a cache miss — one full-price `get_tree` assembly, unavoidably, for whichever request happens to arrive first after a mutation. Write-through would let that next read stay a cache hit, at the cost of every writer paying the assembly cost instead. For TaskFlow, reads (viewing a board) vastly outnumber writes (editing it) most of the time a board is open, so "the one read right after a write is slightly slower" is a much smaller total cost than "every write does N+1 work whether or not anyone reads the result soon after."
+
+**Invalidating on `attach_label`/`detach_label` (what we're using) vs. skipping cache invalidation for the labels module entirely**
+
+- Pros: `Card` doesn't carry a `labels` field today — `BoardTree`'s JSON has no label data in it at all yet, so attaching or detaching a label doesn't, strictly speaking, change anything `get_tree` currently returns. Invalidating anyway is a deliberate, defensive choice: the moment a future lesson embeds each card's labels into `ColumnWithCards`/`BoardTree` (a natural next step for the Kanban frontend), `attach_label`/`detach_label` already invalidate the right key — zero new invalidation call sites to add, because this lesson already put one exactly where the write happens.
+- Cons: right now, today, these two invalidation calls do a small amount of genuinely unnecessary work — deleting a cache entry that doesn't actually contain anything invalidated by the write that triggered it. `create_label`/`delete_label` (the two label-module writes *not* in this lesson's list) skip invalidation entirely for the same reason, just without the "future-proofing" upside: a label's own `name`/`color` fields aren't in `BoardTree` either, and unlike attach/detach, there's no natural future world where they would be — a label is board-scoped metadata, not part of any specific card's tree position.
+
+## Build it
+
+### 1. `boards/service.rs` — `update_board`
+
+```rust
+pub async fn update_board(
+    state: &AppState,
+    user_id: Uuid,
+    board_id: Uuid,
+    title: String,
+) -> AppResult<Board> {
+    let db = &state.db;
+
+    assert_member(db, user_id, board_id).await?;
+    let board = repo::update_title(db, board_id, &title)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+
+    Ok(board)
+}
+```
+
+`delete_board` is *not* in this list, and that's not an oversight: once a board is deleted, `boards.id`'s `ON DELETE CASCADE` chain (from [schema](/taskflow/en/database/schema/)) removes its `board_members` rows too, so `assert_member` — which [cache-reads](/taskflow/en/caching/cache-reads/) confirmed always runs *before* the cache read — will reject every future request for that board's id before `get_tree` ever gets close to Redis. A stale `cache:board:{id}` entry for a deleted board simply sits unreachable until its TTL expires; nothing can read it, so nothing needs to explicitly clear it. `create_board` needs no invalidation for the mirror-image reason: a brand-new board's cache key has never been written, so there's nothing to invalidate yet.
+
+Update `boards/handlers.rs`'s `update_board` handler to pass `&state`:
+
+```rust
+pub async fn update_board(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+    Json(body): Json<UpdateBoardRequest>,
+) -> AppResult<Json<Board>> {
+    let board = service::update_board(&state, user_id, board_id, body.title).await?;
+    Ok(Json(board))
+}
+```
+
+### 2. `columns/service.rs` — `create_column`, `update_column`, `delete_column`
+
+```rust
+pub async fn create_column(
+    state: &AppState,
+    user_id: Uuid,
+    board_id: Uuid,
+    title: String,
+) -> AppResult<Column> {
+    let db = &state.db;
+
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    let position = repo::max_position(db, board_id).await?.unwrap_or(0.0) + 1.0;
+    let column = repo::insert_column(db, Uuid::new_v4(), board_id, &title, position).await?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+
+    Ok(column)
+}
+
+pub async fn update_column(
+    state: &AppState,
+    user_id: Uuid,
+    column_id: Uuid,
+    title: String,
+) -> AppResult<Column> {
+    let db = &state.db;
+
+    let column = repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    let updated = repo::update_title(db, column_id, &title)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{}", column.board_id)).await?;
+
+    Ok(updated)
+}
+
+pub async fn delete_column(state: &AppState, user_id: Uuid, column_id: Uuid) -> AppResult<()> {
+    let db = &state.db;
+
+    let column = repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    if repo::delete_column(db, column_id).await? {
+        cache::invalidate(&state.redis, &format!("cache:board:{}", column.board_id)).await?;
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+`delete_column` invalidates only inside the `if` branch — the branch where a row was actually deleted. The `else` branch (`repo::delete_column` deleted nothing because the id was already gone) has no tree change to invalidate; it already returns `AppError::NotFound` unchanged from [columns](/taskflow/en/rest-api/columns/).
+
+Update all three handlers in `columns/handlers.rs` to pass `&state` instead of `&state.db`:
+
+```rust
+pub async fn create_column(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+    Json(body): Json<CreateColumnRequest>,
+) -> AppResult<(StatusCode, Json<Column>)> {
+    let column = service::create_column(&state, user_id, board_id, body.title).await?;
+    Ok((StatusCode::CREATED, Json(column)))
+}
+
+pub async fn update_column(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(column_id): Path<Uuid>,
+    Json(body): Json<UpdateColumnRequest>,
+) -> AppResult<Json<Column>> {
+    let column = service::update_column(&state, user_id, column_id, body.title).await?;
+    Ok(Json(column))
+}
+
+pub async fn delete_column(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(column_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    service::delete_column(&state, user_id, column_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+### 3. `cards/service.rs` — `create_card`, `update_card`, `delete_card`, `move_card`
+
+```rust
+pub async fn create_card(
+    state: &AppState,
+    user_id: Uuid,
+    column_id: Uuid,
+    title: String,
+    description: Option<String>,
+) -> AppResult<Card> {
+    let db = &state.db;
+
+    let column = columns::repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    let position = repo::max_position(db, column_id).await?.unwrap_or(0.0) + 1.0;
+    let card = repo::insert_card(
+        db,
+        Uuid::new_v4(),
+        column_id,
+        &title,
+        description.as_deref(),
+        position,
+    )
+    .await?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{}", column.board_id)).await?;
+
+    Ok(card)
+}
+
+pub async fn update_card(
+    state: &AppState,
+    user_id: Uuid,
+    card_id: Uuid,
+    title: Option<String>,
+    description: Option<String>,
+) -> AppResult<Card> {
+    let db = &state.db;
+
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    let updated = repo::update_card(db, card_id, title.as_deref(), description.as_deref())
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+
+    Ok(updated)
+}
+
+pub async fn delete_card(state: &AppState, user_id: Uuid, card_id: Uuid) -> AppResult<()> {
+    let db = &state.db;
+
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    if repo::delete_card(db, card_id).await? {
+        cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+`get_card` is unchanged — it's a read, not a write, so it has nothing to invalidate. `card_board_id`, the private two-hop helper, is also unchanged: it still takes `db: &PgPool`, since it does nothing but read.
+
+`move_card` already takes `state: &AppState` — the one deliberate signature difference [move-reorder](/taskflow/en/rest-api/move-reorder/) called out in advance, specifically so a later addition like this one wouldn't need to touch its signature again. Add the invalidation call right after the write, at the exact spot that lesson's comment already marks:
+
+```rust
+    let updated = repo::move_card(db, card_id, target_column_id, position)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{source_board_id}")).await?;
+
+    // Module 7 wires realtime broadcast of card.moved here
+
+    Ok(updated)
+```
+
+One invalidation call, not two — `move_card` rejects any target column whose `board_id` differs from `source_board_id` before this point ever runs, so the moved card's board is always the same board on both sides of the move.
+
+Update `cards/handlers.rs`'s `create_card`, `update_card`, and `delete_card` to pass `&state` (`move_card`'s handler already does, from [move-reorder](/taskflow/en/rest-api/move-reorder/)):
+
+```rust
+pub async fn create_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(column_id): Path<Uuid>,
+    Json(body): Json<CreateCardRequest>,
+) -> AppResult<(StatusCode, Json<Card>)> {
+    let card =
+        service::create_card(&state, user_id, column_id, body.title, body.description).await?;
+    Ok((StatusCode::CREATED, Json(card)))
+}
+
+pub async fn update_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(card_id): Path<Uuid>,
+    Json(body): Json<UpdateCardRequest>,
+) -> AppResult<Json<Card>> {
+    let card = service::update_card(&state, user_id, card_id, body.title, body.description).await?;
+    Ok(Json(card))
+}
+
+pub async fn delete_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(card_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    service::delete_card(&state, user_id, card_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+### 4. `labels/service.rs` — `attach_label`, `detach_label`
+
+```rust
+pub async fn attach_label(
+    state: &AppState,
+    user_id: Uuid,
+    card_id: Uuid,
+    label_id: Uuid,
+) -> AppResult<()> {
+    let db = &state.db;
+
+    let card_board = card_board_id(db, card_id).await?;
+    boards_service::assert_member(db, user_id, card_board).await?;
+
+    let label = repo::find_label(db, label_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if label.board_id != card_board {
+        return Err(AppError::NotFound);
+    }
+
+    repo::attach(db, card_id, label_id).await?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{card_board}")).await?;
+
+    Ok(())
+}
+
+pub async fn detach_label(
+    state: &AppState,
+    user_id: Uuid,
+    card_id: Uuid,
+    label_id: Uuid,
+) -> AppResult<()> {
+    let db = &state.db;
+
+    let card_board = card_board_id(db, card_id).await?;
+    boards_service::assert_member(db, user_id, card_board).await?;
+
+    if repo::detach(db, card_id, label_id).await? {
+        cache::invalidate(&state.redis, &format!("cache:board:{card_board}")).await?;
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+`create_label`, `list_labels`, and `delete_label` are unchanged — `db: &PgPool`, no invalidation — for the reason covered in Pros & cons: a label's own fields aren't part of `BoardTree` today, and unlike attach/detach, there's no card-position relationship that would put them there later either.
+
+Update `labels/handlers.rs`'s `attach_label` and `detach_label` to pass `&state`:
+
+```rust
+pub async fn attach_label(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path((card_id, label_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    service::attach_label(&state, user_id, card_id, label_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn detach_label(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path((card_id, label_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    service::detach_label(&state, user_id, card_id, label_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+Reusing `$TOKEN` and `$BOARD_ID` from [cache-reads](/taskflow/en/caching/cache-reads/), populate the cache with a `GET`, then confirm the key exists:
+
+```bash
+curl -s http://localhost:8080/boards/$BOARD_ID -H "Authorization: Bearer $TOKEN" > /dev/null
+docker compose exec redis redis-cli EXISTS cache:board:$BOARD_ID
+```
+
+```
+(integer) 1
+```
+
+Rename the board — a write that hits `update_board`'s new invalidation call:
+
+```bash
+curl -s -X PATCH http://localhost:8080/boards/$BOARD_ID \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Sprint 12 (renamed)"}' > /dev/null
+```
+
+Confirm the key is gone immediately — no need to wait for the 60-second TTL:
+
+```bash
+docker compose exec redis redis-cli EXISTS cache:board:$BOARD_ID
+```
+
+```
+(integer) 0
+```
+
+Fetch the board again — this repopulates the cache, and the new title proves it's not serving anything stale:
+
+```bash
+curl -s http://localhost:8080/boards/$BOARD_ID -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{"id":"...","owner_id":"...","title":"Sprint 12 (renamed)","created_at":"...","columns":[]}
+```
+
+Create a column — a write reached through a narrower id, same invalidation effect on the same board:
+
+```bash
+curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"To Do"}' > /dev/null
+
+docker compose exec redis redis-cli EXISTS cache:board:$BOARD_ID
+```
+
+```
+(integer) 0
+```
+
+## Recap
+
+You added one `cache::invalidate` call to each of the ten Module-5 service functions that change a board's tree, changing their first parameter from `db: &PgPool` to `state: &AppState` to give each one access to `state.redis`. `delete_board`, `create_board`, `create_label`, `delete_label`, and every plain read (`list_boards`, `get_card`, `list_labels`, and so on) stay untouched — either they have nothing to invalidate yet, or nothing they could invalidate is part of `BoardTree` in the first place. You also saw why delete-on-write beats write-through here: one identical line per function, versus every writer having to reconstruct a correctly-shaped cached tree it may never be read again. Next, [rate-limit](/taskflow/en/caching/rate-limit/) puts Redis to work a third way — not caching data at all, but counting requests, to protect `/auth/*` from brute-force abuse.

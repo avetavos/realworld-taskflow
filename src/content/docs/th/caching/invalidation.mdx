@@ -1,0 +1,427 @@
+---
+title: Invalidation
+description: เพิ่ม cache::invalidate หนึ่งบรรทัดเข้าไปในทุก service function ของ Module 5 ที่เปลี่ยน tree ของ board — CRUD ของ column และ card, move_card, label attach/detach, และ patch board — แบบ delete-on-write ไม่ใช่ write-through
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+บรรทัดใหม่หนึ่งบรรทัด `cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;` ถูกเพิ่มเข้าไปในทุก service function ของ `boards`/`columns`/`cards`/`labels` ที่เปลี่ยนสิ่งที่ `GET /boards/:id` คืนกลับมา: `update_board`, `create_column`, `update_column`, `delete_column`, `create_card`, `update_card`, `delete_card`, `move_card`, `attach_label`, `detach_label` แต่ละตัวต้องมีการปรับ plumbing เล็ก ๆ เหมือนกันก่อน — parameter แรกของมันเปลี่ยนจาก `db: &PgPool` เป็น `state: &AppState` พร้อม `let db = &state.db;` เป็นบรรทัดแรกใหม่ — เพื่อให้ function มี `state.redis` ใช้สำหรับ invalidate ได้
+
+สิบ function หนึ่งบรรทัดของ behavior จริงต่อตัว ไม่มีอะไรเปลี่ยนเรื่อง *สิ่งที่* พวกมันเขียนลง Postgres — เปลี่ยนแค่ว่า ทันทีหลัง write สำเร็จ พวกมันจะลบ cache tree ของ board ที่ write นั้นกระทบด้วย
+
+## Why
+
+`get_tree` แบบ cache-aside จาก [cache-reads](/taskflow/th/caching/cache-reads/) ไม่มีทางรู้ได้เองว่า ข้อมูลที่มัน cache ไว้เมื่อ 40 วินาทีก่อนเปลี่ยนไปแล้วหรือยัง — Redis key ไม่รู้ว่าใครเขียนมันหรือเมื่อไหร่มัน stale มันแค่เก็บ JSON string ล่าสุดที่ได้รับไว้จนกว่า TTL จะหมด ต้องมีอะไรสักอย่างบอก cache ว่า "ตอนนี้มันผิดแล้วนะ" ในจังหวะที่มันเริ่มผิดพอดี และโค้ดเดียวที่รู้จังหวะนั้นก็คือตัว write เอง: `update_column` คือจุดเดียวในทั้งระบบที่รู้แน่นอนว่า title ของ column เปลี่ยนไปตอนไหน ดังนั้นนี่คือที่ที่ call invalidate อยู่ — หนึ่งอันต่อ mutating function หนึ่งตัว ทันทีหลัง write สำเร็จ ไม่ใช่ใน background job แยกต่างหากที่ต้องมานั่งเดาว่า cache ไหนต้องล้าง
+
+ทั้งสิบ function นี้ต้องการ `board_id` เพื่อสร้าง invalidation key แต่ส่วนใหญ่เริ่มต้นมาด้วย id ที่แคบกว่า — `column_id`, `card_id`, `label_id` — จาก URL นี่ไม่ใช่ plumbing ใหม่ที่บทนี้เพิ่มเข้ามา — [columns](/taskflow/th/rest-api/columns/), [cards](/taskflow/th/rest-api/cards/), และ [labels](/taskflow/th/rest-api/labels/) resolve `board_id` จาก id ที่แคบกว่าเหล่านั้นอยู่แล้วสำหรับเช็ค authorization `boards_service::assert_member` ของตัวเอง invalidation ก็แค่ใช้ `board_id` ตัวเดิมที่ function แต่ละตัวมีอยู่ในมืออยู่แล้วซ้ำอีกครั้ง — ไม่ใช่การ lookup ใหม่
+
+## Pros & cons
+
+**Delete-on-write invalidation (ตัวที่เราใช้) เทียบกับ write-through (อัปเดตค่าใน cache ตรง ๆ ทุกครั้งที่ write)**
+
+- ข้อดี: `cache::invalidate` เป็นหนึ่งบรรทัด บรรทัดเดียวกันเป๊ะ ในทุก mutating function — ลบ key ทิ้ง แล้วปล่อยให้ `GET` ครั้งถัดไปสร้างมันขึ้นใหม่จากศูนย์ผ่าน `get_tree` code path เดียวกับที่ทุก cache miss เดินผ่านอยู่แล้ว write-through หมายความว่าทั้งสิบ function นี้ต้องรู้วิธีสร้าง (หรือแก้) JSON blob ของ `BoardTree` ที่ครบถ้วนถูกต้อง หลังจาก write แคบ ๆ ของตัวเองด้วย — `update_column` จะต้องดึง tree *ทั้งหมด* แค่เพื่ออัปเดต title ของ column เดียวในสำเนาที่ cache ไว้ เปลี่ยน `UPDATE` แถวเดียวให้กลายเป็นการประกอบ N+1 แบบเดียวกับที่ `get_tree` ทำตอน miss อยู่แล้ว เพียงแต่ตอนนี้ผู้เขียนทุกคนต้องจ่ายแทนที่จะเป็นแค่ผู้อ่านคนถัดไป
+- ข้อเสีย: delete-on-write หมายความว่า read ครั้งถัดไปทันทีหลัง write ใด ๆ จะเป็น cache miss แน่นอน — การประกอบ `get_tree` แบบเต็มราคาหนึ่งครั้ง หลีกเลี่ยงไม่ได้ สำหรับ request ไหนก็ตามที่มาถึงเป็นคนแรกหลัง mutation write-through จะทำให้ read ครั้งถัดไปนั้นยังเป็น cache hit อยู่ได้ แลกกับที่ผู้เขียนทุกคนต้องจ่ายต้นทุนการประกอบแทน สำหรับ TaskFlow read (การดู board) มีจำนวนมากกว่า write (การแก้ไข) อย่างมากในเวลาส่วนใหญ่ที่ board เปิดอยู่ ดังนั้น "read หนึ่งครั้งทันทีหลัง write ช้าลงนิดหน่อย" เป็นต้นทุนรวมที่เล็กกว่ามากเมื่อเทียบกับ "ทุก write ต้องทำงาน N+1 ไม่ว่าจะมีใครมาอ่านผลลัพธ์เร็ว ๆ นี้หรือไม่"
+
+**Invalidate ตอน `attach_label`/`detach_label` (ตัวที่เราใช้) เทียบกับข้าม cache invalidation ให้ label module ไปเลย**
+
+- ข้อดี: `Card` ยังไม่มี field `labels` วันนี้ — JSON ของ `BoardTree` ยังไม่มีข้อมูล label อยู่เลยตอนนี้ ดังนั้นการ attach หรือ detach label พูดตรง ๆ แล้วไม่ได้เปลี่ยนอะไรที่ `get_tree` คืนกลับมาอยู่ตอนนี้ การ invalidate ไปก่อนเป็นทางเลือกเชิงป้องกันที่ตั้งใจ — ทันทีที่บทในอนาคตฝัง label ของแต่ละ card เข้าไปใน `ColumnWithCards`/`BoardTree` (ขั้นต่อไปที่เป็นธรรมชาติสำหรับ Kanban frontend) `attach_label`/`detach_label` ก็ invalidate key ที่ถูกต้องอยู่แล้ว — ไม่ต้องเพิ่มจุดเรียก invalidate ใหม่เลยสักจุด เพราะบทนี้วาง call ไว้ตรงจุดที่ write เกิดขึ้นแล้ว
+- ข้อเสีย: ตอนนี้ วันนี้ การเรียก invalidate สองจุดนี้ทำงานที่ไม่จำเป็นจริง ๆ อยู่เล็กน้อย — ลบ cache entry ที่จริง ๆ ไม่มีอะไรถูก invalidate โดย write ที่ trigger มันเลย `create_label`/`delete_label` (สอง write ของ label module ที่*ไม่*อยู่ในรายการของบทนี้) ข้าม invalidation ไปเลยด้วยเหตุผลเดียวกัน แค่ไม่มีข้อดีเรื่อง "future-proofing" — field `name`/`color` ของ label เองก็ไม่ได้อยู่ใน `BoardTree` เหมือนกัน และต่างจาก attach/detach ตรงที่ไม่มีโลกอนาคตที่เป็นธรรมชาติที่มันจะอยู่ที่นั่น — label เป็น metadata ระดับ board ไม่ใช่ส่วนหนึ่งของตำแหน่ง tree ของ card ตัวใดตัวหนึ่ง
+
+## Build it
+
+### 1. `boards/service.rs` — `update_board`
+
+```rust
+pub async fn update_board(
+    state: &AppState,
+    user_id: Uuid,
+    board_id: Uuid,
+    title: String,
+) -> AppResult<Board> {
+    let db = &state.db;
+
+    assert_member(db, user_id, board_id).await?;
+    let board = repo::update_title(db, board_id, &title)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+
+    Ok(board)
+}
+```
+
+`delete_board` *ไม่* อยู่ในรายการนี้ และนั่นไม่ใช่ความพลาด — เมื่อ board ถูกลบ chain `ON DELETE CASCADE` ของ `boards.id` (จาก [schema](/taskflow/th/database/schema/)) จะลบแถว `board_members` ของมันไปด้วย ดังนั้น `assert_member` — ที่ [cache-reads](/taskflow/th/caching/cache-reads/) ยืนยันแล้วว่ารันก่อนการอ่าน cache เสมอ — จะปฏิเสธทุก request ในอนาคตสำหรับ id ของ board นั้นก่อนที่ `get_tree` จะเข้าใกล้ Redis เลยด้วยซ้ำ entry `cache:board:{id}` ที่ stale ของ board ที่ถูกลบไปแล้ว ก็แค่นั่งรออยู่เฉย ๆ ไม่มีใครเข้าถึงได้ จนกว่า TTL จะหมดอายุ ไม่มีอะไรอ่านมันได้ จึงไม่ต้องล้างมันทิ้งแบบ explicit `create_board` ก็ไม่ต้อง invalidate เช่นกัน ด้วยเหตุผลด้านตรงข้าม — cache key ของ board ใหม่เอี่ยมยังไม่เคยถูกเขียนเลย จึงยังไม่มีอะไรให้ invalidate
+
+อัปเดต handler `update_board` ใน `boards/handlers.rs` ให้ส่ง `&state`:
+
+```rust
+pub async fn update_board(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+    Json(body): Json<UpdateBoardRequest>,
+) -> AppResult<Json<Board>> {
+    let board = service::update_board(&state, user_id, board_id, body.title).await?;
+    Ok(Json(board))
+}
+```
+
+### 2. `columns/service.rs` — `create_column`, `update_column`, `delete_column`
+
+```rust
+pub async fn create_column(
+    state: &AppState,
+    user_id: Uuid,
+    board_id: Uuid,
+    title: String,
+) -> AppResult<Column> {
+    let db = &state.db;
+
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    let position = repo::max_position(db, board_id).await?.unwrap_or(0.0) + 1.0;
+    let column = repo::insert_column(db, Uuid::new_v4(), board_id, &title, position).await?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+
+    Ok(column)
+}
+
+pub async fn update_column(
+    state: &AppState,
+    user_id: Uuid,
+    column_id: Uuid,
+    title: String,
+) -> AppResult<Column> {
+    let db = &state.db;
+
+    let column = repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    let updated = repo::update_title(db, column_id, &title)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{}", column.board_id)).await?;
+
+    Ok(updated)
+}
+
+pub async fn delete_column(state: &AppState, user_id: Uuid, column_id: Uuid) -> AppResult<()> {
+    let db = &state.db;
+
+    let column = repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    if repo::delete_column(db, column_id).await? {
+        cache::invalidate(&state.redis, &format!("cache:board:{}", column.board_id)).await?;
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+`delete_column` invalidate เฉพาะในกิ่ง `if` เท่านั้น — กิ่งที่แถวถูกลบจริง ๆ กิ่ง `else` (ที่ `repo::delete_column` ไม่ได้ลบอะไรเลยเพราะ id หายไปแล้ว) ไม่มี tree change ให้ invalidate มันคืน `AppError::NotFound` เหมือนเดิมจาก [columns](/taskflow/th/rest-api/columns/) โดยไม่เปลี่ยนแปลง
+
+อัปเดตทั้งสาม handler ใน `columns/handlers.rs` ให้ส่ง `&state` แทน `&state.db`:
+
+```rust
+pub async fn create_column(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+    Json(body): Json<CreateColumnRequest>,
+) -> AppResult<(StatusCode, Json<Column>)> {
+    let column = service::create_column(&state, user_id, board_id, body.title).await?;
+    Ok((StatusCode::CREATED, Json(column)))
+}
+
+pub async fn update_column(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(column_id): Path<Uuid>,
+    Json(body): Json<UpdateColumnRequest>,
+) -> AppResult<Json<Column>> {
+    let column = service::update_column(&state, user_id, column_id, body.title).await?;
+    Ok(Json(column))
+}
+
+pub async fn delete_column(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(column_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    service::delete_column(&state, user_id, column_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+### 3. `cards/service.rs` — `create_card`, `update_card`, `delete_card`, `move_card`
+
+```rust
+pub async fn create_card(
+    state: &AppState,
+    user_id: Uuid,
+    column_id: Uuid,
+    title: String,
+    description: Option<String>,
+) -> AppResult<Card> {
+    let db = &state.db;
+
+    let column = columns::repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    let position = repo::max_position(db, column_id).await?.unwrap_or(0.0) + 1.0;
+    let card = repo::insert_card(
+        db,
+        Uuid::new_v4(),
+        column_id,
+        &title,
+        description.as_deref(),
+        position,
+    )
+    .await?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{}", column.board_id)).await?;
+
+    Ok(card)
+}
+
+pub async fn update_card(
+    state: &AppState,
+    user_id: Uuid,
+    card_id: Uuid,
+    title: Option<String>,
+    description: Option<String>,
+) -> AppResult<Card> {
+    let db = &state.db;
+
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    let updated = repo::update_card(db, card_id, title.as_deref(), description.as_deref())
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+
+    Ok(updated)
+}
+
+pub async fn delete_card(state: &AppState, user_id: Uuid, card_id: Uuid) -> AppResult<()> {
+    let db = &state.db;
+
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    if repo::delete_card(db, card_id).await? {
+        cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+`get_card` ไม่เปลี่ยนแปลง — มันเป็น read ไม่ใช่ write จึงไม่มีอะไรให้ invalidate `card_board_id` ซึ่งเป็น helper สองชั้นแบบ private ก็ไม่เปลี่ยนแปลงเช่นกัน — มันยังรับ `db: &PgPool` เหมือนเดิม เพราะมันแค่อ่านอย่างเดียว
+
+`move_card` รับ `state: &AppState` อยู่แล้ว — เป็นความต่างของ signature ที่ตั้งใจไว้ตัวเดียวที่ [move-reorder](/taskflow/th/rest-api/move-reorder/) เคยชี้ไว้ล่วงหน้า เพื่อให้การเพิ่มแบบนี้ในภายหลังไม่ต้องแตะ signature ของมันอีก เพิ่ม call invalidation ทันทีหลัง write ตรงจุดที่ comment ของบทนั้นทำเครื่องหมายไว้อยู่แล้ว:
+
+```rust
+    let updated = repo::move_card(db, card_id, target_column_id, position)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{source_board_id}")).await?;
+
+    // Module 7 wires realtime broadcast of card.moved here
+
+    Ok(updated)
+```
+
+invalidate call เดียว ไม่ใช่สองครั้ง — `move_card` ปฏิเสธ target column ที่ `board_id` ต่างจาก `source_board_id` ก่อนที่จุดนี้จะรันเสียอีก ดังนั้น board ของ card ที่ถูกย้ายจึงเป็น board เดียวกันทั้งสองฝั่งของการย้ายเสมอ
+
+อัปเดต `create_card`, `update_card`, และ `delete_card` ใน `cards/handlers.rs` ให้ส่ง `&state` (handler ของ `move_card` ส่งอยู่แล้ว จาก [move-reorder](/taskflow/th/rest-api/move-reorder/)):
+
+```rust
+pub async fn create_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(column_id): Path<Uuid>,
+    Json(body): Json<CreateCardRequest>,
+) -> AppResult<(StatusCode, Json<Card>)> {
+    let card =
+        service::create_card(&state, user_id, column_id, body.title, body.description).await?;
+    Ok((StatusCode::CREATED, Json(card)))
+}
+
+pub async fn update_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(card_id): Path<Uuid>,
+    Json(body): Json<UpdateCardRequest>,
+) -> AppResult<Json<Card>> {
+    let card = service::update_card(&state, user_id, card_id, body.title, body.description).await?;
+    Ok(Json(card))
+}
+
+pub async fn delete_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(card_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    service::delete_card(&state, user_id, card_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+### 4. `labels/service.rs` — `attach_label`, `detach_label`
+
+```rust
+pub async fn attach_label(
+    state: &AppState,
+    user_id: Uuid,
+    card_id: Uuid,
+    label_id: Uuid,
+) -> AppResult<()> {
+    let db = &state.db;
+
+    let card_board = card_board_id(db, card_id).await?;
+    boards_service::assert_member(db, user_id, card_board).await?;
+
+    let label = repo::find_label(db, label_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if label.board_id != card_board {
+        return Err(AppError::NotFound);
+    }
+
+    repo::attach(db, card_id, label_id).await?;
+
+    cache::invalidate(&state.redis, &format!("cache:board:{card_board}")).await?;
+
+    Ok(())
+}
+
+pub async fn detach_label(
+    state: &AppState,
+    user_id: Uuid,
+    card_id: Uuid,
+    label_id: Uuid,
+) -> AppResult<()> {
+    let db = &state.db;
+
+    let card_board = card_board_id(db, card_id).await?;
+    boards_service::assert_member(db, user_id, card_board).await?;
+
+    if repo::detach(db, card_id, label_id).await? {
+        cache::invalidate(&state.redis, &format!("cache:board:{card_board}")).await?;
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+`create_label`, `list_labels`, และ `delete_label` ไม่เปลี่ยนแปลง — ยังเป็น `db: &PgPool` ไม่มี invalidation — ด้วยเหตุผลที่ครอบคลุมใน Pros & cons: field ของ label เองไม่ได้อยู่ใน `BoardTree` วันนี้ และต่างจาก attach/detach ตรงที่ไม่มีความสัมพันธ์กับตำแหน่งของ card ที่จะทำให้มันไปอยู่ที่นั่นในอนาคตด้วย
+
+อัปเดต `attach_label` และ `detach_label` ใน `labels/handlers.rs` ให้ส่ง `&state`:
+
+```rust
+pub async fn attach_label(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path((card_id, label_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    service::attach_label(&state, user_id, card_id, label_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn detach_label(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path((card_id, label_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    service::detach_label(&state, user_id, card_id, label_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+ใช้ `$TOKEN` และ `$BOARD_ID` เดิมจาก [cache-reads](/taskflow/th/caching/cache-reads/) เติม cache ด้วย `GET` แล้วยืนยันว่า key มีอยู่:
+
+```bash
+curl -s http://localhost:8080/boards/$BOARD_ID -H "Authorization: Bearer $TOKEN" > /dev/null
+docker compose exec redis redis-cli EXISTS cache:board:$BOARD_ID
+```
+
+```
+(integer) 1
+```
+
+เปลี่ยนชื่อ board — write ที่โดน invalidation call ใหม่ของ `update_board`:
+
+```bash
+curl -s -X PATCH http://localhost:8080/boards/$BOARD_ID \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Sprint 12 (renamed)"}' > /dev/null
+```
+
+ยืนยันว่า key หายไปทันที — ไม่ต้องรอ TTL 60 วินาที:
+
+```bash
+docker compose exec redis redis-cli EXISTS cache:board:$BOARD_ID
+```
+
+```
+(integer) 0
+```
+
+ดึง board อีกครั้ง — นี่จะเติม cache กลับมา และชื่อใหม่ก็พิสูจน์ว่ามันไม่ได้ serve อะไรที่ stale:
+
+```bash
+curl -s http://localhost:8080/boards/$BOARD_ID -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{"id":"...","owner_id":"...","title":"Sprint 12 (renamed)","created_at":"...","columns":[]}
+```
+
+สร้าง column — write ที่เข้าผ่าน id ที่แคบกว่า แต่ผล invalidation เหมือนกันบน board เดิม:
+
+```bash
+curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"To Do"}' > /dev/null
+
+docker compose exec redis redis-cli EXISTS cache:board:$BOARD_ID
+```
+
+```
+(integer) 0
+```
+
+## Recap
+
+คุณเพิ่ม call `cache::invalidate` หนึ่งอันเข้าไปในแต่ละ service function ของ Module 5 ทั้งสิบตัวที่เปลี่ยน tree ของ board เปลี่ยน parameter แรกจาก `db: &PgPool` เป็น `state: &AppState` เพื่อให้แต่ละตัวเข้าถึง `state.redis` ได้ `delete_board`, `create_board`, `create_label`, `delete_label`, และทุก read ธรรมดา (`list_boards`, `get_card`, `list_labels` ฯลฯ) ไม่ถูกแตะเลย — ไม่ก็ยังไม่มีอะไรให้ invalidate หรือไม่ก็อะไรที่มันอาจ invalidate ได้ก็ไม่ได้เป็นส่วนหนึ่งของ `BoardTree` ตั้งแต่แรกอยู่แล้ว คุณยังเห็นด้วยว่าทำไม delete-on-write ถึงดีกว่า write-through ในกรณีนี้ — บรรทัดเดียวกันเป๊ะต่อ function เทียบกับผู้เขียนทุกคนต้องประกอบ tree ที่ cache ไว้ให้ถูกรูปร่างขึ้นมาใหม่ ทั้งที่อาจไม่มีใครมาอ่านมันอีกเลยก็ได้ บทถัดไป [rate-limit](/taskflow/th/caching/rate-limit/) เอา Redis มาใช้งานแบบที่สาม — ไม่ได้ cache ข้อมูลเลย แต่นับ request แทน เพื่อปกป้อง `/auth/*` จากการโจมตีแบบ brute-force
