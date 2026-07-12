@@ -1,0 +1,151 @@
+---
+title: Repo Layout
+description: Scaffold the taskflow/ monorepo — the directory tree for backend, frontend, infra, and migrations — plus the root .gitignore and .env.example.
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+A single repository, `taskflow/`, that holds the entire project: the Rust backend, the Astro frontend, the Docker infrastructure, and the database migrations. Before any code exists, we lay down the skeleton so every later module knows exactly where its files belong.
+
+Here's the tree we're aiming for by the end of this module:
+
+```
+taskflow/
+├── .env.example
+├── .gitignore
+├── backend/
+│   ├── Cargo.toml
+│   └── api/
+│       ├── Cargo.toml
+│       └── src/
+│           └── main.rs
+├── frontend/
+│   ├── astro.config.mjs
+│   ├── package.json
+│   └── src/
+│       ├── pages/
+│       ├── layouts/
+│       ├── lib/
+│       └── components/
+├── infra/
+│   └── docker-compose.yml
+└── migrations/
+```
+
+`backend/` is a Rust Cargo workspace, `frontend/` is an Astro project, `infra/` holds the Docker Compose stack, and `migrations/` will hold the SQLx migration files starting in Module 2.
+
+## Why
+
+**Monorepo vs. polyrepo** is a real decision, not a formality. TaskFlow's backend and frontend are tightly coupled — a change to a JSON field in Rust often needs a matching change in the Astro/Preact code that consumes it. Keeping them in one repository means:
+
+- **One commit, one review.** A single pull request can change the Axum handler *and* the frontend code that calls it, so the two never drift out of sync mid-review.
+- **One source of truth for environment config.** A single `.env.example` at the root describes every variable the whole stack needs — no hunting across two repos to figure out what a service expects.
+- **One Docker Compose file** in `infra/` can reference build contexts in both `backend/` and `frontend/` without submodules or package registries.
+
+This isn't free — see the trade-offs below — but for a project built and run by one team (or one learner), the coupling benefits outweigh the isolation benefits.
+
+## Pros & cons
+
+**Pros of a monorepo (what we're using)**
+
+- Atomic commits across backend and frontend — no "frontend PR waiting on a backend release."
+- Single `git clone` gets a new contributor the entire stack.
+- Shared root-level tooling: one `.gitignore`, one `.env.example`, one CI pipeline can touch every part.
+- Easier to keep API contracts (request/response shapes) in sync since both sides are visible in the same diff.
+
+**Cons of a monorepo**
+
+- The Rust and Node toolchains both run in the same repo, so CI needs to know how to build both (we'll handle this in the Docker module).
+- Git history mixes backend and frontend commits — you rely on path filters (`git log -- backend/`) to scope history.
+- Doesn't scale forever: at real company scale, teams often split a monorepo once it needs independent deploy cadences or access control per repo. That's a future-you problem, not a today problem.
+
+**Polyrepo, for contrast**
+
+- Pros: independent versioning, independent CI, independent access control per team.
+- Cons: cross-cutting changes need coordinated PRs across repos, environment config gets duplicated, and a new contributor needs to clone and wire up multiple repos just to run the app locally.
+
+For a single learner building one product end to end, the monorepo's simplicity wins outright.
+
+## Build it
+
+Create the top-level directories:
+
+```bash
+mkdir -p taskflow/backend/api/src
+mkdir -p taskflow/frontend/src
+mkdir -p taskflow/infra
+mkdir -p taskflow/migrations
+cd taskflow
+```
+
+### Root `.gitignore`
+
+Add a `.gitignore` at `taskflow/.gitignore` that covers the Rust build output, Node dependencies, the Astro build cache, environment secrets, and OS cruft:
+
+```txt
+# Rust
+/backend/target/
+**/*.rs.bk
+
+# Node / Astro
+/frontend/node_modules/
+/frontend/dist/
+/frontend/.astro/
+
+# Environment
+.env
+!.env.example
+
+# OS
+.DS_Store
+```
+
+Note the `!.env.example` line — it un-ignores the example file specifically, so the *template* is tracked in git while the real `.env` (with your local secrets) never is.
+
+### Root `.env.example`
+
+Add `taskflow/.env.example`. This is the single source of truth for every environment variable the stack needs, across the backend, frontend, and Docker Compose:
+
+```
+DATABASE_URL=postgres://taskflow:taskflow@localhost:5432/taskflow
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=change-me-in-prod
+APP_PORT=8080
+FRONTEND_ORIGIN=http://localhost:4321
+```
+
+What each variable is for:
+
+- **`DATABASE_URL`** — the PostgreSQL connection string SQLx uses to reach the `taskflow` database. Format is `postgres://<user>:<password>@<host>:<port>/<db>`; these credentials match the `db` service we'll define in the Docker Compose module.
+- **`REDIS_URL`** — the connection string for Redis, used for caching, session storage, and the realtime pub/sub backplane described in the architecture lesson.
+- **`JWT_SECRET`** — the signing key for JWT access/refresh tokens issued by the Authentication module. `change-me-in-prod` is a placeholder — every real deployment must override it with a long, random secret.
+- **`APP_PORT`** — the TCP port the Axum server binds to (`8080` locally).
+- **`FRONTEND_ORIGIN`** — the origin the Astro dev server runs on (`http://localhost:4321`), used to configure CORS on the Axum API so the browser is allowed to call it.
+
+Copy it to a real, git-ignored `.env` so you have one ready for later modules:
+
+```bash
+cp .env.example .env
+```
+
+## Verify
+
+From inside `taskflow/`, confirm the tree matches what we planned:
+
+```bash
+find . -not -path '*/node_modules/*' -not -path '*/target/*' -not -path './.git/*' | sort
+```
+
+You should see `backend/api/src`, `frontend/src`, `infra`, and `migrations` directories, plus `.gitignore` and `.env.example` at the root. Then confirm the ignore rule works as intended:
+
+```bash
+git check-ignore -v .env
+```
+
+It should print a match against the `.env` rule in `.gitignore` — meaning your real `.env` (once created) will never be committed, while `.env.example` stays tracked.
+
+## Recap
+
+You scaffolded the `taskflow/` monorepo skeleton: `backend/`, `frontend/`, `infra/`, and `migrations/` directories, a root `.gitignore` that keeps build artifacts and secrets out of git, and a root `.env.example` documenting every environment variable the stack needs. You also saw why a monorepo — atomic cross-stack commits and one source of truth for config — is the right call for a single coupled product like TaskFlow. Next, we'll turn `backend/` into a real Rust Cargo workspace in [backend-init](/taskflow/en/setup/backend-init/).

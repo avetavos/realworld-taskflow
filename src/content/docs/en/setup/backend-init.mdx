@@ -1,0 +1,149 @@
+---
+title: Backend Init
+description: Scaffold the Rust Cargo workspace for TaskFlow — the root workspace Cargo.toml, the taskflow-api crate with its full dependency list, and a minimal main.rs verified with cargo run.
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+A real Rust **Cargo workspace** inside `taskflow/backend/`, with one member crate, `api` (package name `taskflow-api`), that will grow into the whole Axum server over the next modules. By the end of this lesson, `cargo run` prints `TaskFlow API` to your terminal — proof the workspace, the crate, and every dependency compile together before we write a single handler.
+
+```
+backend/
+├── Cargo.toml          # workspace root
+└── api/
+    ├── Cargo.toml       # the taskflow-api crate
+    └── src/
+        └── main.rs
+```
+
+## Why
+
+A **Cargo workspace** lets multiple crates share one `Cargo.lock` and one `target/` build directory. TaskFlow only has one crate today (`api`), but structuring it as a workspace from day one means adding a second crate later — say, a shared `taskflow-core` library of domain types, or a CLI admin tool — is just adding a line to `members`, with no restructuring and no duplicated dependency versions.
+
+## Pros & cons
+
+**Pros**
+
+- One `Cargo.lock` for the whole backend — every crate in the workspace resolves dependencies to the exact same versions, avoiding version-skew bugs.
+- Shared `target/` directory means crates that depend on each other don't recompile shared dependencies twice.
+- Painless to grow: today it's one crate (`api`); tomorrow it can be `api` + `core` + a background-worker binary, all built with a single `cargo build`.
+
+**Cons**
+
+- For a single-crate project, a workspace is a small amount of ceremony (an extra `Cargo.toml`) compared to a plain `cargo new` at the repo root.
+- Workspace-relative paths (`members = ["api"]`) mean every member crate's `Cargo.toml` lives one directory deeper than it would standalone — easy to forget when copy-pasting paths.
+
+We accept this small overhead now because TaskFlow's testing module later adds an integration-test setup that benefits from the workspace structure.
+
+## Build it
+
+### 1. Create the crate with `cargo new`
+
+From the `taskflow/backend/` directory:
+
+```bash
+cd taskflow/backend
+cargo new api
+```
+
+This generates `api/Cargo.toml` and `api/src/main.rs` with Cargo's default "Hello, world!" scaffold. We'll now turn `api` into a workspace member and fill in the real dependencies.
+
+### 2. The root workspace `Cargo.toml`
+
+Create `taskflow/backend/Cargo.toml` (a **new** file, separate from `api/Cargo.toml`):
+
+```toml
+[workspace]
+members = ["api"]
+resolver = "2"
+```
+
+`members` lists every crate that belongs to this workspace — just `api` for now. `resolver = "2"` opts into Cargo's modern feature resolver, which is the default for new workspaces and avoids some cross-crate feature-unification surprises.
+
+### 3. `api/Cargo.toml` — the full dependency list
+
+Replace the generated `api/Cargo.toml` with:
+
+```toml
+[package]
+name = "taskflow-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["ws", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+jsonwebtoken = "9"
+argon2 = "0.5"
+deadpool-redis = "0.16"
+redis = { version = "0.27", features = ["tokio-comp"] }
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+```
+
+Note the package `name` is `taskflow-api` even though the directory is `api` — the crate name and the directory name don't have to match, and namespacing the published crate name with `taskflow-` avoids collisions with any other `api` crate on crates.io.
+
+What each dependency is for:
+
+- **`axum`** (`ws`, `macros`) — the web framework that will route every HTTP request; `ws` enables the WebSocket upgrade used by the Realtime module, `macros` enables the `#[debug_handler]` and handler-ergonomics macros.
+- **`tokio`** (`full`) — the async runtime everything else runs on; `full` pulls in the TCP listener, task scheduler, timers, and sync primitives we'll need across every module.
+- **`tower-http`** (`cors`, `trace`) — middleware layers: `cors` lets the browser at `FRONTEND_ORIGIN` call the API, `trace` logs every request/response through `tracing`.
+- **`sqlx`** (`runtime-tokio`, `postgres`, `uuid`, `chrono`, `macros`) — the async, compile-time-checked PostgreSQL driver; `uuid` and `chrono` let SQLx map Postgres `uuid` and timestamp columns straight to Rust types, `macros` enables `query!`/`query_as!`.
+- **`serde`** (`derive`) — `#[derive(Serialize, Deserialize)]` for every request/response struct and database model.
+- **`serde_json`** — JSON encoding/decoding used internally by `axum::Json` and anywhere we build JSON by hand.
+- **`uuid`** (`v4`, `serde`) — generates the random v4 UUIDs used as primary keys for boards, columns, and cards; `serde` lets them (de)serialize in JSON.
+- **`chrono`** (`serde`) — date/time types for `created_at`/`updated_at` columns, with `serde` support for JSON timestamps.
+- **`jsonwebtoken`** — encodes and verifies the JWT access/refresh tokens issued in the Authentication module.
+- **`argon2`** — hashes and verifies user passwords; never store or compare plaintext passwords.
+- **`deadpool-redis`** — an async connection pool for Redis, so handlers borrow a connection instead of opening a new one per request.
+- **`redis`** (`tokio-comp`) — the underlying async Redis client; `tokio-comp` makes it compatible with our Tokio runtime.
+- **`thiserror`** — derives `std::error::Error` and `Display` for our domain error enum, which we'll later convert into HTTP responses.
+- **`tracing`** — structured, leveled logging/instrumentation across the whole server.
+- **`tracing-subscriber`** (`env-filter`) — wires up `tracing`'s output; `env-filter` lets us control verbosity via the `RUST_LOG` environment variable.
+
+### 4. A minimal `main.rs`
+
+Replace `api/src/main.rs` with a minimal entry point — no server yet, just proof the crate builds and links every dependency:
+
+```rust
+fn main() {
+    println!("TaskFlow API");
+}
+```
+
+This intentionally does nothing else yet. The Backend Foundations module (Module 3) replaces this with the real Axum server setup — router, state, and `axum::serve`.
+
+## Verify
+
+From `taskflow/backend/`, build and run the `api` crate:
+
+```bash
+cargo run -p api
+```
+
+The first run compiles every dependency in the list above, which can take a minute or two. Expected output, after the build finishes:
+
+```
+TaskFlow API
+```
+
+If it compiles and prints that line, the workspace is wired correctly and every dependency version resolves. Also confirm the workspace-wide check passes cleanly:
+
+```bash
+cargo check --workspace
+```
+
+It should exit with no errors (warnings about unused dependencies are expected at this stage — we haven't used most of them yet).
+
+## Recap
+
+You created a Cargo workspace at `taskflow/backend/` with one member, the `taskflow-api` crate in `api/`. The root `Cargo.toml` declares `members = ["api"]`; `api/Cargo.toml` pins the full set of dependencies TaskFlow needs — Axum, Tokio, SQLx, Serde, JWT, Argon2, Redis, and tracing — each with a specific purpose you now understand. A minimal `main.rs` proved it all compiles and runs with `cargo run -p api`. Next, we scaffold the frontend in [frontend-init](/taskflow/en/setup/frontend-init/).

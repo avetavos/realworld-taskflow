@@ -1,0 +1,138 @@
+---
+title: เริ่มต้น Frontend
+description: สร้างโครง frontend ด้วย Astro สำหรับ TaskFlow เพิ่ม integration ของ Preact ทำความเข้าใจ astro.config.mjs และโครงสร้างโฟลเดอร์ แล้วตรวจสอบด้วย npm run dev
+sidebar:
+  order: 3
+---
+
+## สิ่งที่เราจะสร้าง
+
+ครึ่งหนึ่งของ monorepo ที่เป็น `frontend/`: โปรเจกต์ **Astro** ใหม่เอี่ยมที่ติดตั้ง integration ของ **Preact** ไว้แล้ว พร้อมสำหรับโฮสต์ shell ของ Kanban board ที่เป็น static เกือบทั้งหมด และในภายหลังคือ island ที่โต้ตอบได้หนึ่งตัว เมื่อจบบทเรียนนี้ `npm run dev` จะเสิร์ฟหน้าเว็บที่ใช้งานได้ที่ `http://localhost:4321`
+
+```
+frontend/
+├── astro.config.mjs
+├── package.json
+└── src/
+    ├── pages/
+    ├── layouts/
+    ├── lib/
+    └── components/
+```
+
+## ทำไมต้องทำแบบนี้
+
+UI ของ TaskFlow **เป็น static เกือบทั้งหมด** — โครง layout ของ board, navigation และ chrome ของหน้าเพจไม่จำเป็นต้องมี JavaScript ฝั่ง client เลย มีแค่ตัว Kanban board เองเท่านั้น (drag-and-drop, อัปเดตแบบ live ผ่าน WebSocket) ที่โต้ตอบได้จริง ๆ สถาปัตยกรรม islands ของ Astro ถูกออกแบบมาเพื่อการแบ่งแบบนี้โดยเฉพาะ: ส่ง HTML ธรรมดาเป็นค่า default และเลือกให้เฉพาะ component ที่ต้องการ hydrate เท่านั้น Preact คือ UI framework สำหรับ island ตัวนั้น — API ที่เข้ากันได้กับ React ในขนาดประมาณ 3KB ซึ่งเพียงพอสำหรับ component ที่โต้ตอบได้ตัวเดียว
+
+## ข้อดีและข้อเสีย
+
+**ข้อดี**
+
+- Astro ส่ง **JavaScript เป็นศูนย์โดย default** — first paint เร็ว เหมาะกับหน้า board ที่เป็น static layout ถึง 95%
+- Preact island hydrate แยกอิสระจากกัน ทำให้การโต้ตอบของ Kanban board ไม่ต้องดึง framework runtime มาทั้งหน้า
+- `astro add preact` ต่อสาย integration, TypeScript type และ config ให้อัตโนมัติ — ไม่ต้องตั้งค่า bundler เอง
+
+**ข้อเสีย**
+
+- การคิดแบบ "static vs. island" เป็น mental model ที่ต่างจาก all-JS SPA และต้องใช้เวลาหนึ่งถึงสองบทเรียนกว่าจะเข้าใจ
+- การแชร์ state ข้าม island หลายตัวทำได้ยุ่งยากกว่า global store ของ single-page app — ไม่ใช่ปัญหาสำหรับ TaskFlow เพราะเราตั้งใจใช้แค่ island เดียว แต่ควรรู้ไว้เผื่อโปรเจกต์โตขึ้น
+- ecosystem ของ Preact เล็กกว่า React แต่สำหรับความต้องการของ TaskFlow (board แบบ drag-and-drop หนึ่งตัว) ก็เพียงพอเหลือเฟือ
+
+## ลงมือสร้าง
+
+### 1. สร้างโครงโปรเจกต์
+
+จาก root ของ `taskflow/`:
+
+```bash
+npm create astro@latest frontend
+```
+
+CLI wizard จะถามคำถามไม่กี่ข้อ — ตอบแบบนี้:
+
+- **Where should we create your new project?** → ยอมรับ `./frontend` (ที่ให้ไว้เป็น argument อยู่แล้ว)
+- **How would you like to start your new project?** → `Empty` (เราจะสร้าง layout เอง)
+- **Install dependencies?** → `Yes`
+- **Initialize a new git repository?** → `No` (TaskFlow มี git repo อยู่แล้วที่ root ของ monorepo)
+- **TypeScript?** → `Strict`
+
+คำสั่งนี้จะสร้าง `frontend/` พร้อม `package.json`, `astro.config.mjs` และโครง `src/` เริ่มต้น
+
+### 2. เพิ่ม integration ของ Preact
+
+จากภายใน `frontend/`:
+
+```bash
+cd frontend
+npx astro add preact
+```
+
+`astro add` จะติดตั้ง `@astrojs/preact` และ `preact` และแก้ไข `astro.config.mjs` ให้อัตโนมัติ — ยืนยัน prompt ที่ถามว่าจะอัปเดตไฟล์ config ด้วย `Yes`
+
+### 3. `astro.config.mjs` ที่ได้
+
+หลัง `astro add preact` แล้ว `frontend/astro.config.mjs` จะหน้าตาแบบนี้:
+
+```js
+// @ts-check
+import { defineConfig } from 'astro/config';
+import preact from '@astrojs/preact';
+
+export default defineConfig({
+  integrations: [preact()],
+});
+```
+
+`integrations: [preact()]` คือสิ่งที่ลงทะเบียน component `.tsx`/`.jsx` ให้เป็น Preact component ที่ build ได้ และเปิดใช้ directive การ hydrate แบบ `client:*` (`client:load`, `client:visible` ฯลฯ) บนมันได้ — เราจะใช้ `client:visible` สำหรับ Kanban island เพื่อให้มัน hydrate ก็ต่อเมื่อ scroll เข้ามาในจอเท่านั้น
+
+**ข้อควรรู้เกี่ยวกับ `PUBLIC_API_URL`** frontend ต้องรู้ว่า Axum API อยู่ที่ไหนเพื่อเรียก REST และ WebSocket ไปหามันได้ Astro จะ expose ตัวแปร environment ให้โค้ดฝั่ง browser เห็นก็ต่อเมื่อมี prefix `PUBLIC_` เท่านั้น ดังนั้นตัวแปรนี้จึงอยู่ใน `frontend/.env` **แยกต่างหาก** (ไม่ใช่ `taskflow/.env.example` ที่ root ซึ่งตั้งค่าให้ backend และ Docker Compose):
+
+```
+PUBLIC_API_URL=http://localhost:8080
+```
+
+`8080` ตรงกับ `APP_PORT` ใน `.env.example` ที่ root เราจะอ่าน `PUBLIC_API_URL` จาก `src/lib/` ในโมดูล Frontend เมื่อมี API ให้เรียกแล้ว
+
+### 4. โครงสร้างโฟลเดอร์
+
+```
+src/
+├── pages/       # routing แบบ file-based — ไฟล์ .astro แต่ละไฟล์ในนี้คือหนึ่ง route
+├── layouts/     # โครงหน้าเพจที่ใช้ร่วมกัน (header, nav, <slot />) ที่ page ต่าง ๆ ห่อตัวเองด้วย
+├── lib/         # helper ที่ไม่ผูกกับ framework: API client, type, การจัดรูปแบบข้อมูล
+└── components/  # component .astro และ .tsx รวมถึง Preact island
+```
+
+- **`src/pages/`** — router แบบ file-based ของ Astro; `src/pages/index.astro` กลายเป็น `/`, `src/pages/board/[id].astro` กลายเป็น `/board/:id` และต่อไปเรื่อย ๆ
+- **`src/layouts/`** — โครงสร้างหน้าเพจที่ใช้ร่วมกัน (component `<Layout>` ที่มี `<html>`, `<head>` และ `<slot />`) ที่แต่ละหน้าห่อตัวเองด้วย
+- **`src/lib/`** — module TypeScript ธรรมดาที่ไม่มี logic การ render: fetch wrapper สำหรับ `PUBLIC_API_URL`, type ที่ใช้ร่วมกันของ board/column/card และ utility เล็ก ๆ ไม่มี component อยู่ในนี้เลย
+- **`src/components/`** — ชิ้นส่วน UI ที่ใช้ซ้ำได้ ส่วนใหญ่เป็น component `.astro` แบบ static; ตัว Kanban board เองจะเป็น Preact component `.tsx` อยู่ในนี้ ที่ hydrate เป็น island
+
+สร้างสี่ไดเรกทอรีนี้ตอนนี้เลย เพื่อให้โครงสร้างมีอยู่ก่อนที่เราจะเขียนอะไรลงไปในนั้น:
+
+```bash
+mkdir -p src/pages src/layouts src/lib src/components
+```
+
+## ตรวจสอบผล
+
+จาก `frontend/` เริ่ม dev server:
+
+```bash
+npm run dev
+```
+
+ผลลัพธ์ที่คาดหวัง:
+
+```
+  🚀  astro  v6.4.5 started in ...ms
+
+  ┃ Local    http://localhost:4321/
+  ┃ Network  use --host to expose
+```
+
+เปิด `http://localhost:4321` ใน browser — คุณควรเห็นหน้า empty-template ค่า default ของ Astro `4321` คือพอร์ต dev ค่า default ของ Astro และเป็นค่าที่เราจะตั้งให้ `FRONTEND_ORIGIN` ใน `.env.example` ที่ root สำหรับ CORS หยุด server ด้วย `Ctrl+C` เมื่อตรวจสอบเสร็จแล้ว
+
+## สรุป
+
+คุณสร้างโครง `frontend/` ด้วย `npm create astro@latest`, เพิ่ม integration ของ Preact ด้วย `npx astro add preact` (ซึ่งต่อสาย `preact()` เข้า `astro.config.mjs` ให้อัตโนมัติ) และวางโครงไดเรกทอรี `src/pages`, `src/layouts`, `src/lib` และ `src/components` ที่โมดูล frontend ถัดไปจะเติมเนื้อหาลงไป คุณยังเห็นแล้วว่าทำไม `PUBLIC_API_URL` ถึงอยู่ใน `frontend/.env` ของตัวเอง แทนที่จะอยู่ใน `.env.example` ที่ root `npm run dev` ยืนยันว่าทุกอย่างรันได้บนพอร์ต 4321 ต่อไปเราจะเปิดฐานข้อมูลและ cache ขึ้นมาใน [compose-skeleton](/taskflow/th/setup/compose-skeleton/)

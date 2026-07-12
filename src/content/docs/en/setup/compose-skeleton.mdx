@@ -1,0 +1,153 @@
+---
+title: Compose Skeleton
+description: Bring up PostgreSQL and Redis with a Docker Compose skeleton, verify healthchecks and named volumes, and connect with psql and redis-cli.
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+A Docker Compose file at `taskflow/infra/docker-compose.yml` that runs just the two data stores TaskFlow depends on: **PostgreSQL** and **Redis**. This is a deliberate skeleton — no backend or frontend service yet, those join the same file in Module 11. By the end of this lesson both containers are up, healthy, and reachable from your terminal.
+
+```
+infra/
+└── docker-compose.yml
+```
+
+## Why
+
+Every later module — schema design, backend queries, caching, realtime pub/sub — needs a real PostgreSQL and Redis to talk to. Running them via Docker Compose instead of installing native daemons keeps your host machine clean and gives every contributor (or future you, on a new machine) the exact same versions with one command. Starting with **just** `db` and `redis` now, before the app services exist, lets us verify the data layer in isolation — if something's wrong with the database, you'll know it's the database, not a bug in Rust code that hasn't been written yet.
+
+## Pros & cons
+
+**Pros**
+
+- `docker compose up -d db redis` gets a working PostgreSQL + Redis in seconds, with no native install.
+- Named volumes persist data across container restarts, so you don't lose your local database every time you run `docker compose down`.
+- Healthchecks mean dependent services (added in Module 11) can wait for "actually ready to accept connections," not just "the container started."
+- Identical versions (`postgres:16`, `redis:7`) for every developer — no "works on my Postgres 14."
+
+**Cons**
+
+- Docker itself is one more moving part to have installed and running (covered in prerequisites).
+- Data lives inside a Docker-managed volume, not a normal folder — inspecting it directly (outside `psql`/`redis-cli`) takes an extra `docker volume inspect` step.
+- Port `5432`/`6379` on your host must be free — if you already run a native Postgres or Redis, you'll get a port-binding conflict.
+
+## Build it
+
+### 1. The Compose file
+
+Create `taskflow/infra/docker-compose.yml`:
+
+```yaml
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: taskflow
+      POSTGRES_PASSWORD: taskflow
+      POSTGRES_DB: taskflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata: {}
+```
+
+A few things worth calling out:
+
+- `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` match the credentials already baked into `DATABASE_URL` in the root `.env.example` (`postgres://taskflow:taskflow@localhost:5432/taskflow`) — the Postgres image uses these three variables to create the user, database, and password on first boot.
+- `redis:7` needs no environment variables or auth for local development — it matches `REDIS_URL=redis://localhost:6379`.
+- No top-level `version:` key — modern Docker Compose infers the schema version from the Compose spec automatically and the key is obsolete.
+
+### 2. Bring it up
+
+From `taskflow/infra/`:
+
+```bash
+cd taskflow/infra
+docker compose up -d db redis
+```
+
+`-d` runs both containers in the background (detached). Naming `db redis` explicitly is harmless here since they're the only two services defined, but it's the same syntax you'll use in Module 11 once `backend` and `frontend` join the file and you want to bring up only the data layer.
+
+## Verify
+
+### Check both containers are up and healthy
+
+```bash
+docker compose ps
+```
+
+Expected output — both `STATUS` columns should say `healthy` (it may briefly show `starting` right after boot):
+
+```
+NAME              IMAGE          STATUS                    PORTS
+infra-db-1        postgres:16    Up 10 seconds (healthy)   0.0.0.0:5432->5432/tcp
+infra-redis-1     redis:7        Up 10 seconds (healthy)   0.0.0.0:6379->6379/tcp
+```
+
+If a container shows `unhealthy`, check its logs with `docker compose logs db` or `docker compose logs redis`.
+
+### Connect to PostgreSQL
+
+**Option A — native `psql`**, using the `DATABASE_URL` from the root `.env` (from the [repo-layout](/taskflow/en/setup/repo-layout/) lesson):
+
+```bash
+psql "$DATABASE_URL"
+```
+
+**Option B — exec into the container**, no native client needed:
+
+```bash
+docker compose exec db psql -U taskflow
+```
+
+Either way you land in a `psql` prompt against the `taskflow` database:
+
+```
+taskflow=# 
+```
+
+Type `\q` to exit.
+
+### Connect to Redis
+
+**Option A — native `redis-cli`:**
+
+```bash
+redis-cli ping
+```
+
+**Option B — exec into the container:**
+
+```bash
+docker compose exec redis redis-cli ping
+```
+
+Expected output for both:
+
+```
+PONG
+```
+
+## Recap
+
+You wrote `taskflow/infra/docker-compose.yml` with two services — `db` (`postgres:16`) and `redis` (`redis:7`) — each with a healthcheck (`pg_isready` / `redis-cli ping`) so dependents can wait for real readiness, not just container start. Postgres's data is persisted in the named volume `pgdata`, so it survives `docker compose down` (though not `docker compose down -v`, which removes volumes too). `docker compose up -d db redis` brought both up, `docker compose ps` confirmed `healthy`, and you connected to each with `psql`/`redis-cli` — either natively or via `docker compose exec`. That's the end of Module 1 — you now have a scaffolded monorepo, a compiling Rust workspace, a running Astro dev server, and a live Postgres + Redis. Next up is Module 2, Database Design, where we design the schema and write the first migrations.
