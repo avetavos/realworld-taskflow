@@ -1,0 +1,117 @@
+---
+title: REST API Design
+description: ทรัพยากรทั้งห้าของ TaskFlow แม็ปเข้ากับ URL และ HTTP verb ยังไง status code แต่ละ endpoint คืนอะไร validation เกิดขึ้นตรงไหน ทำไม boards list ยังไม่ต้อง pagination และ layering handlers → service → repo ที่ทุก resource module ใช้
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+ยังไม่มีโค้ดในบทนี้ — บทนี้คือแผนที่สำหรับห้าบทถัดไป REST API ของ TaskFlow มีสี่ resource — **boards**, **columns**, **cards**, และ **labels** — และทุกตัวจะถูกสร้างเป็น module ของตัวเองใต้ `taskflow/backend/api/src/` โดยมีโครงสร้างภายในเหมือนกันเป๊ะ:
+
+```txt
+taskflow/backend/api/src/
+├── boards/
+│   ├── model.rs      // Board, BoardTree, ColumnWithCards (+ Column, Card — ดูบท boards)
+│   ├── repo.rs        // SQLx query ต่อ boards + board_members
+│   ├── service.rs     // assert_member, assert_owner, get_tree, ...
+│   ├── handlers.rs    // axum handler + request/response DTO
+│   └── mod.rs          // pub fn routes() -> Router<AppState>
+├── columns/
+│   ├── model.rs / repo.rs / service.rs / handlers.rs / mod.rs
+├── cards/
+│   ├── model.rs / repo.rs / service.rs / handlers.rs / mod.rs
+└── labels/
+    ├── model.rs / repo.rs / service.rs / handlers.rs / mod.rs
+```
+
+สี่ module ห้าไฟล์ต่อ module หนึ่ง `pub fn routes() -> Router<AppState>` ต่อ module รวมเข้ากับ `Router` ตัวเดียวที่ `main.rs` สร้างไว้แล้วใน [db-pool](/taskflow/th/backend-foundations/db-pool/) พอจบ module นี้ ทุก endpoint ด้านล่างจะมีจริง ถูก authorize ผ่าน `board_members` และมี Postgres query จริงรองรับ
+
+## Why
+
+REST API คือชุดคำสัญญาเรื่อง **URL, verb, และ status code** — กำหนด mapping นี้ให้ถูกตั้งแต่แรก แล้วทุกบทถัดไปก็แค่เติมช่องที่คาดเดาได้ทีละช่อง กำหนดผิด แล้วทุก endpoint จะกลายเป็นการตัดสินใจแยกกันไปเรื่อย ๆ: นี่ควรเป็น `POST` หรือ `PUT`? ลบ board แล้วคืน `200` หรือ `204`? board ที่หายไปคืน `404` หรือ `403`? ตัดสินใจคำถามพวกนี้ครั้งเดียวที่นี่ หมายความว่าห้าบทถัดไปไม่ต้องมาเถียงเรื่องนี้ซ้ำอีก
+
+layering **handlers → service → repo** มีเหตุผลเดียวกับที่ `AppError` มีอยู่: ให้แต่ละชิ้นโค้ดมีหน้าที่เดียวเป๊ะ `handlers.rs` ทำแค่ HTTP เท่านั้น — ดึง request, เรียก service function ตัวเดียว, ห่อผลลัพธ์ด้วย `Json` `service.rs` ทำแค่ authorization กับ business rule เท่านั้น — user คนนี้ทำสิ่งนี้ได้ไหม แล้วถ้าได้ "ทำสิ่งนี้" หมายถึงอะไรจริง ๆ (คำนวณ position, ประกอบ tree) `repo.rs` ทำแค่ SQL เท่านั้น — ไม่มี `AppError::Forbidden` โผล่ในไฟล์ `repo.rs` เลย เพราะ `repo.rs` ไม่รู้ว่า "forbidden" คืออะไร รู้แค่ว่าแถวข้อมูลคืออะไร
+
+## Pros & cons
+
+**Layering แบบ resource-per-module (`handlers` → `service` → `repo`, ตัวที่เราใช้) เทียบกับ `handlers.rs` แบบแบนไฟล์เดียวต่อ resource**
+
+- ข้อดี: bug เรื่อง "user คนนี้ลบ board นี้ได้ไหม" อยู่ที่จุดเดียวเสมอ — `boards::service::assert_owner` — ไม่มีวันซ้ำซ้อนระหว่าง handler `delete_board` กับ เช่น เครื่องมือ admin ในอนาคตที่ต้องการเช็คแบบเดียวกัน function ใน `repo.rs` ทดสอบแยกส่วนได้ง่ายมาก (ให้ pool กับ ID มา รัน SQL ถูกไหม) โดยไม่ต้องพึ่ง Axum extractor หรือ authorization logic เลย ถ้าอนาคตมีผู้ใช้ "list boards for a user" รายใหม่ (CLI tool, background job) ก็แค่เรียก `boards::service::list_boards` ตรง ๆ — logic ไม่เคยถูกขังอยู่ใน handler function ที่มีแต่ Axum เรียกได้
+- ข้อเสีย: สี่ไฟล์แทนที่จะเป็นไฟล์เดียวแม้แต่กับ resource ที่ง่ายที่สุด (`labels` ซึ่ง CRUD เล็กจริง ๆ) — เปิดไฟล์เยอะขึ้นเวลาไล่ตาม request เดียวตั้งแต่ต้นจนจบ นี่คือต้นทุนคงที่ที่จ่ายครั้งเดียวต่อ resource แลกกับทุก resource หน้าตาเหมือนกันหมด พออ่าน `boards/` จบ ก็รู้โครงสร้าง `columns/`, `cards/`, และ `labels/` ไปด้วยแล้ว
+
+**Authorization ที่ service layer (ตัวที่เราใช้) เทียบกับ authorization ใน SQL ของ `repo.rs` (เช่น join `board_members` เข้าไปทุก query เสมอ)**
+
+- ข้อดี: function ใน `service.rs` อย่าง `assert_member`/`assert_owner` คืน `AppResult<()>` ตัวเดียวชัดเจนที่ผู้เรียกต้อง `?` ก่อนทำอย่างอื่น — authorization check เป็นบรรทัดโค้ดที่มองเห็นได้ ไม่ได้ซ่อนอยู่ใน `WHERE` clause ลึกสามชั้นในสตริง query function ใน `repo.rs` ยังคงเป็น `SELECT`/`INSERT`/`UPDATE`/`DELETE` แบบง่าย ใช้ซ้ำได้ ไม่ต้องรู้ว่า *ทำไม* ถึงถูกเรียก รู้แค่ *ว่า* ได้รับอนุญาตให้ถูกเรียก
+- ข้อเสีย: ไป Postgres สองรอบแทนที่จะเป็นรอบเดียว — `SELECT` authorization บน `board_members` แล้วค่อย query จริง สำหรับขนาดของ TaskFlow (สมาชิกไม่กี่คนต่อ board, `board_members(user_id)` มี index จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/)) นี่ถูกมาก ระบบที่ authorize เป็นล้าน request ต่อวินาทีอาจรวม check เข้าไปใน `WHERE` clause ของ query หลักเพื่อประหยัด round trip แลกกับ query ที่ไม่แยก "ทำได้ไหม" ออกจาก "ได้อะไร" ให้ชัดเจนอีกต่อไป
+
+## Build it
+
+### URL shapes and verbs
+
+| Method | Path | ความหมาย | Success status |
+|---|---|---|---|
+| `GET` | `/boards` | list board ที่ผู้เรียกเป็นสมาชิก | `200` |
+| `POST` | `/boards` | สร้าง board (ผู้เรียกกลายเป็น `owner`) | `201` |
+| `GET` | `/boards/:id` | board tree เต็ม — columns พร้อม card ของแต่ละอัน | `200` |
+| `PATCH` | `/boards/:id` | เปลี่ยนชื่อ board | `200` |
+| `DELETE` | `/boards/:id` | ลบ board (owner เท่านั้น) | `204` |
+| `POST` | `/boards/:id/columns` | สร้าง column บน board | `201` |
+| `PATCH` | `/columns/:id` | เปลี่ยนชื่อ column | `200` |
+| `DELETE` | `/columns/:id` | ลบ column | `204` |
+| `POST` | `/columns/:id/cards` | สร้าง card ใน column | `201` |
+| `GET` | `/cards/:id` | ดึง card ตัวเดียว | `200` |
+| `PATCH` | `/cards/:id` | อัปเดต title/description ของ card | `200` |
+| `DELETE` | `/cards/:id` | ลบ card | `204` |
+| `PATCH` | `/cards/:id/move` | ย้าย/จัดลำดับ card ใหม่ | `200` |
+| `POST` | `/boards/:id/labels` | สร้าง label บน board | `201` |
+| `GET` | `/boards/:id/labels` | list label ของ board | `200` |
+| `DELETE` | `/labels/:id` | ลบ label | `204` |
+| `POST` | `/cards/:id/labels/:label_id` | ติด label เข้ากับ card | `204` |
+| `DELETE` | `/cards/:id/labels/:label_id` | ถอด label ออกจาก card | `204` |
+
+การตัดสินใจตั้งชื่อบางอย่างที่ควรพูดถึง:
+
+- **ใช้คำนาม ไม่ใช้คำกริยา** `POST /boards/:id/columns` สร้าง column — ไม่มีวันเป็น `POST /createColumn` URL บอกชื่อ resource, HTTP method บอกการกระทำ
+- **การซ้อนสะท้อนความเป็นเจ้าของ ลึกแค่ชั้นเดียว** column ถูกสร้างใต้ `/boards/:id/columns` เพราะมันไม่มีอยู่ได้ถ้าไม่มี board — แต่พอมี `id` ของ column แล้ว การกระทำอื่นทุกอย่างกับมัน (`PATCH /columns/:id`, `DELETE /columns/:id`, `POST /columns/:id/cards`) เข้าถึงมันตรง ๆ ไม่ใช่ `/boards/:id/columns/:id` primary key แบบ `Uuid` (จาก [schema](/taskflow/th/database/schema/)) ทำให้เป็นไปได้: id เป็น unique ทั่วทั้งระบบ เลยไม่จำเป็นต้องมี parent อยู่ใน URL เพื่อแยกแยะมันเลย `/cards/:id/labels/:label_id` คือจุดเดียวใน path ที่เรามีสอง ID เพราะ attach/detach คือการกระทำต่อ *ความสัมพันธ์* ระหว่างสอง resource โดยธรรมชาติ ไม่ใช่ resource ใดตัวหนึ่งเดี่ยว ๆ
+- **`move` คือ path เดียวในทั้ง API ที่มีรูปร่างเหมือนคำกริยา** และตั้งใจทำแบบนั้น: การย้าย card ไม่ใช่การอัปเดต field บางส่วน (นั่นคือหน้าที่ของ `PATCH /cards/:id` ธรรมดา) — มันคือการกระทำที่แยกต่างหาก มีรูปแบบ request ของตัวเอง (`target_column_id`, `before_id`, `after_id`) และมี business rule ของตัวเอง (เลขคณิต fractional-position) การจำลองมันเป็น `PATCH /cards/:id/move` แทนที่จะยัดเข้าไปใน `PATCH /cards/:id` ทำให้ "อัปเดต title/description" กับ "จัดลำดับใหม่" ไม่ต้องแชร์ handler เดียวที่ต้องเดาว่าผู้เรียกหมายถึงอะไร
+
+### Status codes
+
+- **`200 OK`** — `GET` หรือ `PATCH` ที่สำเร็จและคืน body
+- **`201 Created`** — `POST` ที่สำเร็จและสร้าง resource ใหม่ response body คือ resource ที่สร้าง รวม `id` ที่ server สร้างให้
+- **`204 No Content`** — `DELETE` ที่สำเร็จ หรือ attach/detach ที่สำเร็จแต่ไม่มีอะไรมีความหมายจะคืน (label ติดหรือไม่ติดก็แค่นั้น — ไม่มี resource ใหม่จะอธิบาย)
+- **`401 Unauthorized`** — ไม่มี bearer token ที่ valid และไม่ถูก revoke เลย จัดการทั้งหมดโดย `AuthUser` extractor จาก [middleware](/taskflow/th/auth/middleware/) ก่อนที่ handler ใด ๆ ใน module นี้จะรันด้วยซ้ำ
+- **`403 Forbidden`** — ผู้เรียกที่ authenticated ถูกต้องแล้ว แต่แค่ไม่ได้รับอนุญาตให้ทำสิ่งนี้ (ไม่ใช่สมาชิกของ board; เป็นสมาชิกแต่ไม่ใช่ owner พยายามลบ) นี่คือ status code ของ `assert_member`/`assert_owner`
+- **`404 Not Found`** — id ใน URL ไม่มีอยู่จริง *หรือ* — ตั้งใจ — มีอยู่จริงแต่เป็นของ board ที่ผู้เรียกไม่ได้เป็นสมาชิก หัวข้อด้านล่างอธิบายว่าทำไมสองกรณีนี้ใช้ status code เดียวกัน
+- **`409 Conflict`** — สงวนไว้สำหรับ write conflict จริง ๆ; ไม่มี endpoint ใดใน module นี้เจอมัน (ต่างจาก `register` ใน [handlers](/taskflow/th/auth/handlers/) ที่ไม่มี `unique` constraint ให้ละเมิด) แต่ `AppError::Conflict` ยังพร้อมใช้สำหรับ module ถัดไป
+- **`422 Unprocessable Entity`** — `AppError::Validation` สำหรับ request ที่ syntax ถูกแต่ผิด business rule module นี้ก็ยังไม่ใช้ด้วยเหตุผลเดียวกัน: request body ของ TaskFlow ในบทนี้ง่ายพอที่ "รูปแบบผิด" จะถูกจัดการโดยข้อถัดไปแล้ว
+
+### Where validation happens
+
+สองชั้น และตั้งใจให้ต่างกัน:
+
+1. **Shape validation ฟรี** จาก `Json<T>` ถ้า `CreateBoardRequest { title: String }` ขาด `title` หรือ `title` เป็นตัวเลขแทนที่จะเป็น string, `Json` extractor ของ Axum จะปฏิเสธ request ด้วย `400 Bad Request` *ก่อน* handler body จะรันด้วยซ้ำ — `Deserialize` derive ของ `serde` คือ validator ไม่ต้องเขียนเองเลย
+2. **Business-rule validation คือ `AppError::Validation`** สำหรับ request ที่รูปแบบถูกแต่ความหมายผิด — `title: ""` ที่ว่างเปล่า, `color` ที่ไม่ใช่ hex string ที่ valid ทั้งห้าบทใน module นี้ยังไม่เพิ่ม check นี้ (ทุก DTO ในนี้เป็น `String` ธรรมดา ไม่เช็คว่าว่างหรือไม่) ซึ่งเป็นการตัดขอบเขตอย่างตั้งใจ: TaskFlow เชื่อ frontend ว่าจะส่ง title ที่สมเหตุสมผลไปก่อน เหมือนกับที่ `RegisterRequest` ของ `register` เชื่อ frontend ว่าจะส่ง email จริงมาใน Module 4 variant `AppError::Validation` มีอยู่แล้วใน `error.rs` จาก [error-handling](/taskflow/th/backend-foundations/error-handling/) เพื่อให้การเพิ่ม `if body.title.trim().is_empty() { return Err(AppError::Validation("title must not be empty".into())); }` เข้า handler ไหนก็ได้ในอนาคต ไม่ต้องแตะ `error.rs` เลย
+
+### Why `404`, not `403`, for a board that exists but isn't yours
+
+`get_tree` ในบท boards เรียก `assert_member` ก่อน ซึ่งคืน `403` สำหรับ board ที่ผู้เรียกไม่ได้เป็นสมาชิกจริง ๆ แต่ดู `get_card`, `update_card`, และเพื่อน ๆ ในบท cards ให้ดี: มัน resolve board ของ card ผ่าน column ของมัน แล้วเรียก `assert_member` — และถ้า *card เอง* ไม่มีอยู่จริง นั่นคือ `404` ตัดสินใจก่อน authorization จะถูกเช็คด้วยซ้ำ เพราะไม่มีอะไรให้ authorize การเข้าถึงเลย กรณีที่ตั้งใจอีกกรณีคือ `labels::service::attach_label`: ถ้า `label_id` มีจริงแต่เป็นของ board *อื่น* จาก card, handler คืน `404` ไม่ใช่ `403` — ปฏิบัติกับ "label นี้ไม่ใช่ของคุณที่จะติดได้" เหมือนกับ "label นี้ไม่มีอยู่จริง" เพื่อไม่ให้ผู้เรียกใช้ attach endpoint สำรวจว่า label id ไหนมีอยู่บน board ที่ตัวเองเข้าไม่ถึง `403` สงวนไว้สำหรับ "คุณไม่ได้เป็นสมาชิกของ board ที่ resource นี้เป็นของอย่างชัดเจนด้วยซ้ำ" — การรั่วข้อมูลที่อ่อนกว่าอย่างเห็นได้ชัด เพราะผู้เรียกรู้ board id อยู่แล้วจาก request ของตัวเอง
+
+### Why the boards list has no pagination — yet
+
+`GET /boards` คืนทุก board ที่ผู้เรียกเป็นสมาชิก ไม่มี pagination นี่คือการตัดขอบเขตอย่างตั้งใจ ไม่ใช่การมองข้าม: `board_members(user_id)` (index จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/)) ทำให้ query เองถูกแม้ table จะใหญ่แค่ไหนก็ตาม และคนหนึ่งคนตามความเป็นจริงเป็นสมาชิกของ board สักไม่กี่สิบ ไม่ใช่หมื่น ๆ ที่ list ไม่มี pagination จะกลายเป็นปัญหาขนาด response จริง ๆ ถ้า TaskFlow ต้องการมันสักวัน รูปแบบที่มันจะเป็นคือรูปแบบมาตรฐานจาก [Global Expert Playbook](/taskflow/th/introduction/architecture/): `GET /boards?limit=20&offset=0` แปลงเป็น `LIMIT $n OFFSET $m` ใน `boards::repo::list_for_user` โดยชั้น `service.rs` และ `handlers.rs` ส่งพารามิเตอร์เพิ่มสองตัวผ่านไปโดยไม่เปลี่ยนแปลง — layering จากบทนี้เองที่ทำให้มันเป็นการเปลี่ยนไฟล์เดียว ไม่ใช่การออกแบบใหม่
+
+## Verify
+
+ไม่มีโค้ดให้รัน — ตรวจสอบความเข้าใจแทน:
+
+- `DELETE /boards/:id` คืน status code อะไรเมื่อผู้เรียกเป็นสมาชิกแต่ไม่ใช่ owner? (`403` — `assert_owner` fail ก่อนที่ delete จะรันด้วยซ้ำ)
+- `GET /cards/:id` คืน status code อะไรสำหรับ card id ที่ถูกลบไปแล้ว? (`404` — `repo::find_card` คืน `None` แปลงเป็น `AppError::NotFound` ก่อน authorization จะถูกเช็ค)
+- ทำไม `repo.rs` ไม่เคยสร้าง `AppError` เลย? (เพราะ function ใน repo ไม่รู้ว่า *ทำไม* ถึงถูกเรียก — มีแค่ `service.rs` ที่รู้ context พอ เช่น "นี่คือ owner ไหม" เพื่อตัดสินใจว่า lookup ที่ fail หมายถึง `403` หรือ `404`)
+
+ถ้าสามคำตอบนี้เข้าใจได้ แผนที่ก็ชัดเจนแล้ว — ห้าบทถัดไปคือการสร้างตามแผนที่นี้ล้วน ๆ
+
+## Recap
+
+คุณได้เห็นตาราง URL/verb/status-code เต็มของ REST API ของ TaskFlow, layering `handlers → service → repo` ที่ห้าบทถัดไปจะใช้ภายใน `boards/`, `columns/`, `cards/`, และ `labels/` และการตัดสินใจออกแบบสามอย่างที่ตั้งใจ: shape validation ฟรีจาก `serde`, business-rule validation ถูกเลื่อนไปหลัง `AppError::Validation` ที่สร้างไว้แล้ว และ resource ที่ไม่ใช่ board ของคุณคืน `404` แทน `403` เพื่อไม่รั่วการมีอยู่ ถัดไป เราจะสร้าง resource module แรกและใหญ่ที่สุด — [boards](/taskflow/th/rest-api/boards/) — รวมถึง helper `assert_member`/`assert_owner` ที่ทุก module ในบทหลังของคอร์สนี้จะเรียกใช้

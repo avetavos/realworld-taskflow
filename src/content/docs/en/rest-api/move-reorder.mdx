@@ -1,0 +1,276 @@
+---
+title: Move & Reorder
+description: Add move_card to cards/service.rs and PATCH /cards/:id/move to cards/handlers.rs — the fractional-position math from before/after neighbors, cross-board rejection, and the Module 7 realtime broadcast hook.
+sidebar:
+  order: 6
+---
+
+## What we're building
+
+One new function, `move_card`, added to `cards/service.rs`, plus its handler and `MoveCardRequest` DTO added to `cards/handlers.rs`, plus one new route, `PATCH /cards/:id/move`, added to `cards/mod.rs`. This is the endpoint every earlier lesson in this module was quietly building toward: dragging a card to a new position — possibly in a different column — and persisting exactly where it landed with a single-row write, using the fractional `position` strategy from [indexes-ordering](/taskflow/en/database/indexes-ordering/).
+
+`move_card` takes `state: &AppState`, not `db: &PgPool` like every other `service.rs` function in this module — the one deliberate signature difference in the whole REST API module, explained below.
+
+## Why
+
+`move_card` takes `&AppState` instead of `&PgPool` because it's the one function in this entire module that Module 7 (Realtime) will need to extend with a second capability: broadcasting a `card.moved` event to every other client watching the same board, over the WebSocket hub that module builds. That hub will live on `AppState`, the same way `db` and `redis` already do — so giving `move_card` the whole `AppState` now, even though it only reaches into `state.db` today, means Module 7 adds one line (a broadcast call) without changing this function's signature, and therefore without touching `cards::handlers::move_card`'s call site either. The `// Module 7 wires realtime broadcast of card.moved here` comment marks exactly where that line will go.
+
+The position math itself is a direct, literal translation of the rules [indexes-ordering](/taskflow/en/database/indexes-ordering/) already specified: average two neighbors, step `±1.0` past an end, or start at `1.0` for an empty target. `move_card`'s job is entirely about correctly identifying *which* case applies from `before_id`/`after_id`, and correctly rejecting a request that tries to move a card onto a different board — the arithmetic itself was already decided two modules ago.
+
+## Pros & cons
+
+**`before_id`/`after_id` as two `Option<Uuid>` naming the card's new neighbors (what we're using) vs. the client sending a raw target `position: f64` it computed itself**
+
+- Pros: the server is the only place the fractional-position formula is implemented — a client (the Kanban frontend in Module 9) only ever has to say "I dropped this between card A and card B" (or "at the top," or "at the bottom," or "into an empty column"), using ids it already has from rendering the board. It never needs to know the current numeric position of anything, so it can never send a value that collides with, or drifts out of order relative to, a neighbor's position due to a stale client-side read.
+- Cons: `move_card` pays for up to two extra `SELECT`s — fetching `before` and `after` by id, if provided — before it can compute anything, where a client-supplied `position: f64` would need zero extra queries. That's the correct trade: trusting the client to compute positions correctly would mean trusting every future frontend (web now, potentially mobile later) to reimplement the exact same fractional-averaging rule identically and never send a stale value — a much larger, harder-to-audit surface than two indexed primary-key lookups per move.
+
+**Rejecting a cross-board move with `AppError::Forbidden` (what we're using) vs. silently reparenting the card onto a board its `before`/`after` neighbors belong to**
+
+- Pros: `target_column.board_id != source_board_id` is checked and rejected explicitly, with a `403`, *before* any position math runs or any row is written — a member of board A can never use `move_card` to smuggle a card from board A onto a column on board B, even if they happen to also be a member of board B (the same class of cross-parent check [labels](/taskflow/en/rest-api/labels/) already applied to attach/detach, here applied to the move operation instead).
+- Cons: this makes cross-board card moves entirely unsupported, full stop — there's no endpoint anywhere in this API for "move this card to a different board," only "move this card to a different column on the same board." If TaskFlow ever wanted that as a real feature (a deliberate "copy this card to another board" action, say), it would need its own explicit endpoint with its own authorization story — not a side effect of loosening this check.
+
+## Build it
+
+### 1. `move_card` in `cards/repo.rs`
+
+Add this function to the `taskflow/backend/api/src/cards/repo.rs` file built in [cards](/taskflow/en/rest-api/cards/):
+
+```rust
+pub async fn move_card(
+    db: &PgPool,
+    id: Uuid,
+    column_id: Uuid,
+    position: f64,
+) -> AppResult<Option<Card>> {
+    let card = sqlx::query_as::<_, Card>(
+        "UPDATE cards SET column_id = $2, position = $3 WHERE id = $1
+         RETURNING id, column_id, title, description, position, created_at",
+    )
+    .bind(id)
+    .bind(column_id)
+    .bind(position)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(card)
+}
+```
+
+One `UPDATE` writing both `column_id` and `position` in a single statement — a move within the same column (`column_id` unchanged) and a move across columns are the same query, since setting a column to its own current value is a harmless no-op.
+
+### 2. `move_card` in `cards/service.rs`
+
+Add this function to `cards/service.rs`, alongside `create_card`, `get_card`, `update_card`, and `delete_card` from [cards](/taskflow/en/rest-api/cards/) — it needs `crate::state::AppState` imported at the top of the file too:
+
+```rust
+pub async fn move_card(
+    state: &AppState,
+    user_id: Uuid,
+    card_id: Uuid,
+    target_column_id: Uuid,
+    before_id: Option<Uuid>,
+    after_id: Option<Uuid>,
+) -> AppResult<Card> {
+    let db = &state.db;
+
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let source_board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, source_board_id).await?;
+
+    let target_column = columns::repo::find_column(db, target_column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if target_column.board_id != source_board_id {
+        return Err(AppError::Forbidden);
+    }
+
+    let before = match before_id {
+        Some(id) => Some(repo::find_card(db, id).await?.ok_or(AppError::NotFound)?),
+        None => None,
+    };
+    let after = match after_id {
+        Some(id) => Some(repo::find_card(db, id).await?.ok_or(AppError::NotFound)?),
+        None => None,
+    };
+
+    let position = match (&before, &after) {
+        (Some(before), Some(after)) => (before.position + after.position) / 2.0,
+        (Some(before), None) => before.position + 1.0,
+        (None, Some(after)) => after.position - 1.0,
+        (None, None) => 1.0,
+    };
+
+    let updated = repo::move_card(db, card_id, target_column_id, position)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    // Module 7 wires realtime broadcast of card.moved here
+
+    Ok(updated)
+}
+```
+
+Walking through the sequence in order:
+
+1. **Resolve and authorize the card being moved.** `repo::find_card` then `card_board_id` then `assert_member` — the identical three-step pattern `get_card`/`update_card`/`delete_card` already established in [cards](/taskflow/en/rest-api/cards/).
+2. **Resolve and validate the target column.** `columns::repo::find_column` gets `target_column_id`'s `board_id`; if it doesn't match `source_board_id`, the move is rejected with `403` before anything else happens.
+3. **Resolve the optional neighbors.** `before_id`/`after_id` are each looked up if present — a `before`/`after` id that doesn't exist as a real card is `AppError::NotFound`, the same "the id you gave me doesn't resolve to anything" handling every other lookup in this module uses.
+4. **Compute the position** with the `match (&before, &after)` four-way branch — matching `&before`/`&after` (references), not moving `before`/`after`, because both are read again for their `.position` field and there's no reason to consume them.
+5. **Persist and return.** `repo::move_card` is the one and only write in this function — everything above it is either a read or a check.
+
+### 3. `MoveCardRequest` and the handler in `cards/handlers.rs`
+
+Add this struct and function to `cards/handlers.rs`:
+
+```rust
+#[derive(Debug, Deserialize)]
+pub struct MoveCardRequest {
+    pub target_column_id: Uuid,
+    pub before_id: Option<Uuid>,
+    pub after_id: Option<Uuid>,
+}
+
+pub async fn move_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(card_id): Path<Uuid>,
+    Json(body): Json<MoveCardRequest>,
+) -> AppResult<Json<Card>> {
+    let card = service::move_card(
+        &state,
+        user_id,
+        card_id,
+        body.target_column_id,
+        body.before_id,
+        body.after_id,
+    )
+    .await?;
+
+    Ok(Json(card))
+}
+```
+
+`&state`, not `&state.db` — the one handler in this module that passes its whole `AppState` down to a `service` function, matching `move_card`'s `&AppState` signature from step 2.
+
+### 4. Add the route in `cards/mod.rs`
+
+Update `cards::routes()`:
+
+```rust
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/columns/:id/cards", post(handlers::create_card))
+        .route(
+            "/cards/:id",
+            get(handlers::get_card)
+                .patch(handlers::update_card)
+                .delete(handlers::delete_card),
+        )
+        .route("/cards/:id/move", patch(handlers::move_card))
+}
+```
+
+`patch` needs adding to the `axum::routing` import at the top of the file alongside `get` and `post`, if it isn't already there from [cards](/taskflow/en/rest-api/cards/).
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+Set up two columns and two cards, reusing `$TOKEN` and `$BOARD_ID`:
+
+```bash
+TODO=$(curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"To Do"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+DOING=$(curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Doing"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+CARD_A=$(curl -s -X POST http://localhost:8080/columns/$TODO/cards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Card A"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+CARD_B=$(curl -s -X POST http://localhost:8080/columns/$TODO/cards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Card B"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+`$CARD_A` has `position = 1.0`, `$CARD_B` has `position = 2.0`. Move `$CARD_B` to the empty `$DOING` column — no `before_id`/`after_id`, so it lands at `1.0`:
+
+```bash
+curl -s -X PATCH http://localhost:8080/cards/$CARD_B/move \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"target_column_id\":\"$DOING\"}"
+```
+
+```json
+{"id":"...","column_id":"...","title":"Card B","description":null,"position":1.0,"created_at":"..."}
+```
+
+Move `$CARD_B` back into `$TODO`, dropped *after* `$CARD_A` (bottom of the list):
+
+```bash
+curl -s -X PATCH http://localhost:8080/cards/$CARD_B/move \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"target_column_id\":\"$TODO\",\"before_id\":\"$CARD_A\"}"
+```
+
+```json
+{"id":"...","column_id":"...","title":"Card B","description":null,"position":2.0,"created_at":"..."}
+```
+
+Create a third card, then drop it *between* A and B:
+
+```bash
+CARD_C=$(curl -s -X POST http://localhost:8080/columns/$TODO/cards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Card C"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+curl -s -X PATCH http://localhost:8080/cards/$CARD_C/move \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"target_column_id\":\"$TODO\",\"before_id\":\"$CARD_A\",\"after_id\":\"$CARD_B\"}"
+```
+
+```json
+{"id":"...","column_id":"...","title":"Card C","description":null,"position":1.5,"created_at":"..."}
+```
+
+Confirm the tree reflects the new order — `Card A` (`1.0`), `Card C` (`1.5`), `Card B` (`2.0`):
+
+```bash
+curl -s http://localhost:8080/boards/$BOARD_ID -H "Authorization: Bearer $TOKEN" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print([c["title"] for col in d["columns"] for c in col["cards"]])'
+```
+
+```
+['Card A', 'Card C', 'Card B']
+```
+
+Finally, confirm the cross-board rejection: create a second board and try moving a card into one of its columns:
+
+```bash
+BOARD2=$(curl -s -X POST http://localhost:8080/boards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Other board"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+OTHER_COLUMN=$(curl -s -X POST http://localhost:8080/boards/$BOARD2/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Somewhere else"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+curl -s -o /dev/null -w "%{http_code}\n" -X PATCH http://localhost:8080/cards/$CARD_A/move \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"target_column_id\":\"$OTHER_COLUMN\"}"
+```
+
+```
+403
+```
+
+## Recap
+
+You added `move_card` — the endpoint the whole REST API module was building toward — to `cards/service.rs`, `cards/handlers.rs`, and `cards/mod.rs`. It resolves and authorizes the card and its target column, rejects a cross-board move with `403` before any write happens, resolves its optional `before`/`after` neighbors, and applies the exact fractional-position rules `indexes-ordering` specified two modules ago: average two neighbors, step `±1.0` past an end, or `1.0` into an empty column. `move_card` takes `&AppState` instead of `&PgPool` — the one deliberate signature difference in this whole module — specifically so Module 7 can add a `card.moved` broadcast at the marked comment without changing this function's signature or its handler's call site. That completes Module 5: TaskFlow's REST API now has full CRUD across boards, columns, cards, and labels, membership-based authorization on every endpoint, and the one operation — reordering — the entire database design in Module 2 was built to support cheaply. Next, [Caching](/taskflow/en/caching/) puts Redis to work speeding up the reads this module just built.

@@ -1,0 +1,400 @@
+---
+title: Cards
+description: Build cards/{model,repo,service,handlers,mod}.rs for create, get, patch, and delete — resolving a card's board through its column, and the COALESCE update pattern for a partial PATCH body.
+sidebar:
+  order: 4
+---
+
+## What we're building
+
+The `cards` module: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, `mod.rs` under `taskflow/backend/api/src/cards/`. Four endpoints — create a card in a column, fetch one card, patch its title and/or description, delete it. (`move`, the fifth and most interesting card operation, gets its own lesson: [move-reorder](/taskflow/en/rest-api/move-reorder/).)
+
+Like `columns/model.rs` before it, `cards/model.rs` is a one-line re-export of `Card` from `boards::model`. Everything else here is new: `cards::service` is the first module where resolving "which board does this belong to" takes two hops instead of one — a card's board comes from its *column's* `board_id`, not a `board_id` column on `cards` itself (there isn't one — check the schema in [schema](/taskflow/en/database/schema/)).
+
+## Why
+
+`cards::service::card_board_id` — a small private helper that looks up a card's column, then reads that column's `board_id` — exists because `cards` has no direct foreign key to `boards`. That's not a gap to work around; it's the schema being honest about the actual hierarchy: `boards → columns → cards`. Every handler in this lesson that isn't `create_card` (which already has a `column_id` from the URL) needs this two-hop resolution before it can call `assert_member`, and doing it in one small function means `get_card`, `update_card`, and `delete_card` each call it once instead of inlining the same two lookups three times.
+
+`update_card`'s `COALESCE($2, title)` pattern is the one place this lesson makes a real, documented scope trade-off: a `PATCH` request can update `title`, `description`, both, or neither, but it can never *clear* `description` back to `NULL` once set. That's covered in Pros & cons below — it's a deliberate simplicity choice, not an accident.
+
+## Pros & cons
+
+**`UpdateCardRequest { title: Option<String>, description: Option<String> }` with `COALESCE` (what we're using) vs. a double-`Option` (`Option<Option<String>>`) that can distinguish "omitted" from "explicitly set to null"**
+
+- Pros: `UpdateCardRequest` is a plain, ordinary struct — `serde`'s default `Deserialize` handles it with zero custom code. `repo::update_card`'s `SET title = COALESCE($2, title), description = COALESCE($3, description)` is a single, readable `UPDATE` that leaves any field the caller didn't send untouched, which correctly covers the two most common `PATCH` shapes: "update just the title" and "update just the description."
+- Cons: there is no way to send a `PATCH` that clears an existing `description` back to `NULL` — sending `"description": null` in the JSON body deserializes to `None`, which `COALESCE` treats identically to "the field was omitted entirely," leaving the old description in place. Distinguishing those two cases needs a custom `Deserialize` (commonly `Option<Option<T>>` with a `#[serde(default, with = "...")]` wrapper, or a three-state enum) that tracks whether the JSON key was present at all, independent of its value. TaskFlow doesn't need that yet — nothing in the frontend module clears a description to empty — so we accept the simpler shape and note exactly where the boundary is, rather than build the general mechanism speculatively.
+
+**`cards::service::card_board_id` re-resolving the column on every call (what we're using) vs. `cards::repo::find_card` joining `columns` directly to return `board_id` alongside the card**
+
+- Pros: `Card` (from `boards::model`) has exactly the columns the `cards` table has — no extra `board_id` field that only exists because of an authorization need, keeping the struct an honest 1:1 mirror of the table `sqlx::FromRow` reads from. `card_board_id` is a separate, obviously-named function a reader can see is "for authorization," rather than a `board_id` field on `Card` itself that's easy to mistake for real schema.
+- Cons: `get_card`, `update_card`, and `delete_card` each run two extra queries (find the card, then find its column) before doing their real work — a `JOIN` in `find_card` could return the card plus its `board_id` in one query. That's the same round-trip-vs-clarity trade [columns](/taskflow/en/rest-api/columns/) already made for `find_column`-then-`assert_member`, applied one hop further down the hierarchy; at TaskFlow's scale, both extra queries together are still well under a millisecond against an indexed primary-key lookup.
+
+## Build it
+
+### 1. `cards/model.rs`
+
+```rust
+pub use crate::boards::model::Card;
+```
+
+### 2. `cards/repo.rs`
+
+```rust
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::error::AppResult;
+
+use super::model::Card;
+
+pub async fn find_card(db: &PgPool, id: Uuid) -> AppResult<Option<Card>> {
+    let card = sqlx::query_as::<_, Card>(
+        "SELECT id, column_id, title, description, position, created_at FROM cards WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(card)
+}
+
+pub async fn max_position(db: &PgPool, column_id: Uuid) -> AppResult<Option<f64>> {
+    let max: Option<f64> =
+        sqlx::query_scalar("SELECT MAX(position) FROM cards WHERE column_id = $1")
+            .bind(column_id)
+            .fetch_one(db)
+            .await?;
+
+    Ok(max)
+}
+
+pub async fn insert_card(
+    db: &PgPool,
+    id: Uuid,
+    column_id: Uuid,
+    title: &str,
+    description: Option<&str>,
+    position: f64,
+) -> AppResult<Card> {
+    let card = sqlx::query_as::<_, Card>(
+        "INSERT INTO cards (id, column_id, title, description, position)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, column_id, title, description, position, created_at",
+    )
+    .bind(id)
+    .bind(column_id)
+    .bind(title)
+    .bind(description)
+    .bind(position)
+    .fetch_one(db)
+    .await?;
+
+    Ok(card)
+}
+
+pub async fn update_card(
+    db: &PgPool,
+    id: Uuid,
+    title: Option<&str>,
+    description: Option<&str>,
+) -> AppResult<Option<Card>> {
+    let card = sqlx::query_as::<_, Card>(
+        "UPDATE cards
+         SET title = COALESCE($2, title),
+             description = COALESCE($3, description)
+         WHERE id = $1
+         RETURNING id, column_id, title, description, position, created_at",
+    )
+    .bind(id)
+    .bind(title)
+    .bind(description)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(card)
+}
+
+pub async fn delete_card(db: &PgPool, id: Uuid) -> AppResult<bool> {
+    let result = sqlx::query("DELETE FROM cards WHERE id = $1")
+        .bind(id)
+        .execute(db)
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+```
+
+`insert_card`'s `description: Option<&str>` binds straight to sqlx — `None` becomes SQL `NULL` in the `INSERT`, matching `cards.description`'s nullable column from [schema](/taskflow/en/database/schema/). `move_card`'s own repo function is covered in the next lesson, [move-reorder](/taskflow/en/rest-api/move-reorder/) — it lives in this same file but is introduced there, alongside the position math it serves.
+
+### 3. `cards/service.rs`
+
+```rust
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::{
+    boards::service as boards_service,
+    columns,
+    error::{AppError, AppResult},
+};
+
+use super::model::Card;
+use super::repo;
+
+pub async fn create_card(
+    db: &PgPool,
+    user_id: Uuid,
+    column_id: Uuid,
+    title: String,
+    description: Option<String>,
+) -> AppResult<Card> {
+    let column = columns::repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    let position = repo::max_position(db, column_id).await?.unwrap_or(0.0) + 1.0;
+    repo::insert_card(
+        db,
+        Uuid::new_v4(),
+        column_id,
+        &title,
+        description.as_deref(),
+        position,
+    )
+    .await
+}
+
+async fn card_board_id(db: &PgPool, card: &Card) -> AppResult<Uuid> {
+    let column = columns::repo::find_column(db, card.column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(column.board_id)
+}
+
+pub async fn get_card(db: &PgPool, user_id: Uuid, card_id: Uuid) -> AppResult<Card> {
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    Ok(card)
+}
+
+pub async fn update_card(
+    db: &PgPool,
+    user_id: Uuid,
+    card_id: Uuid,
+    title: Option<String>,
+    description: Option<String>,
+) -> AppResult<Card> {
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    repo::update_card(db, card_id, title.as_deref(), description.as_deref())
+        .await?
+        .ok_or(AppError::NotFound)
+}
+
+pub async fn delete_card(db: &PgPool, user_id: Uuid, card_id: Uuid) -> AppResult<()> {
+    let card = repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let board_id = card_board_id(db, &card).await?;
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    if repo::delete_card(db, card_id).await? {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+`card_board_id` takes `&Card`, not a `card_id` it looks up itself — every caller already has the `Card` in hand from its own `repo::find_card` call, so `card_board_id` reuses that value instead of a fourth redundant lookup. `move_card`, covered next lesson, calls this same private helper.
+
+### 4. `cards/handlers.rs`
+
+```rust
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
+use serde::Deserialize;
+use uuid::Uuid;
+
+use crate::{auth::middleware::AuthUser, error::AppResult, state::AppState};
+
+use super::model::Card;
+use super::service;
+
+#[derive(Debug, Deserialize)]
+pub struct CreateCardRequest {
+    pub title: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateCardRequest {
+    pub title: Option<String>,
+    pub description: Option<String>,
+}
+
+pub async fn create_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(column_id): Path<Uuid>,
+    Json(body): Json<CreateCardRequest>,
+) -> AppResult<(StatusCode, Json<Card>)> {
+    let card =
+        service::create_card(&state.db, user_id, column_id, body.title, body.description).await?;
+    Ok((StatusCode::CREATED, Json(card)))
+}
+
+pub async fn get_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(card_id): Path<Uuid>,
+) -> AppResult<Json<Card>> {
+    let card = service::get_card(&state.db, user_id, card_id).await?;
+    Ok(Json(card))
+}
+
+pub async fn update_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(card_id): Path<Uuid>,
+    Json(body): Json<UpdateCardRequest>,
+) -> AppResult<Json<Card>> {
+    let card =
+        service::update_card(&state.db, user_id, card_id, body.title, body.description).await?;
+    Ok(Json(card))
+}
+
+pub async fn delete_card(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(card_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    service::delete_card(&state.db, user_id, card_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+`move_card`'s handler and `MoveCardRequest` DTO are added to this same file in the next lesson — they're left out here so this file matches exactly what `cards::service` defines up to this point.
+
+### 5. `cards/mod.rs`
+
+```rust
+pub mod handlers;
+pub mod model;
+pub mod repo;
+pub mod service;
+
+use axum::{
+    routing::{get, post},
+    Router,
+};
+
+use crate::state::AppState;
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/columns/:id/cards", post(handlers::create_card))
+        .route(
+            "/cards/:id",
+            get(handlers::get_card)
+                .patch(handlers::update_card)
+                .delete(handlers::delete_card),
+        )
+}
+```
+
+The `/cards/:id/move` route joins this same `.route()` chain in the next lesson, once `handlers::move_card` exists to route to.
+
+### 6. Mount `cards::routes()` in `main.rs`
+
+```rust
+mod auth;
+mod boards;
+mod cards;
+mod columns;
+mod config;
+mod db;
+mod error;
+mod state;
+
+let app = Router::new()
+    .route("/health", get(health))
+    .nest("/auth", auth::routes())
+    .merge(boards::routes())
+    .merge(columns::routes())
+    .merge(cards::routes())
+    .layer(cors)
+    .with_state(state);
+```
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+Reusing `$TOKEN`, `$BOARD_ID`, and creating a fresh column (re-run the [columns](/taskflow/en/rest-api/columns/) verify steps if you deleted your test column):
+
+```bash
+COLUMN_ID=$(curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"To Do"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+Create a card:
+
+```bash
+CARD_ID=$(curl -s -X POST http://localhost:8080/columns/$COLUMN_ID/cards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Write the REST API module","description":"Boards, columns, cards, labels"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+Fetch it directly:
+
+```bash
+curl -s http://localhost:8080/cards/$CARD_ID -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{"id":"...","column_id":"...","title":"Write the REST API module","description":"Boards, columns, cards, labels","position":1.0,"created_at":"..."}
+```
+
+Patch just the title — `description` is untouched, confirming the `COALESCE` pattern:
+
+```bash
+curl -s -X PATCH http://localhost:8080/cards/$CARD_ID \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Write the cards lesson"}'
+```
+
+```json
+{"id":"...","column_id":"...","title":"Write the cards lesson","description":"Boards, columns, cards, labels","position":1.0,"created_at":"..."}
+```
+
+Delete it:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:8080/cards/$CARD_ID \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```
+204
+```
+
+## Recap
+
+You built the `cards` module — `model.rs` re-exporting `Card`, `repo.rs`'s insert-at-end and `COALESCE`-based partial-update queries, `service.rs`'s `card_board_id` helper resolving a card's board through its column (the first two-hop authorization lookup in the course), and four thin `handlers.rs` functions. `cards::routes()` merges into `main.rs`. You also saw the documented boundary of the `COALESCE` update pattern: it can set fields but never clear one back to `NULL`. Next, [move-reorder](/taskflow/en/rest-api/move-reorder/) adds the fifth and final card operation — the one that actually needs the fractional-position math this whole database design was built around.

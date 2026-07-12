@@ -1,0 +1,333 @@
+---
+title: Columns
+description: Build columns/{model,repo,service,handlers,mod}.rs for create, rename, and delete — reusing Column from boards::model, computing insert position from MAX(position), and reusing boards::service::assert_member for authorization.
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+The `columns` module: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, `mod.rs` under `taskflow/backend/api/src/columns/`. Three endpoints — create a column on a board, rename a column, delete a column — none of which need a new authorization primitive, because `boards::service::assert_member` from the previous lesson already covers every one of them.
+
+`columns/model.rs` is one line: it re-exports `Column` from `boards::model`, where it was already defined so `BoardTree` could exist starting in the [boards](/taskflow/en/rest-api/boards/) lesson. Every other file in this module — `repo.rs`, `service.rs`, `handlers.rs` — is new, genuine column-specific code.
+
+## Why
+
+`create_column`'s position math — `MAX(position) + 1.0` — is the first real use of the fractional-position strategy from [indexes-ordering](/taskflow/en/database/indexes-ordering/) outside of that lesson's own SQL examples. A brand-new column always goes at the *end* of a board's column list (left-to-right), which is exactly the "insert at the bottom" case: step one past the current maximum, or start at `1.0` if the board has no columns yet (`MAX(position)` on an empty set returns SQL `NULL`, which `sqlx::query_scalar` maps to `Option<f64>::None` — `unwrap_or(0.0) + 1.0` turns that into `1.0`, the same starting value [indexes-ordering](/taskflow/en/database/indexes-ordering/) specifies for an empty list).
+
+Reusing `boards::service::assert_member` instead of writing a `columns::service::assert_member` is the payoff promised in the previous lesson: a column's authorization question is never "is this user allowed to touch this column" in isolation, it's always "is this user a member of the board this column belongs to" — the exact same question `boards::service::assert_member` already answers, given a `board_id`. `columns::service` only has to do one extra step first: look the column up to find *which* board it belongs to.
+
+## Pros & cons
+
+**`columns::service` resolving `board_id` via `repo::find_column` before delegating to `boards_service::assert_member` (what we're using) vs. requiring the caller to pass `board_id` explicitly on every column route**
+
+- Pros: `PATCH /columns/:id` and `DELETE /columns/:id` only need the column's own id in the URL — a client that already fetched a `BoardTree` and has a specific column's `id` in hand can act on it directly, with no need to also track and pass along which board it came from. This matches the "IDs don't need a parent in the URL to disambiguate them" reasoning from [design](/taskflow/en/rest-api/design/).
+- Cons: every `PATCH`/`DELETE` on a column now costs one extra `SELECT` (`find_column`) purely to discover its `board_id`, before the authorization check's own `SELECT` even runs — two round trips where a `board_id`-in-the-URL design would only need one. That's the same "authorization convenience vs. round trips" trade [design](/taskflow/en/rest-api/design/) already made for `boards::service` itself, applied one level down.
+
+**`create_column`'s position via `MAX(position) + 1.0` in Rust (what we're using) vs. a SQL `COALESCE(MAX(position), 0) + 1` computed inside the `INSERT`**
+
+- Pros: `repo::max_position` is a small, independently readable, independently testable function returning a plain `Option<f64>` — `service::create_column` decides what "no columns yet" (`None`) means (`1.0`) in ordinary Rust, not inside a SQL expression that has to be read right-to-left to understand. The two-query approach also matches `cards::service::create_card`'s identical pattern one lesson from now, keeping both resources' "append at the end" logic visually consistent.
+- Cons: two queries — one `SELECT MAX(position)`, one `INSERT` — instead of one query doing both, and a narrow theoretical race: two concurrent `create_column` calls on the same empty board could both read `MAX(position) = NULL` and both compute `1.0`, landing two new columns at the identical position. For TaskFlow's usage pattern (one person adding one column at a time, not a high-concurrency bulk-import path) that's an acceptable risk — the [indexes-ordering](/taskflow/en/database/indexes-ordering/) renormalization pass would clean up any resulting tie the next time it runs, exactly as it already does for float-precision exhaustion.
+
+## Build it
+
+### 1. `columns/model.rs`
+
+```rust
+pub use crate::boards::model::Column;
+```
+
+A single re-export, with nothing else in the file. `Column`'s canonical `#[derive(Serialize, FromRow)]` definition — `id`, `board_id`, `title`, `position` — lives in `boards::model`, covered in the previous lesson.
+
+### 2. `columns/repo.rs`
+
+```rust
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::error::AppResult;
+
+use super::model::Column;
+
+pub async fn find_column(db: &PgPool, id: Uuid) -> AppResult<Option<Column>> {
+    let column = sqlx::query_as::<_, Column>(
+        "SELECT id, board_id, title, position FROM columns WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(column)
+}
+
+pub async fn max_position(db: &PgPool, board_id: Uuid) -> AppResult<Option<f64>> {
+    let max: Option<f64> =
+        sqlx::query_scalar("SELECT MAX(position) FROM columns WHERE board_id = $1")
+            .bind(board_id)
+            .fetch_one(db)
+            .await?;
+
+    Ok(max)
+}
+
+pub async fn insert_column(
+    db: &PgPool,
+    id: Uuid,
+    board_id: Uuid,
+    title: &str,
+    position: f64,
+) -> AppResult<Column> {
+    let column = sqlx::query_as::<_, Column>(
+        "INSERT INTO columns (id, board_id, title, position) VALUES ($1, $2, $3, $4)
+         RETURNING id, board_id, title, position",
+    )
+    .bind(id)
+    .bind(board_id)
+    .bind(title)
+    .bind(position)
+    .fetch_one(db)
+    .await?;
+
+    Ok(column)
+}
+
+pub async fn update_title(db: &PgPool, id: Uuid, title: &str) -> AppResult<Option<Column>> {
+    let column = sqlx::query_as::<_, Column>(
+        "UPDATE columns SET title = $2 WHERE id = $1
+         RETURNING id, board_id, title, position",
+    )
+    .bind(id)
+    .bind(title)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(column)
+}
+
+pub async fn delete_column(db: &PgPool, id: Uuid) -> AppResult<bool> {
+    let result = sqlx::query("DELETE FROM columns WHERE id = $1")
+        .bind(id)
+        .execute(db)
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+```
+
+`max_position`'s `fetch_one`, not `fetch_optional` — `SELECT MAX(...)` over a table with zero matching rows still returns exactly one row, whose single column is SQL `NULL`. That's different from `find_column`'s `fetch_optional`, where zero rows means the query itself returns nothing to fetch.
+
+### 3. `columns/service.rs`
+
+```rust
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::{
+    boards::service as boards_service,
+    error::{AppError, AppResult},
+};
+
+use super::model::Column;
+use super::repo;
+
+pub async fn create_column(
+    db: &PgPool,
+    user_id: Uuid,
+    board_id: Uuid,
+    title: String,
+) -> AppResult<Column> {
+    boards_service::assert_member(db, user_id, board_id).await?;
+
+    let position = repo::max_position(db, board_id).await?.unwrap_or(0.0) + 1.0;
+    repo::insert_column(db, Uuid::new_v4(), board_id, &title, position).await
+}
+
+pub async fn update_column(
+    db: &PgPool,
+    user_id: Uuid,
+    column_id: Uuid,
+    title: String,
+) -> AppResult<Column> {
+    let column = repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    repo::update_title(db, column_id, &title)
+        .await?
+        .ok_or(AppError::NotFound)
+}
+
+pub async fn delete_column(db: &PgPool, user_id: Uuid, column_id: Uuid) -> AppResult<()> {
+    let column = repo::find_column(db, column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, column.board_id).await?;
+
+    if repo::delete_column(db, column_id).await? {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+`create_column` already has `board_id` from the URL (`POST /boards/:id/columns`), so it calls `assert_member` directly. `update_column` and `delete_column` only have a `column_id`, so they call `repo::find_column` first — a missing column is `AppError::NotFound` before authorization is even attempted, matching the `404`-before-`403` ordering [design](/taskflow/en/rest-api/design/) established.
+
+### 4. `columns/handlers.rs`
+
+```rust
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
+use serde::Deserialize;
+use uuid::Uuid;
+
+use crate::{auth::middleware::AuthUser, error::AppResult, state::AppState};
+
+use super::model::Column;
+use super::service;
+
+#[derive(Debug, Deserialize)]
+pub struct CreateColumnRequest {
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateColumnRequest {
+    pub title: String,
+}
+
+pub async fn create_column(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+    Json(body): Json<CreateColumnRequest>,
+) -> AppResult<(StatusCode, Json<Column>)> {
+    let column = service::create_column(&state.db, user_id, board_id, body.title).await?;
+    Ok((StatusCode::CREATED, Json(column)))
+}
+
+pub async fn update_column(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(column_id): Path<Uuid>,
+    Json(body): Json<UpdateColumnRequest>,
+) -> AppResult<Json<Column>> {
+    let column = service::update_column(&state.db, user_id, column_id, body.title).await?;
+    Ok(Json(column))
+}
+
+pub async fn delete_column(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(column_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    service::delete_column(&state.db, user_id, column_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+`create_column`'s `Path(board_id)` extracts the `:id` segment from `/boards/:id/columns` — the same path parameter name, `:id`, that `update_column`/`delete_column` extract from `/columns/:id` as a `column_id`. Axum doesn't care that both routes use the literal segment name `:id`; each handler's own `Path<Uuid>` binding decides what to call the extracted value.
+
+### 5. `columns/mod.rs`
+
+```rust
+pub mod handlers;
+pub mod model;
+pub mod repo;
+pub mod service;
+
+use axum::{
+    routing::{patch, post},
+    Router,
+};
+
+use crate::state::AppState;
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/boards/:id/columns", post(handlers::create_column))
+        .route(
+            "/columns/:id",
+            patch(handlers::update_column).delete(handlers::delete_column),
+        )
+}
+```
+
+### 6. Mount `columns::routes()` in `main.rs`
+
+```rust
+mod auth;
+mod boards;
+mod columns;
+mod config;
+mod db;
+mod error;
+mod state;
+
+let app = Router::new()
+    .route("/health", get(health))
+    .nest("/auth", auth::routes())
+    .merge(boards::routes())
+    .merge(columns::routes())
+    .layer(cors)
+    .with_state(state);
+```
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+Reusing `$TOKEN` and `$BOARD_ID` from the [boards](/taskflow/en/rest-api/boards/) lesson's verify section (re-create a board first if you deleted the previous one), create a column:
+
+```bash
+COLUMN_ID=$(curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"To Do"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+Create a second column and confirm it lands after the first:
+
+```bash
+curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"In Progress"}'
+```
+
+```json
+{"id":"...","board_id":"...","title":"In Progress","position":2.0}
+```
+
+Fetch the board tree — both columns now appear, in position order, each with an empty `cards` array:
+
+```bash
+curl -s http://localhost:8080/boards/$BOARD_ID -H "Authorization: Bearer $TOKEN"
+```
+
+Rename the first column:
+
+```bash
+curl -s -X PATCH http://localhost:8080/columns/$COLUMN_ID \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Backlog"}'
+```
+
+Delete it:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:8080/columns/$COLUMN_ID \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```
+204
+```
+
+## Recap
+
+You built the `columns` module — `model.rs` re-exporting `Column` from `boards::model`, `repo.rs`'s `MAX(position) + 1.0` insert-at-end query, `service.rs` resolving a column's `board_id` before delegating every authorization check to `boards::service::assert_member`, and three thin `handlers.rs` functions. `columns::routes()` merges into `main.rs` alongside `boards::routes()`. This is the first module in the course to add zero new authorization primitives — proof that `assert_member`/`assert_owner` from the boards lesson generalize cleanly to any resource that ultimately traces back to a board. Next, [cards](/taskflow/en/rest-api/cards/) follows the identical pattern one level deeper — a card's board is resolved via its column, not directly.

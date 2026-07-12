@@ -1,0 +1,435 @@
+---
+title: Labels
+description: Build labels/{model,repo,service,handlers,mod}.rs for label CRUD plus attach/detach — an idempotent ON CONFLICT DO NOTHING join, and the cross-board guard that stops a label from one board being attached to a card on another.
+sidebar:
+  order: 5
+---
+
+## What we're building
+
+The `labels` module: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, `mod.rs` under `taskflow/backend/api/src/labels/`. Four "plain" endpoints — create a label on a board, list a board's labels, delete a label — plus two relationship endpoints that don't return a resource at all: attach a label to a card, detach it. Unlike `columns` and `cards`, `Label` is a genuinely new struct defined in this module's own `model.rs` — it was never needed by `BoardTree`, so there was no reason to define it early in `boards::model`.
+
+`attach_label` and `detach_label` operate on `card_labels`, the many-to-many join table from [schema](/taskflow/en/database/schema/) — no `Card` or `Label` row is created, updated, or deleted by either endpoint, only a row in the join table.
+
+## Why
+
+`repo::attach`'s `INSERT ... ON CONFLICT (card_id, label_id) DO NOTHING` makes attaching a label **idempotent**: calling `POST /cards/:id/labels/:label_id` twice in a row for the same pair succeeds both times with `204`, rather than the second call failing on the composite primary key's unique constraint. That matters specifically because attach/detach are the two endpoints in this whole module without a request body — a frontend retrying a dropped network response (did that click register or not?) can safely resend the exact same request and get the exact same end state, which is the entire point of the idempotency principle already applied to `PUT`/`DELETE` semantics elsewhere in this course.
+
+`attach_label`'s cross-board check — confirming the label's `board_id` matches the card's board before inserting into `card_labels` — exists because nothing in the schema itself prevents attaching a label from board A to a card on board B; `card_labels` only has foreign keys to `cards(id)` and `labels(id)` individually, not a constraint tying them to the *same* board. Without this check in `service.rs`, any member of board A could attach board A's labels onto a card they can also reach on board B (if they're a member of both), silently polluting one board's cards with another board's taxonomy. This is the same class of "child resource reached through the wrong parent" gap a security review checks for on any nested-resource API — the fix here is one `if label.board_id != card_board { ... }` check, applied before the `INSERT` ever runs.
+
+## Pros & cons
+
+**`ON CONFLICT (card_id, label_id) DO NOTHING` for attach (what we're using) vs. checking existence first, then conditionally inserting**
+
+- Pros: one round trip, and — the same reasoning `register`'s unique-email handling used back in [handlers](/taskflow/en/auth/handlers/) — no race condition between two concurrent attach requests for the same card/label pair. Postgres's own composite primary key on `card_labels(card_id, label_id)` is the single source of truth for "is this pair already attached," checked atomically.
+- Cons: `repo::attach` can't distinguish "this pair was newly attached" from "this pair was already attached" in its return value — both cases return `Ok(())`. That's fine here, since `attach_label`'s handler returns `204` either way and the caller never needed to know which happened; a use case that *did* need to tell them apart (say, to show "already labeled" vs. "labeled!" toast text) would need `execute(...).await?.rows_affected()` inspected instead of discarded.
+
+**Rejecting a cross-board label with `404` (what we're using) vs. `403`**
+
+- Pros: from the caller's point of view, a label that exists but belongs to a board they can't attach it from *here* should look identical to a label that doesn't exist at all — exactly the same reasoning [design](/taskflow/en/rest-api/design/) already applied to a not-your-board resource in general. Returning `403` instead would confirm "yes, a label with this id exists, you're just not allowed to use it *this way*" — a small but real information leak about ids that exist outside the caller's own boards.
+- Cons: a legitimate API consumer debugging "why did my attach fail" sees the same `404` for "wrong id" and "right id, wrong board," and has to reason about which one applies — a `403` would be strictly more informative to a trusted client. TaskFlow accepts the less-informative response as the correct default for a public-facing API; an internal admin tool talking to the same backend could reasonably get a more detailed error through a separate, more trusted code path if that need ever arose.
+
+## Build it
+
+### 1. `labels/model.rs`
+
+```rust
+use serde::Serialize;
+use sqlx::FromRow;
+use uuid::Uuid;
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Label {
+    pub id: Uuid,
+    pub board_id: Uuid,
+    pub name: String,
+    pub color: String,
+}
+```
+
+### 2. `labels/repo.rs`
+
+```rust
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::error::AppResult;
+
+use super::model::Label;
+
+pub async fn insert_label(
+    db: &PgPool,
+    id: Uuid,
+    board_id: Uuid,
+    name: &str,
+    color: &str,
+) -> AppResult<Label> {
+    let label = sqlx::query_as::<_, Label>(
+        "INSERT INTO labels (id, board_id, name, color) VALUES ($1, $2, $3, $4)
+         RETURNING id, board_id, name, color",
+    )
+    .bind(id)
+    .bind(board_id)
+    .bind(name)
+    .bind(color)
+    .fetch_one(db)
+    .await?;
+
+    Ok(label)
+}
+
+pub async fn list_for_board(db: &PgPool, board_id: Uuid) -> AppResult<Vec<Label>> {
+    let labels = sqlx::query_as::<_, Label>(
+        "SELECT id, board_id, name, color FROM labels WHERE board_id = $1 ORDER BY name",
+    )
+    .bind(board_id)
+    .fetch_all(db)
+    .await?;
+
+    Ok(labels)
+}
+
+pub async fn find_label(db: &PgPool, id: Uuid) -> AppResult<Option<Label>> {
+    let label =
+        sqlx::query_as::<_, Label>("SELECT id, board_id, name, color FROM labels WHERE id = $1")
+            .bind(id)
+            .fetch_optional(db)
+            .await?;
+
+    Ok(label)
+}
+
+pub async fn delete_label(db: &PgPool, id: Uuid) -> AppResult<bool> {
+    let result = sqlx::query("DELETE FROM labels WHERE id = $1")
+        .bind(id)
+        .execute(db)
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn attach(db: &PgPool, card_id: Uuid, label_id: Uuid) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO card_labels (card_id, label_id) VALUES ($1, $2)
+         ON CONFLICT (card_id, label_id) DO NOTHING",
+    )
+    .bind(card_id)
+    .bind(label_id)
+    .execute(db)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn detach(db: &PgPool, card_id: Uuid, label_id: Uuid) -> AppResult<bool> {
+    let result = sqlx::query("DELETE FROM card_labels WHERE card_id = $1 AND label_id = $2")
+        .bind(card_id)
+        .bind(label_id)
+        .execute(db)
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+```
+
+`attach` returns `AppResult<()>` — no `bool`, unlike `detach`, which returns `bool` the same way `delete_label` does. That's intentional: `ON CONFLICT DO NOTHING` makes "0 rows written because it already existed" and "1 row written because it's new" both count as success from `attach`'s point of view, so there's no meaningful `bool` to report. `detach`'s `bool` still matters — `service::detach_label` uses it to distinguish "the pair existed and is now gone" (`204`) from "that pair was never attached" (`404`).
+
+### 3. `labels/service.rs`
+
+```rust
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::{
+    boards::service as boards_service,
+    cards, columns,
+    error::{AppError, AppResult},
+};
+
+use super::model::Label;
+use super::repo;
+
+pub async fn create_label(
+    db: &PgPool,
+    user_id: Uuid,
+    board_id: Uuid,
+    name: String,
+    color: String,
+) -> AppResult<Label> {
+    boards_service::assert_member(db, user_id, board_id).await?;
+    repo::insert_label(db, Uuid::new_v4(), board_id, &name, &color).await
+}
+
+pub async fn list_labels(db: &PgPool, user_id: Uuid, board_id: Uuid) -> AppResult<Vec<Label>> {
+    boards_service::assert_member(db, user_id, board_id).await?;
+    repo::list_for_board(db, board_id).await
+}
+
+pub async fn delete_label(db: &PgPool, user_id: Uuid, label_id: Uuid) -> AppResult<()> {
+    let label = repo::find_label(db, label_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    boards_service::assert_member(db, user_id, label.board_id).await?;
+
+    if repo::delete_label(db, label_id).await? {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+async fn card_board_id(db: &PgPool, card_id: Uuid) -> AppResult<Uuid> {
+    let card = cards::repo::find_card(db, card_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let column = columns::repo::find_column(db, card.column_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(column.board_id)
+}
+
+pub async fn attach_label(
+    db: &PgPool,
+    user_id: Uuid,
+    card_id: Uuid,
+    label_id: Uuid,
+) -> AppResult<()> {
+    let card_board = card_board_id(db, card_id).await?;
+    boards_service::assert_member(db, user_id, card_board).await?;
+
+    let label = repo::find_label(db, label_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if label.board_id != card_board {
+        return Err(AppError::NotFound);
+    }
+
+    repo::attach(db, card_id, label_id).await
+}
+
+pub async fn detach_label(
+    db: &PgPool,
+    user_id: Uuid,
+    card_id: Uuid,
+    label_id: Uuid,
+) -> AppResult<()> {
+    let card_board = card_board_id(db, card_id).await?;
+    boards_service::assert_member(db, user_id, card_board).await?;
+
+    if repo::detach(db, card_id, label_id).await? {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+`labels::service::card_board_id` duplicates the two-hop lookup `cards::service::card_board_id` already has — a small, deliberate repeat rather than making `cards::service`'s private helper `pub(crate)` and importing it. Both versions do the identical two queries; keeping `labels`'s copy local means `cards::service`'s helper can stay a private implementation detail, not part of `cards`'s public surface just because one other module happens to need the same two-hop lookup once.
+
+### 4. `labels/handlers.rs`
+
+```rust
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
+use serde::Deserialize;
+use uuid::Uuid;
+
+use crate::{auth::middleware::AuthUser, error::AppResult, state::AppState};
+
+use super::model::Label;
+use super::service;
+
+#[derive(Debug, Deserialize)]
+pub struct CreateLabelRequest {
+    pub name: String,
+    pub color: String,
+}
+
+pub async fn create_label(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+    Json(body): Json<CreateLabelRequest>,
+) -> AppResult<(StatusCode, Json<Label>)> {
+    let label = service::create_label(&state.db, user_id, board_id, body.name, body.color).await?;
+    Ok((StatusCode::CREATED, Json(label)))
+}
+
+pub async fn list_labels(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+) -> AppResult<Json<Vec<Label>>> {
+    let labels = service::list_labels(&state.db, user_id, board_id).await?;
+    Ok(Json(labels))
+}
+
+pub async fn delete_label(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(label_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    service::delete_label(&state.db, user_id, label_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn attach_label(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path((card_id, label_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    service::attach_label(&state.db, user_id, card_id, label_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn detach_label(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path((card_id, label_id)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    service::detach_label(&state.db, user_id, card_id, label_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+`attach_label` and `detach_label` both destructure `Path((card_id, label_id)): Path<(Uuid, Uuid)>` — Axum's `Path` extractor supports tuples for routes with more than one dynamic segment, matching `/cards/:id/labels/:label_id`'s two path parameters in URL order.
+
+### 5. `labels/mod.rs`
+
+```rust
+pub mod handlers;
+pub mod model;
+pub mod repo;
+pub mod service;
+
+use axum::{
+    routing::{delete, post},
+    Router,
+};
+
+use crate::state::AppState;
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/boards/:id/labels",
+            post(handlers::create_label).get(handlers::list_labels),
+        )
+        .route("/labels/:id", delete(handlers::delete_label))
+        .route(
+            "/cards/:id/labels/:label_id",
+            post(handlers::attach_label).delete(handlers::detach_label),
+        )
+}
+```
+
+### 6. Mount `labels::routes()` in `main.rs`
+
+```rust
+mod auth;
+mod boards;
+mod cards;
+mod columns;
+mod config;
+mod db;
+mod error;
+mod labels;
+mod state;
+
+let app = Router::new()
+    .route("/health", get(health))
+    .nest("/auth", auth::routes())
+    .merge(boards::routes())
+    .merge(columns::routes())
+    .merge(cards::routes())
+    .merge(labels::routes())
+    .layer(cors)
+    .with_state(state);
+```
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+Reusing `$TOKEN`, `$BOARD_ID`, and a fresh card:
+
+```bash
+COLUMN_ID=$(curl -s -X POST http://localhost:8080/boards/$BOARD_ID/columns \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"To Do"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+
+CARD_ID=$(curl -s -X POST http://localhost:8080/columns/$COLUMN_ID/cards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Ship labels"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+Create a label:
+
+```bash
+LABEL_ID=$(curl -s -X POST http://localhost:8080/boards/$BOARD_ID/labels \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"Bug","color":"#e11d48"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+Attach it to the card:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST \
+  http://localhost:8080/cards/$CARD_ID/labels/$LABEL_ID -H "Authorization: Bearer $TOKEN"
+```
+
+```
+204
+```
+
+Attach it again — same request, still `204`, confirming idempotency:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST \
+  http://localhost:8080/cards/$CARD_ID/labels/$LABEL_ID -H "Authorization: Bearer $TOKEN"
+```
+
+```
+204
+```
+
+List the board's labels:
+
+```bash
+curl -s http://localhost:8080/boards/$BOARD_ID/labels -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+[{"id":"...","board_id":"...","name":"Bug","color":"#e11d48"}]
+```
+
+Detach it:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE \
+  http://localhost:8080/cards/$CARD_ID/labels/$LABEL_ID -H "Authorization: Bearer $TOKEN"
+```
+
+```
+204
+```
+
+Detaching again correctly fails — the pair no longer exists:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE \
+  http://localhost:8080/cards/$CARD_ID/labels/$LABEL_ID -H "Authorization: Bearer $TOKEN"
+```
+
+```
+404
+```
+
+## Recap
+
+You built the `labels` module — the first module in the course with its own genuinely new `model.rs` struct rather than a re-export — covering plain label CRUD plus the two relationship endpoints, `attach_label` and `detach_label`, that operate on the `card_labels` join table instead of returning a resource. `repo::attach`'s `ON CONFLICT DO NOTHING` makes attaching idempotent, and `service::attach_label`'s cross-board check stops a label from one board being silently smuggled onto a card on another, rejecting the mismatch as `404` for the same "don't leak what exists" reasoning [design](/taskflow/en/rest-api/design/) established for every not-your-resource case in this module. That's every plain CRUD endpoint in the REST API done. Next, [move-reorder](/taskflow/en/rest-api/move-reorder/) builds the one endpoint this whole module has been leading up to — `PATCH /cards/:id/move`, and the fractional-position math from [indexes-ordering](/taskflow/en/database/indexes-ordering/) finally gets a real caller.

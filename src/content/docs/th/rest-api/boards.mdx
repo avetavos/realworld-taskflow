@@ -1,0 +1,491 @@
+---
+title: Boards
+description: สร้าง boards/{model,repo,service,handlers,mod}.rs — list/create/read/update/delete board, assert_member และ assert_owner, get_tree ที่ประกอบ BoardTree เต็ม และ mount boards::routes() ใน main.rs
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+module `boards`: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, และ `mod.rs` ใต้ `taskflow/backend/api/src/boards/` ห้า endpoint — list, create, read (เป็น tree เต็ม), rename, delete — บวกสอง function ที่ทุก module ในบทหลังของคอร์สนี้จะเรียก: `assert_member` และ `assert_owner`
+
+`model.rs` ในบทนี้มีมากกว่าแค่ `Board`: มันยังนิยาม `Column`, `Card`, `ColumnWithCards`, และ `BoardTree` ด้วย ทั้งที่ `columns` กับ `cards` ยังไม่มี module ของตัวเองเลย นี่คือความตั้งใจ ไม่ใช่ความผิดพลาด — `GET /boards/:id` คืน *tree ทั้งหมด* ดังนั้น `boards::model` ต้องรู้รูปร่างของ column-พร้อม-card ของมัน ก่อนที่ resource เหล่านั้นจะมี endpoint CRUD ของตัวเองในสองบทถัดไป
+
+## Why
+
+`assert_member` และ `assert_owner` อยู่ใน `boards::service` — ไม่ถูกก็อปไปซ้ำใน `columns`, `cards`, หรือ `labels` — เพราะทุก resource เหล่านั้นสุดท้ายก็ขึ้นกับ membership ของ board column เป็นของ board; card เป็นของ column ที่เป็นของ board; label เป็นของ board โดยตรง ไม่ว่า request จะเกี่ยวกับ resource ไหน คำถามจริง ๆ ก็คือ "แถว `board_members` ของ board นี้สำหรับ user นี้มีไหม" เสมอ ซึ่งเป็นสิ่งที่ `assert_member` เช็คพอดี สร้างมันครั้งเดียวที่นี่ หมายความว่า `columns::service`, `cards::service`, และ `labels::service` ในสามบทถัดไปไม่ต้อง implement มันซ้ำเลย — มัน resolve board id ของ *resource ของตัวเอง* แล้วเรียก `boards_service::assert_member(db, user_id, board_id)`
+
+`get_tree` ประกอบ `BoardTree` ใน service function เดียว — แทนที่ frontend จะยิง request แยกกันสี่ครั้ง (board แล้วก็ column ของมัน แล้วก็ card ของแต่ละ column) — ตรงกับวิธีใช้งาน Kanban board จริง ๆ: คุณไม่เคย render board โดยไม่มี column กับ card ของมัน ดังนั้น API ไม่ควรทำให้ client ต้องจ่าย round trip สี่ครั้งเพื่อเอาข้อมูลที่ต้องใช้ด้วยกันเสมอ
+
+## Pros & cons
+
+**`Column`/`Card` นิยามใน `boards::model`, re-export โดย `columns::model`/`cards::model` (ตัวที่เราใช้) เทียบกับนิยาม struct แต่ละตัวใน module resource ของตัวเอง แล้ว import เข้า `boards::model`**
+
+- ข้อดี: `BoardTree` มีอยู่ได้ตั้งแต่บทนี้ ซึ่งเป็นสิ่งที่ทำให้ `GET /boards/:id` — อาจเป็น read ที่สำคัญที่สุดในทั้ง API — ออกได้ในบท 2 แทนที่จะรอจนกว่า `columns` กับ `cards` จะมีทั้งคู่ มีนิยาม `Column` แค่จุดเดียว และ `Card` แค่จุดเดียวในทั้ง codebase — `columns/model.rs` และ `cards/model.rs` เป็น re-export บรรทัดเดียว (`pub use crate::boards::model::Column;`) ไม่ใช่นิยาม struct ที่สองที่แยกกันและอาจ drift ไม่ตรงกับสิ่งที่ `BoardTree` มีจริง
+- ข้อเสีย: `columns` กับ `cards` ต้องพึ่ง `boards` สำหรับ type หลักของตัวเอง ซึ่งกลับด้านความคาดหวังปกติที่ resource module เป็นเจ้าของ model ของตัวเอง — คนอ่าน `columns/model.rs` ครั้งแรกต้องตาม `pub use` หนึ่งจุดเพื่อไปหานิยามจริง นี่เป็น trade-off ที่ยุติธรรมสำหรับคอร์สที่สร้าง resource ตามลำดับการสอนแบบเฉพาะ — codebase ที่สร้างแบบ resource-first ตั้งแต่วันแรก (รู้ schema เต็มตั้งแต่ต้น) น่าจะเอา type แบบ read-model ที่ใช้ร่วมกันอย่าง `BoardTree` ไปไว้ใน `boards::model` เฉพาะ โดย*ไม่*เก็บนิยามหลักของ `Column`/`Card` ไว้ที่นั่นด้วย — แต่นั่นไม่ใช่ลำดับที่คอร์สนี้สร้าง
+
+**ประกอบ `BoardTree` ด้วย N+1 query — หนึ่งสำหรับ column, หนึ่งต่อ column สำหรับ card ของมัน (ตัวที่เราใช้) เทียบกับ query `JOIN` เดียวที่คืนแถวแบบ denormalized**
+
+- ข้อดี: `repo::find_columns` และ `repo::find_cards_for_column` เป็น function เล็ก ๆ ใช้ซ้ำได้อิสระ ทดสอบได้อิสระ — `find_cards_for_column` คือ query เดียวกับที่ endpoint `GET /columns/:id/cards` ในอนาคตจะใช้ ไม่ซ้ำซ้อนเลย ฝั่ง Rust (`service::get_tree`) ทำการประกอบด้วย loop ธรรมดา ไม่ต้องเขียน logic การจัดกลุ่มแถวเองให้ถูกต้อง
+- ข้อเสีย: สำหรับ board ที่มี 10 column, `get_tree` รัน 11 query แทนที่จะเป็น 1 — ต้นทุน N+1 query จริง ๆ สำหรับขนาดของ TaskFlow (column ไม่กี่อันต่อ board, `cards(column_id, position)` มี index จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/) ทำให้แต่ละ per-column query เร็ว) นี่เป็น trade-off ที่ยอมรับได้และง่าย ระบบที่ board หนักมากในโปรดักชันอาจดึง card ทั้งหมดของ board ใน query เดียวที่มี index แล้วจัดกลุ่มด้วย `column_id` ใน Rust แทน แลก round trip น้อยลงหนึ่งครั้งกับขั้นตอนสร้าง `HashMap` เพิ่มขึ้นหนึ่งขั้น
+
+## Build it
+
+### 1. `boards/model.rs`
+
+```rust
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use sqlx::FromRow;
+use uuid::Uuid;
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Board {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub title: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Column {
+    pub id: Uuid,
+    pub board_id: Uuid,
+    pub title: String,
+    pub position: f64,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Card {
+    pub id: Uuid,
+    pub column_id: Uuid,
+    pub title: String,
+    pub description: Option<String>,
+    pub position: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ColumnWithCards {
+    #[serde(flatten)]
+    pub column: Column,
+    pub cards: Vec<Card>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BoardTree {
+    #[serde(flatten)]
+    pub board: Board,
+    pub columns: Vec<ColumnWithCards>,
+}
+```
+
+`#[serde(flatten)]` บน `ColumnWithCards.column` และ `BoardTree.board` หมายความว่า JSON output มี `id`, `title`, ฯลฯ อยู่บน object ชั้นนอกโดยตรง — `{"id": "...", "title": "...", "cards": [...]}` — แทนที่จะซ้อน struct ชั้นในไว้ใต้ key `"column"` หรือ `"board"` ถ้าไม่มี `flatten` response จะเป็น `{"column": {"id": "..."}, "cards": [...]}` ลึกกว่าที่ frontend อยากใช้จริง ๆ หนึ่งชั้นโดยไม่จำเป็น
+
+### 2. `boards/repo.rs`
+
+```rust
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::error::AppResult;
+
+use super::model::{Board, Card, Column};
+
+pub async fn list_for_user(db: &PgPool, user_id: Uuid) -> AppResult<Vec<Board>> {
+    let boards = sqlx::query_as::<_, Board>(
+        "SELECT b.id, b.owner_id, b.title, b.created_at
+         FROM boards b
+         JOIN board_members m ON m.board_id = b.id
+         WHERE m.user_id = $1
+         ORDER BY b.created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
+
+    Ok(boards)
+}
+
+pub async fn insert_board(db: &PgPool, id: Uuid, owner_id: Uuid, title: &str) -> AppResult<Board> {
+    let board = sqlx::query_as::<_, Board>(
+        "INSERT INTO boards (id, owner_id, title) VALUES ($1, $2, $3)
+         RETURNING id, owner_id, title, created_at",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .bind(title)
+    .fetch_one(db)
+    .await?;
+
+    Ok(board)
+}
+
+pub async fn insert_owner_member(db: &PgPool, board_id: Uuid, user_id: Uuid) -> AppResult<()> {
+    sqlx::query("INSERT INTO board_members (board_id, user_id, role) VALUES ($1, $2, 'owner')")
+        .bind(board_id)
+        .bind(user_id)
+        .execute(db)
+        .await?;
+
+    Ok(())
+}
+
+pub async fn find_board(db: &PgPool, id: Uuid) -> AppResult<Option<Board>> {
+    let board = sqlx::query_as::<_, Board>(
+        "SELECT id, owner_id, title, created_at FROM boards WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(board)
+}
+
+pub async fn find_columns(db: &PgPool, board_id: Uuid) -> AppResult<Vec<Column>> {
+    let columns = sqlx::query_as::<_, Column>(
+        "SELECT id, board_id, title, position FROM columns WHERE board_id = $1 ORDER BY position",
+    )
+    .bind(board_id)
+    .fetch_all(db)
+    .await?;
+
+    Ok(columns)
+}
+
+pub async fn find_cards_for_column(db: &PgPool, column_id: Uuid) -> AppResult<Vec<Card>> {
+    let cards = sqlx::query_as::<_, Card>(
+        "SELECT id, column_id, title, description, position, created_at
+         FROM cards WHERE column_id = $1 ORDER BY position",
+    )
+    .bind(column_id)
+    .fetch_all(db)
+    .await?;
+
+    Ok(cards)
+}
+
+pub async fn update_title(db: &PgPool, id: Uuid, title: &str) -> AppResult<Option<Board>> {
+    let board = sqlx::query_as::<_, Board>(
+        "UPDATE boards SET title = $2 WHERE id = $1
+         RETURNING id, owner_id, title, created_at",
+    )
+    .bind(id)
+    .bind(title)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(board)
+}
+
+pub async fn delete_board(db: &PgPool, id: Uuid) -> AppResult<bool> {
+    let result = sqlx::query("DELETE FROM boards WHERE id = $1")
+        .bind(id)
+        .execute(db)
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn member_role(db: &PgPool, board_id: Uuid, user_id: Uuid) -> AppResult<Option<String>> {
+    let role: Option<String> =
+        sqlx::query_scalar("SELECT role FROM board_members WHERE board_id = $1 AND user_id = $2")
+            .bind(board_id)
+            .bind(user_id)
+            .fetch_optional(db)
+            .await?;
+
+    Ok(role)
+}
+```
+
+`insert_board` และ `insert_owner_member` เป็น function `repo.rs` สองตัวแยกกัน ไม่ใช่ตัวเดียว — `service::create_board` เรียกทั้งคู่ ตัวหลังต่อจากตัวแรก `delete_board`/`delete_column`/`delete_card` (บทนี้และสองบทถัดไป) ทั้งหมดตาม pattern `rows_affected() > 0` เดียวกัน: `DELETE` ไม่มีวัน error เมื่อแถวหายไปใน Postgres ดังนั้น row count คือสัญญาณเดียวที่มีเพื่อแยก "ลบแล้ว" ออกจาก "ไม่มีอะไรให้ลบตั้งแต่แรก"
+
+### 3. `boards/service.rs`
+
+```rust
+use sqlx::PgPool;
+use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+
+use super::model::{Board, BoardTree, ColumnWithCards};
+use super::repo;
+
+pub async fn assert_member(db: &PgPool, user_id: Uuid, board_id: Uuid) -> AppResult<()> {
+    repo::member_role(db, board_id, user_id)
+        .await?
+        .map(|_| ())
+        .ok_or(AppError::Forbidden)
+}
+
+pub async fn assert_owner(db: &PgPool, user_id: Uuid, board_id: Uuid) -> AppResult<()> {
+    match repo::member_role(db, board_id, user_id).await? {
+        Some(role) if role == "owner" => Ok(()),
+        _ => Err(AppError::Forbidden),
+    }
+}
+
+pub async fn list_boards(db: &PgPool, user_id: Uuid) -> AppResult<Vec<Board>> {
+    repo::list_for_user(db, user_id).await
+}
+
+pub async fn create_board(db: &PgPool, owner_id: Uuid, title: String) -> AppResult<Board> {
+    let board = repo::insert_board(db, Uuid::new_v4(), owner_id, &title).await?;
+    repo::insert_owner_member(db, board.id, owner_id).await?;
+    Ok(board)
+}
+
+pub async fn get_tree(db: &PgPool, user_id: Uuid, board_id: Uuid) -> AppResult<BoardTree> {
+    assert_member(db, user_id, board_id).await?;
+
+    let board = repo::find_board(db, board_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let columns = repo::find_columns(db, board_id).await?;
+
+    let mut columns_with_cards = Vec::with_capacity(columns.len());
+    for column in columns {
+        let cards = repo::find_cards_for_column(db, column.id).await?;
+        columns_with_cards.push(ColumnWithCards { column, cards });
+    }
+
+    Ok(BoardTree {
+        board,
+        columns: columns_with_cards,
+    })
+}
+
+pub async fn update_board(
+    db: &PgPool,
+    user_id: Uuid,
+    board_id: Uuid,
+    title: String,
+) -> AppResult<Board> {
+    assert_member(db, user_id, board_id).await?;
+    repo::update_title(db, board_id, &title)
+        .await?
+        .ok_or(AppError::NotFound)
+}
+
+pub async fn delete_board(db: &PgPool, user_id: Uuid, board_id: Uuid) -> AppResult<()> {
+    assert_owner(db, user_id, board_id).await?;
+    if repo::delete_board(db, board_id).await? {
+        Ok(())
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+```
+
+`update_board` ต้องการแค่ `assert_member` (สมาชิกคนไหนก็เปลี่ยนชื่อ board ได้) ในขณะที่ `delete_board` ต้องการ `assert_owner` — ความต่างที่ตั้งใจ ไม่ใช่การมองข้าม ตรงกับตารางใน [design](/taskflow/th/rest-api/design/): การเปลี่ยนชื่อย้อนกลับได้และความเสี่ยงต่ำ การลบพา column, card, และ label ทั้งหมดไปด้วยผ่านสาย `ON DELETE CASCADE` จาก [schema](/taskflow/th/database/schema/) ดังนั้นมีแค่ owner ที่สั่งมันได้
+
+### 4. `boards/handlers.rs`
+
+```rust
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
+use serde::Deserialize;
+use uuid::Uuid;
+
+use crate::{auth::middleware::AuthUser, error::AppResult, state::AppState};
+
+use super::model::{Board, BoardTree};
+use super::service;
+
+#[derive(Debug, Deserialize)]
+pub struct CreateBoardRequest {
+    pub title: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateBoardRequest {
+    pub title: String,
+}
+
+pub async fn list_boards(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+) -> AppResult<Json<Vec<Board>>> {
+    let boards = service::list_boards(&state.db, user_id).await?;
+    Ok(Json(boards))
+}
+
+pub async fn create_board(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<CreateBoardRequest>,
+) -> AppResult<(StatusCode, Json<Board>)> {
+    let board = service::create_board(&state.db, user_id, body.title).await?;
+    Ok((StatusCode::CREATED, Json(board)))
+}
+
+pub async fn get_board(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+) -> AppResult<Json<BoardTree>> {
+    let tree = service::get_tree(&state.db, user_id, board_id).await?;
+    Ok(Json(tree))
+}
+
+pub async fn update_board(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+    Json(body): Json<UpdateBoardRequest>,
+) -> AppResult<Json<Board>> {
+    let board = service::update_board(&state.db, user_id, board_id, body.title).await?;
+    Ok(Json(board))
+}
+
+pub async fn delete_board(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Path(board_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    service::delete_board(&state.db, user_id, board_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+```
+
+handler ทุกตัวในไฟล์นี้มีรูปร่างสามบรรทัดเหมือนกัน: extract `State<AppState>` กับ `AuthUser`, เรียก `service::` function ตัวเดียว, ห่อผลลัพธ์ ไม่มีตัวไหนแตะ `sqlx` หรือสร้าง `AppError` ตรง ๆ ทั้งสองอย่างเกิดขึ้นในชั้นล่างลงไปแล้ว
+
+### 5. `boards/mod.rs`
+
+```rust
+pub mod handlers;
+pub mod model;
+pub mod repo;
+pub mod service;
+
+use axum::{routing::get, Router};
+
+use crate::state::AppState;
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/boards",
+            get(handlers::list_boards).post(handlers::create_board),
+        )
+        .route(
+            "/boards/:id",
+            get(handlers::get_board)
+                .patch(handlers::update_board)
+                .delete(handlers::delete_board),
+        )
+}
+```
+
+`.route("/boards", get(...).post(...))` และ `.route("/boards/:id", get(...).patch(...).delete(...))` — เรียก `.route()` ครั้งเดียวต่อ path โดยเชื่อทุก HTTP method ที่ path นั้นตอบสนองเข้ากับ `MethodRouter` ตัวเดียวกัน ตรงกับตารางใน [design](/taskflow/th/rest-api/design/) เป๊ะ: สอง path ห้า endpoint
+
+### 6. Mount `boards::routes()` in `main.rs`
+
+อัปเดต chain `Router::new()` ใน `taskflow/backend/api/src/main.rs`:
+
+```rust
+mod auth;
+mod boards;
+mod config;
+mod db;
+mod error;
+mod state;
+
+let app = Router::new()
+    .route("/health", get(health))
+    .nest("/auth", auth::routes())
+    .merge(boards::routes())
+    .layer(cors)
+    .with_state(state);
+```
+
+`.merge(boards::routes())` ไม่ใช่ `.nest(...)` — `boards::routes()` สร้าง path ของตัวเองเป็น absolute อยู่แล้ว (`/boards`, `/boards/:id`) ต่างจาก `auth::routes()` ที่สร้าง path แบบ relative (`/register`) ที่ต้องการ `.nest("/auth", ...)` เพื่อเติม prefix `Router::merge` รวมสอง router ที่ตกลง path เต็มของตัวเองอยู่แล้วเข้าด้วยกัน ทุก module ที่เหลือของคอร์สนี้ (`columns`, `cards`, `labels`) ตาม pattern ของ `boards` และถูก `.merge` แบบเดียวกัน
+
+## Verify
+
+```bash
+cargo check -p api
+```
+
+เปิด stack ขึ้นมาและเอา token มา (จาก [handlers](/taskflow/th/auth/handlers/)):
+
+```bash
+cd taskflow/infra && docker compose up -d db redis
+cd ../backend && cargo run -p api &
+
+TOKEN=$(curl -s -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"ada@example.com","password":"correct horse battery staple","display_name":"Ada"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+```
+
+สร้าง board:
+
+```bash
+BOARD_ID=$(curl -s -X POST http://localhost:8080/boards \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Sprint 12"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+```
+
+List board — ตัวที่เพิ่งสร้างกลับมา พร้อมผู้เรียกเป็นสมาชิก `owner` โดยปริยาย:
+
+```bash
+curl -s http://localhost:8080/boards -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+[{"id":"...","owner_id":"...","title":"Sprint 12","created_at":"..."}]
+```
+
+ดึง tree — `columns` ว่างเปล่า เพราะยังไม่มีอันไหนเลย:
+
+```bash
+curl -s http://localhost:8080/boards/$BOARD_ID -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{"id":"...","owner_id":"...","title":"Sprint 12","created_at":"...","columns":[]}
+```
+
+เปลี่ยนชื่อ:
+
+```bash
+curl -s -X PATCH http://localhost:8080/boards/$BOARD_ID \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Sprint 12 (final)"}'
+```
+
+ยืนยันว่าคนแปลกหน้าเห็นมันไม่ได้ — สมัคร user คนที่สองแล้วลอง `GET` เดียวกัน:
+
+```bash
+TOKEN2=$(curl -s -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"grace@example.com","password":"correct horse battery staple","display_name":"Grace"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')
+
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/boards/$BOARD_ID \
+  -H "Authorization: Bearer $TOKEN2"
+```
+
+```
+403
+```
+
+ลบมัน ในฐานะ owner:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:8080/boards/$BOARD_ID \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```
+204
+```
+
+## Recap
+
+คุณสร้าง module `boards` ครบวงจร: `model.rs` (รวม `Column`, `Card`, และ `BoardTree` ก่อน module resource ของตัวเอง เพื่อให้ tree endpoint มีได้ตั้งแต่ตอนนี้), SQLx query ของ `repo.rs` ต่อ `boards` กับ `board_members`, `assert_member`/`assert_owner` ของ `service.rs` — สอง function ที่ resource module ที่เหลือทุกตัวจะเรียก — และ handler บาง ๆ ห้าตัวของ `handlers.rs` `boards::routes()` รวมเข้า router ของ `main.rs` ให้ TaskFlow มี REST resource ที่ authorize จริงตัวแรก: list, create, read-as-tree, rename, และ delete ที่ owner เท่านั้นทำได้ ถัดไป เราจะสร้าง [columns](/taskflow/th/rest-api/columns/) — module แรกที่ใช้ `assert_member` ซ้ำแทนที่จะนิยามของตัวเอง
