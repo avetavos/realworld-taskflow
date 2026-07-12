@@ -1,0 +1,177 @@
+---
+title: Prerequisites
+description: Set up your macOS machine for TaskFlow — install and verify Rust, Node, Docker, sqlx-cli, psql, and redis-cli, with the exact commands and expected output.
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+In this lesson we get your **macOS** machine ready to build TaskFlow. No application code yet — just the toolchain. By the end you'll have every tool installed and, more importantly, **verified** with a command whose output you can compare against what's printed here.
+
+Here's the checklist we'll work through:
+
+- [ ] **Rust** (`rustup` + `cargo`) — compile and run the backend
+- [ ] **Node 20+** — run the Astro frontend and its tooling
+- [ ] **Docker Desktop** — run PostgreSQL, Redis, and eventually the whole stack
+- [ ] **sqlx-cli** — create the database and run migrations
+- [ ] **psql** — inspect PostgreSQL from the terminal
+- [ ] **redis-cli** — inspect Redis from the terminal
+
+## Why
+
+Version drift is the silent killer of "works on my machine." Pinning down the toolchain now — and confirming each tool actually runs — means that when a later module says "run `cargo build`" or "apply the migration," it just works. Verifying output up front turns "it's installed, I think" into "it's installed, I checked."
+
+## Pros & cons
+
+**Pros**
+
+- Catches setup problems now, in a five-minute lesson, instead of mid-way through the backend module.
+- Every command has an **expected output**, so you're never guessing.
+- Using Docker for PostgreSQL and Redis keeps your host clean — no native database daemons to manage.
+
+**Cons**
+
+- It's the least exciting lesson: install, verify, repeat.
+- Docker Desktop is a sizable download and needs a fair amount of RAM.
+- Homebrew is assumed; if you don't have it, install it first from [brew.sh](https://brew.sh).
+
+## Set it up
+
+Work top to bottom. After each install, run its verify command and match the output before moving on.
+
+### 1. Rust — `rustup` and `cargo`
+
+Rust is the language of the TaskFlow backend. `rustup` is the toolchain installer/manager; `cargo` is Rust's build tool and package manager. Install from [rustup.rs](https://rustup.rs):
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Accept the defaults, then reload your shell (`source "$HOME/.cargo/env"` or open a new terminal). Verify:
+
+```sh
+rustc --version
+cargo --version
+```
+
+Expected output (versions will differ, format won't):
+
+```
+rustc 1.79.0 (129f3b996 2024-06-10)
+cargo 1.79.0 (ffa9cf99a 2024-06-03)
+```
+
+### 2. Node 20+
+
+Node runs the Astro frontend's dev server and build tooling. TaskFlow needs **Node 20 or newer**. Install via Homebrew (or [nodejs.org](https://nodejs.org), or a version manager like `nvm`):
+
+```sh
+brew install node
+```
+
+Verify:
+
+```sh
+node -v
+npm -v
+```
+
+Expected output (the major version must be **20 or higher**):
+
+```
+v20.11.1
+10.2.4
+```
+
+### 3. Docker Desktop
+
+Docker runs PostgreSQL and Redis during development, and packages the whole stack for the Docker module later. Install **Docker Desktop for Mac** from [docker.com](https://www.docker.com/products/docker-desktop/) (or `brew install --cask docker`), then launch it once so the engine is running.
+
+Verify both the engine and the Compose plugin:
+
+```sh
+docker --version
+docker compose version
+```
+
+Expected output:
+
+```
+Docker version 27.0.3, build 7d4bcd8
+Docker Compose version v2.28.1
+```
+
+If `docker` errors with "Cannot connect to the Docker daemon," make sure the Docker Desktop app is actually running (whale icon in the menu bar).
+
+### 4. sqlx-cli
+
+`sqlx-cli` is the companion CLI for the SQLx crate. We'll use it to create the database and run migrations from module 2 onward. Install it with Cargo, limiting features to what TaskFlow needs (PostgreSQL over native TLS):
+
+```sh
+cargo install sqlx-cli --no-default-features --features native-tls,postgres
+```
+
+Verify:
+
+```sh
+sqlx --version
+```
+
+Expected output:
+
+```
+sqlx-cli 0.8.2
+```
+
+### 5. psql and redis-cli
+
+These are the command-line clients for inspecting the two data stores directly — handy for debugging throughout the course. You have two easy options.
+
+**Option A — via Docker (nothing extra to install).** Once a container is running (later modules), you exec into it:
+
+```sh
+docker exec -it taskflow-db psql -U postgres
+docker exec -it taskflow-redis redis-cli
+```
+
+**Option B — install the clients natively via Homebrew.** This lets you connect from your host without exec-ing into a container:
+
+```sh
+brew install libpq redis
+brew link --force libpq   # puts psql on your PATH
+```
+
+Verify:
+
+```sh
+psql --version
+redis-cli --version
+```
+
+Expected output:
+
+```
+psql (PostgreSQL) 16.3
+redis-cli 7.2.5
+```
+
+Either option is fine. Option A keeps your host minimal; Option B is more convenient day to day. You can do both.
+
+## Verify
+
+Run this final sweep. Every line should print a version, and no command should be "not found":
+
+```sh
+rustc --version && cargo --version && \
+node -v && \
+docker --version && docker compose version && \
+sqlx --version && \
+psql --version && redis-cli --version
+```
+
+If every command answers with a version string — and Node is 20+ — your machine is ready.
+
+## Recap
+
+Your macOS toolchain is installed and, crucially, **verified**: Rust (`rustc`/`cargo`) for the backend, Node 20+ for the Astro frontend, Docker Desktop (engine + Compose) to run the services, `sqlx-cli` for migrations, and `psql`/`redis-cli` to inspect the data stores. That's the end of Module 0. Next up is [Module 1 · Setup & Tooling](/taskflow/en/setup/), where we scaffold the actual project.

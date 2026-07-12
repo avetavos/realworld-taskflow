@@ -1,0 +1,82 @@
+---
+title: Overview
+description: Meet TaskFlow, the realtime multi-user Kanban board you'll build in this course, and see the full feature list and course map.
+sidebar:
+  order: 1
+---
+
+## What we're building
+
+TaskFlow is a **realtime, multi-user Kanban board** — think of a stripped-down Trello that you build yourself, from an empty repo to a running Docker Compose stack.
+
+Picture the experience. You open the app and **log in**. You land on a **board**: three columns, *To Do*, *In Progress*, and *Done*, each holding a stack of **cards**. You grab a card, drag it from *To Do* into *In Progress*, and drop it. It snaps into place. At the same moment, a teammate looking at the same board on their own laptop sees that card **glide across the columns on its own** — no refresh, no "reload to see changes." That live, shared, everyone-sees-it-instantly feeling is the whole point of TaskFlow, and it's what makes the project worth building end to end.
+
+By the end you'll have a real system: a Rust backend, a PostgreSQL database, a Redis cache and message bus, an Astro frontend with one interactive island, and a Docker Compose file that brings it all up with one command.
+
+## Why
+
+Most tutorials teach one tool in isolation — "here's Axum," "here's WebSocket," "here's Redis" — and leave you to figure out how they fit together. TaskFlow is the opposite. Every piece exists because the product needs it:
+
+- A board needs to be **stored**, so we reach for PostgreSQL.
+- A board needs to be **fast**, so we add a Redis read cache.
+- A board needs to be **shared live**, so we add WebSocket plus Redis pub/sub.
+- A board needs to be **usable**, so we build an Astro frontend with a drag-and-drop island.
+
+Building one coherent product forces you to make the same decisions a real team makes, and to see how the tools connect.
+
+## Pros & cons
+
+**Pros**
+
+- You finish with a portfolio-grade project, not a folder of disconnected snippets.
+- Every concept is grounded in a concrete feature you can see working.
+- The stack (Rust, PostgreSQL, Redis, Astro, Docker) mirrors real production systems.
+
+**Cons**
+
+- It's broader than a single-topic tutorial: you touch backend, database, cache, realtime, and frontend.
+- Some early modules build foundations before you see visible payoff on screen.
+- Rust has a steeper learning curve than a scripting language — but we adapt the Learn Hub Rust course to smooth it out.
+
+## Build it
+
+Here's the full feature set you'll ship:
+
+- **Register & login** with JWT-based authentication.
+- **Boards** owned by a user — create, rename, delete.
+- **Columns** within a board — the vertical lanes (*To Do*, *In Progress*, *Done*).
+- **Cards** within a column — the individual tasks.
+- **Drag & reorder** cards within and across columns, with the new order persisted.
+- **Labels** on cards for lightweight categorization.
+- **Realtime multi-user sync** — every change is pushed live to all connected clients viewing the board.
+
+And here's the **course map**. Each build module adapts a Learn Hub course to one slice of the project.
+
+| Module | What you build | Learn Hub course it adapts |
+| --- | --- | --- |
+| 1 · Setup & Tooling | Toolchain install and a scaffolded Rust workspace + Astro app | Docker / Rust |
+| 2 · Database Design | The PostgreSQL schema: users, boards, columns, cards, labels, with migrations | PostgreSQL |
+| 3 · Backend Foundations | The Axum server: routing, config, state, and error handling | Rust / Rust for TypeScript developers |
+| 4 · Authentication | Register/login, JWT issuing, and Redis-backed session/token storage | Rust + Redis + REST API Design |
+| 5 · REST API | CRUD endpoints for boards, columns, and cards | REST API Design |
+| 6 · Caching | A Redis read cache in front of PostgreSQL | Redis |
+| 7 · Realtime | WebSocket endpoint + Redis pub/sub backplane for live sync | WebSocket Design |
+| 8 · Frontend | The Astro static shell that renders the board | Astro |
+| 9 · The Kanban Island | The Preact island: drag & drop plus live WebSocket sync | Astro |
+| 10 · Testing | Automated tests for the Rust backend | Rust testing |
+| 11 · Docker & Compose | Dockerfiles and a Compose stack (db, redis, backend, frontend) | Docker |
+| 12 · Wrap-up | Review, and where to take TaskFlow next | — |
+
+## Verify
+
+You're ready to move on when you can answer these in your own words:
+
+- What does TaskFlow do, and what makes it "realtime"?
+- Can you name the five stored entities (users, boards, columns, cards, labels)?
+- Can you point to which module builds each feature you care about most?
+
+If yes, head to the [architecture](/taskflow/en/introduction/architecture/) to see how the pieces fit together.
+
+## Recap
+
+TaskFlow is a realtime, multi-user Kanban board you'll build end to end with Rust, PostgreSQL, Redis, and Astro. You now know the full feature list — auth, boards, columns, cards, drag-and-reorder, labels, and live sync — and how the twelve build modules map onto the Learn Hub courses they adapt. Next, we'll look at the system architecture.
