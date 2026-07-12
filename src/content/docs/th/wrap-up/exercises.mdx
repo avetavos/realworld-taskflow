@@ -1,0 +1,56 @@
+---
+title: แบบฝึกหัดต่อยอด
+description: แปดวิธีที่เป็นรูปธรรมในการต่อยอด TaskFlow ตั้งแต่ card activity log ง่าย ๆ ไปจนถึง optimistic-concurrency conflict resolution บนการย้าย card ที่ยาก — แต่ละข้อจงใจให้นำ pattern ที่คุณสร้างไว้แล้วกลับมาใช้ซ้ำ (Redis pub/sub event, cache-aside key, การเช็คที่ service layer) เพื่อให้คุณต่อยอดระบบได้โดยไม่ต้องฝืนกับมัน
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+TaskFlow ใช้งานได้ แต่มันจงใจยังไม่เสร็จสมบูรณ์ — ยังมีส่วนของโปรดักต์ที่เห็นได้ชัดอีกมากที่ต้องเพิ่ม และทุกส่วนของมันคือโอกาสในการนำ pattern ที่คุณสร้างไว้แล้วกลับมาใช้ซ้ำ ด้านล่างคือแบบฝึกหัดต่อยอดแปดข้อ เรียงคร่าว ๆ จากง่ายไปยาก แต่ละข้อเป็นฟีเจอร์จริงพร้อมคำแนะนำหนึ่งถึงสองประโยค ไม่ใช่การพาทำแบบละเอียด — จุดประสงค์คือให้ *คุณ* ตัดสินใจว่าโค้ดควรอยู่ตรงไหน โดยใช้โมดูลที่คุณเขียนไว้แล้วเป็นแผนที่
+
+## Why
+
+วิธีที่ดีที่สุดในการรู้ว่าคุณเข้าใจสถาปัตยกรรมจริง ๆ คือการต่อยอดมันโดยไม่มีทูทอเรียลคอยจับมือ แบบฝึกหัดแต่ละข้อด้านล่างถูกเลือกมาเพราะมันบังคับให้คุณย้อนกลับไปผ่านรอยต่อเฉพาะจุดของระบบ — Redis pub/sub event ใหม่, cache key ใหม่ที่ต้อง invalidate, service-layer guard ใหม่, frontend reducer case ใหม่ — ดังนั้นคุณจึงไม่ได้เรียน pattern ใหม่ แต่กำลังพิสูจน์ว่าคุณเป็นเจ้าของ pattern จากคอร์สนี้จริง
+
+## Build it
+
+### 1. Card activity log (easy)
+
+เพิ่มตาราง `activity` (card id, actor, verb, timestamp) แล้วเขียนหนึ่งแถวทุกครั้งที่ card ถูกสร้าง ย้าย หรือแก้ไข ยิง event `activity.created` ผ่าน [redis-backplane](/taskflow/th/realtime/redis-backplane/) ควบคู่ไปกับการเปลี่ยนแปลงที่ทำให้เกิดมัน เพื่อให้ activity feed ในอนาคตแสดงผลแบบสดได้ เริ่มจากแบบอ่านอย่างเดียวก่อน: endpoint ที่คืน activity N รายการล่าสุดของบอร์ด
+
+### 2. Due dates and overdue highlight (easy)
+
+เพิ่มคอลัมน์ `due_at` ที่เป็น nullable ลงใน `cards` รับค่ามันใน handler สร้าง/อัปเดตจาก [cards](/taskflow/th/rest-api/cards/) และใส่มันไว้ใน payload ของ card ฝั่ง frontend ให้ component ของ card ใน [drag-drop](/taskflow/th/kanban-island/drag-drop/) แสดงสไตล์ "overdue" เมื่อ `due_at` เป็นเวลาในอดีต ไม่มี infrastructure ใหม่ — นี่เป็นแบบฝึกหัด schema-บวก-render ล้วน ๆ ไว้อุ่นเครื่อง
+
+### 3. Card comments with realtime (medium)
+
+เพิ่มตาราง `comments` ที่ key ด้วย card id, endpoint `POST /cards/:id/comments` และ event `comment.created` บน channel ของบอร์ด เพื่อให้หน้ารายละเอียด card ที่เปิดอยู่อัปเดตแบบสด — ก็คือเส้นทาง [ws-endpoint](/taskflow/th/realtime/ws-endpoint/) → [live-sync](/taskflow/th/kanban-island/live-sync/) ที่คุณสร้างไว้สำหรับการย้าย card นั่นเอง เอามาใช้กับ entity ตัวที่สอง นำแนวคิด reconcile-by-id จาก [live-sync](/taskflow/th/kanban-island/live-sync/) กลับมาใช้ซ้ำ
+
+### 4. Full-text search over cards (medium)
+
+เพิ่มคอลัมน์ `tsvector` ของ Postgres (หรือแบบ generated) ที่คร่อม title และ description ของ card, index แบบ GIN และ endpoint `GET /boards/:id/search?q=` ที่จัดอันดับผลลัพธ์ด้วย `ts_rank` นี่คือก้าวถัดไปตามธรรมชาติจากงาน indexing ใน [indexes-ordering](/taskflow/th/database/indexes-ordering/) — วินัยเดิม index ชนิดใหม่ ตัดสินใจว่าผลลัพธ์ควร cache ผ่าน [cache-reads](/taskflow/th/caching/cache-reads/) ได้ หรือเฉพาะเจาะจงกับ query เกินกว่าจะคุ้ม
+
+### 5. Board roles and RBAC (medium–hard)
+
+เพิ่มตาราง `board_members` ที่มี role ต่อผู้ใช้ (owner, editor, viewer) แล้วบังคับใช้มันที่ service layer — viewer `GET` ได้แต่ `PATCH` ไม่ได้ มีแต่ owner เท่านั้นที่ลบได้ วางการเช็คไว้ตรงที่ [middleware](/taskflow/th/auth/middleware/) วาง authentication ไว้แล้ว เพื่อให้ทุก handler ที่ scope กับบอร์ดผ่าน authorization gate เดียว แทนที่จะกระจายการเช็ค `if role ==` ไปทั่ว [boards](/taskflow/th/rest-api/boards/), [columns](/taskflow/th/rest-api/columns/) และ [cards](/taskflow/th/rest-api/cards/)
+
+### 6. Column and card creation UI (medium–hard)
+
+ตอนนี้ island seed columns และ cards ผ่าน `curl` ซึ่ง [compose-full](/taskflow/th/docker/compose-full/) ชี้ไว้ว่าเป็นขอบเขตจริงของคอร์ส ปิดช่องนี้: เพิ่มฟอร์ม "add column" และ "add card" ลงใน Kanban island จาก [drag-drop](/taskflow/th/kanban-island/drag-drop/) โดย post ไปยัง endpoint จาก [columns](/taskflow/th/rest-api/columns/) และ [cards](/taskflow/th/rest-api/cards/) ด้วย pattern optimistic-แล้ว-reconcile แบบเดียวกับที่การลากใช้อยู่ เพื่อให้ item ใหม่ปรากฏทันทีแล้วค่อยซิงก์
+
+### 7. Playwright e2e for two-tab live sync (hard)
+
+เดโมชูโรงของคอร์ส — ลาก card ในแท็บหนึ่ง แล้วดูมันย้ายในแท็บที่สอง — ถูกตรวจด้วยมือมาตลอด ทำให้เป็นอัตโนมัติ: Playwright test ที่เปิด browser context สองตัวบนบอร์ดเดียวกัน ลาก card ในตัวแรก แล้ว assert ว่ามันย้ายในตัวที่สองภายใน timeout นี่คือส่วนเติมเต็มระดับ end-to-end ให้กับ [frontend-tests](/taskflow/th/testing/frontend-tests/) ระดับ unit และมันได้ใช้งานเส้นทาง WebSocket จริง ไม่ใช่ mock
+
+### 8. Optimistic-concurrency conflict resolution on moves (hard)
+
+ทุกวันนี้ ผู้ใช้สองคนที่ลาก card ใบเดียวกันพร้อมกันจะแข่งกัน — last write wins แบบเงียบ ๆ เพิ่มคอลัมน์ `version` (หรือ `updated_at`) ลงใน `cards` กำหนดให้ client ส่ง version ที่มันเห็นมา แล้วปฏิเสธการย้ายที่ version ล้าสมัยด้วย `409 Conflict` จาก [error-handling](/taskflow/th/backend-foundations/error-handling/) จากนั้นจัดการ 409 นั้นฝั่ง frontend: ย้อน optimistic move จาก [drag-drop](/taskflow/th/kanban-island/drag-drop/) กลับ แล้ว re-fetch นี่ยากที่สุดเพราะมันแตะทั้ง schema, service layer, error type *และ* optimistic-UI reducer พร้อมกัน — ครบทั้งความกว้างของสแตก
+
+## Verify
+
+คุณไม่จำเป็นต้องทำครบทั้งแปดข้อ เลือกสองข้อ — ในอุดมคติคือข้อจากฝั่งง่ายไว้สร้างแรงส่ง และข้อจากฝั่งยากไว้ยืดตัว — แล้วปฏิบัติกับแต่ละข้อแบบเดียวกับที่คอร์สปฏิบัติกับโมดูลของมันเอง: เขียน migration ก่อน เพิ่ม `#[sqlx::test]` จาก [backend-tests](/taskflow/th/testing/backend-tests/) ที่พิสูจน์พฤติกรรมใหม่ แล้วค่อยต่อ frontend ถ้าฟีเจอร์ใหม่ของคุณนำ event, cache key หรือ service guard เดิมกลับมาใช้ซ้ำ แทนที่จะประดิษฐ์ตัวขนานขึ้นมาใหม่ แสดงว่าคุณต่อยอดสถาปัตยกรรมได้ถูกต้องแล้ว
+
+## Recap
+
+แบบฝึกหัดต่อยอดแปดข้อ ง่ายไปยาก: card activity log พร้อม event `activity.created`, due dates พร้อม overdue highlight, card comments แบบเรียลไทม์, Postgres full-text search, board roles/RBAC ที่ service layer, UI สร้าง column/card, Playwright test สำหรับ live-sync สองแท็บ และ optimistic-concurrency conflict resolution บนการย้าย แต่ละข้อจงใจพาคุณย้อนกลับไปผ่านรอยต่อที่คุณสร้างไว้แล้ว ต่อไป: TaskFlow จะไปทางไหนต่อจากนี้ และ Real-World Projects อื่น ๆ

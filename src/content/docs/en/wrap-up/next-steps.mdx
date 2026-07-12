@@ -1,0 +1,47 @@
+---
+title: Where to Go Next
+description: TaskFlow runs locally on Docker Compose — taking it to production (Terraform/Terragrunt, Kubernetes, Datadog, Keycloak, GrowthBook) is the CloudDeploy project, and the other Learn Hub Real-World Projects (DevBlog, ShopMicro, FitTrack, OfflineNotes) each build a different kind of system end to end.
+sidebar:
+  order: 3
+---
+
+## What's next
+
+You've built TaskFlow end to end, and it runs — but it runs on *your* machine, from `docker compose up`. The gap between "it works on Compose" and "it's serving real users on real infrastructure" is its own large body of engineering, and it's deliberately not part of this course. This page is the handoff: where to take TaskFlow for production, and where to go for the next kind of system entirely.
+
+## Why
+
+TaskFlow's scope was the *product* — the backend, database, cache, realtime layer, and frontend that make a Kanban board work. Deployment is a different discipline with its own tools (infrastructure as code, orchestration, observability, secrets, feature flags), and folding it into this course would have doubled its length and blurred its focus. Keeping the two separate is intentional: you finish TaskFlow understanding the application deeply, then pick up production concerns as their own subject.
+
+## Build it
+
+### Deploy it for real — the CloudDeploy project
+
+Taking a system like TaskFlow to production is exactly what the **CloudDeploy** project covers, and it's the natural sequel. Where TaskFlow gave you an app and a Compose file, CloudDeploy gives you the path to running that class of app on real infrastructure:
+
+- **Terraform / Terragrunt** — provision the infrastructure (network, database, cluster) as code, with Terragrunt keeping environments DRY.
+- **Kubernetes** — run the backend and frontend as orchestrated workloads instead of local containers, with the healthchecks you already wrote in [compose-full](/taskflow/en/docker/compose-full/) becoming readiness and liveness probes.
+- **Datadog** — turn the tracing you set up in [config-tracing](/taskflow/en/backend-foundations/config-tracing/) into real production observability: dashboards, alerts, and traces across services.
+- **Keycloak** — graduate from the hand-rolled JWT auth of [jwt](/taskflow/en/auth/jwt/) to a managed identity provider with OIDC, when you need SSO and real user management.
+- **GrowthBook** — add feature flags and experimentation, so you can ship changes to TaskFlow behind a flag instead of all at once.
+
+If you want TaskFlow on the internet rather than on localhost, CloudDeploy is where you go.
+
+### Build a different kind of system — the other Real-World Projects
+
+TaskFlow is one of the Learn Hub **Real-World Projects** — each builds a complete, different system end to end, so a second one stretches you across a stack you didn't touch here. In the Real-World Projects section of the Learn Hub roadmap you'll find:
+
+- **DevBlog** — a content-driven blogging platform: a different shape of CRUD, rendering, and SEO where TaskFlow was realtime-and-interactive.
+- **ShopMicro** — an e-commerce system built as microservices, so you meet service boundaries, inter-service communication, and distributed data instead of TaskFlow's single backend.
+- **FitTrack** — a fitness tracking app with a mobile-first frontend and time-series data, a different data model and client story entirely.
+- **OfflineNotes** — a notes app built offline-first, where the hard problem is local storage and sync/conflict resolution on the *client* — a fascinating contrast to TaskFlow's server-authoritative realtime.
+
+Each is a self-contained build like this one. Pick the one whose problem sounds least familiar — that's where you'll learn the most.
+
+## Verify
+
+You're ready to move on from TaskFlow when you can do two things: point to how you'd deploy it (CloudDeploy's Terraform → Kubernetes → observability path), and name which of the other Real-World Projects tackles a problem you haven't solved yet. If both are clear, you've gotten everything this course had to give.
+
+## Recap
+
+TaskFlow runs on Docker Compose; taking it to production — Terraform/Terragrunt, Kubernetes, Datadog, Keycloak, GrowthBook — is the **CloudDeploy** project, the natural sequel that reuses your healthchecks, tracing, and auth as production concerns. For a different kind of system entirely, the other Learn Hub Real-World Projects — **DevBlog**, **ShopMicro**, **FitTrack**, and **OfflineNotes** — each build one end to end. That's the end of TaskFlow. You built the whole thing; now go run it, extend it, or build the next one.

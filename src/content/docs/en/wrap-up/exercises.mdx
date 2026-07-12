@@ -1,0 +1,56 @@
+---
+title: Extension Exercises
+description: Eight concrete ways to extend TaskFlow, from an easy card activity log to hard optimistic-concurrency conflict resolution on card moves — each one deliberately reuses a pattern you already built (a Redis pub/sub event, a cache-aside key, a service-layer check) so you extend the system without fighting it.
+sidebar:
+  order: 2
+---
+
+## What we're building
+
+TaskFlow works, but it's deliberately not finished — there's a lot of obvious product still to add, and every bit of it is a chance to reuse a pattern you already built. Below are eight extension exercises, ordered roughly easy to hard. Each is a real feature with a sentence or two of guidance, not a full walkthrough — the point is for *you* to decide where the code goes, using the modules you've already written as your map.
+
+## Why
+
+The best way to know you actually understand an architecture is to extend it without the tutorial holding your hand. Each exercise below is chosen because it forces you back through a specific seam of the system — a new Redis pub/sub event, a new cache key to invalidate, a new service-layer guard, a new frontend reducer case — so you're not learning a new pattern, you're proving you own the ones from the course.
+
+## Build it
+
+### 1. Card activity log (easy)
+
+Add an `activity` table (card id, actor, verb, timestamp) and write a row every time a card is created, moved, or edited. Emit an `activity.created` event through [redis-backplane](/taskflow/en/realtime/redis-backplane/) alongside the change that caused it, so a future activity feed can render live. Start read-only: an endpoint that returns the last N activities for a board.
+
+### 2. Due dates and overdue highlight (easy)
+
+Add a nullable `due_at` column to `cards`, accept it in the create/update handlers from [cards](/taskflow/en/rest-api/cards/), and include it in the card payload. On the frontend, have the card component in [drag-drop](/taskflow/en/kanban-island/drag-drop/) render an "overdue" style when `due_at` is in the past. No new infrastructure — this is a pure schema-plus-render exercise to warm up.
+
+### 3. Card comments with realtime (medium)
+
+Add a `comments` table keyed by card id, a `POST /cards/:id/comments` endpoint, and a `comment.created` event on the board channel so an open card detail view updates live — exactly the [ws-endpoint](/taskflow/en/realtime/ws-endpoint/) → [live-sync](/taskflow/en/kanban-island/live-sync/) path you built for card moves, applied to a second entity. Reuse the same reconcile-by-id idea from [live-sync](/taskflow/en/kanban-island/live-sync/).
+
+### 4. Full-text search over cards (medium)
+
+Add a Postgres `tsvector` column (or a generated one) over card title and description, a GIN index, and a `GET /boards/:id/search?q=` endpoint that ranks matches with `ts_rank`. This is the natural next step from the indexing work in [indexes-ordering](/taskflow/en/database/indexes-ordering/) — same discipline, a new index type. Decide whether the result is cacheable through [cache-reads](/taskflow/en/caching/cache-reads/) or too query-specific to bother.
+
+### 5. Board roles and RBAC (medium–hard)
+
+Add a `board_members` table with a role per user (owner, editor, viewer) and enforce it in the service layer — a viewer can `GET` but not `PATCH`, only an owner can delete. Put the check where [middleware](/taskflow/en/auth/middleware/) already put authentication, so every board-scoped handler goes through one authorization gate rather than scattering `if role ==` checks across [boards](/taskflow/en/rest-api/boards/), [columns](/taskflow/en/rest-api/columns/), and [cards](/taskflow/en/rest-api/cards/).
+
+### 6. Column and card creation UI (medium–hard)
+
+The island currently seeds columns and cards through `curl`, which [compose-full](/taskflow/en/docker/compose-full/) called out as a real boundary of the course. Close it: add "add column" and "add card" forms to the Kanban island from [drag-drop](/taskflow/en/kanban-island/drag-drop/), posting to the endpoints from [columns](/taskflow/en/rest-api/columns/) and [cards](/taskflow/en/rest-api/cards/), with the same optimistic-then-reconcile pattern the drag already uses so the new item appears instantly and then syncs.
+
+### 7. Playwright e2e for two-tab live sync (hard)
+
+The course's headline demo — drag a card in one tab, watch it move in a second — is only ever verified by hand. Automate it: a Playwright test that opens two browser contexts on the same board, drags a card in the first, and asserts it moved in the second within a timeout. This is the end-to-end complement to the unit-level [frontend-tests](/taskflow/en/testing/frontend-tests/), and it exercises the real WebSocket path, not a mock.
+
+### 8. Optimistic-concurrency conflict resolution on moves (hard)
+
+Today, two users dragging the same card at once race — last write wins, silently. Add a `version` (or `updated_at`) column to `cards`, require the client to send the version it saw, and reject a move whose version is stale with a `409 Conflict` from [error-handling](/taskflow/en/backend-foundations/error-handling/). Then handle that 409 on the frontend: roll back the optimistic move from [drag-drop](/taskflow/en/kanban-island/drag-drop/) and re-fetch. This is the hardest because it touches the schema, the service layer, the error type, *and* the optimistic-UI reducer at once — the full width of the stack.
+
+## Verify
+
+You don't need all eight. Pick two — ideally one from the easy end to build momentum and one from the hard end to stretch — and treat each the way the course treated its own modules: write the migration first, add a `#[sqlx::test]` from [backend-tests](/taskflow/en/testing/backend-tests/) that proves the new behavior, then wire the frontend. If your new feature reuses an existing event, cache key, or service guard rather than inventing a parallel one, you've extended the architecture correctly.
+
+## Recap
+
+Eight extension exercises, easy to hard: a card activity log with an `activity.created` event, due dates with an overdue highlight, realtime card comments, Postgres full-text search, board roles/RBAC in the service layer, a column/card creation UI, a Playwright two-tab live-sync test, and optimistic-concurrency conflict resolution on moves. Each one deliberately routes you back through a seam you already built. Next: where TaskFlow goes from here, and the other Real-World Projects.

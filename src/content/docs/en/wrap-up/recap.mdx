@@ -1,0 +1,40 @@
+---
+title: What You Built
+description: A look back across all eleven build modules of TaskFlow — how the Rust backend, PostgreSQL, Redis, the WebSocket backplane, and the Astro Kanban island fit into one coherent realtime system — with a table mapping each module to the Learn Hub course it adapts.
+sidebar:
+  order: 1
+---
+
+## What we built
+
+You started this course with an empty repo and a `.env` file. You're ending it with a **realtime, multi-user Kanban board** that runs end to end from a single `docker compose up --build` — and, more importantly, you wrote every layer of it yourself.
+
+Trace the path a single card takes and you'll see the whole system at once. A user logs in, and [passwords](/taskflow/en/auth/passwords/) verifies their argon2 hash while [jwt](/taskflow/en/auth/jwt/) issues a token that [middleware](/taskflow/en/auth/middleware/) checks against a Redis allowlist on every request afterward. They open a board, and [boards-list](/taskflow/en/frontend/boards-list/)'s typed `apiFetch` calls the REST API you designed in [design](/taskflow/en/rest-api/design/) — a call that, on a warm board, never touches Postgres at all, because [cache-reads](/taskflow/en/caching/cache-reads/) served it from a Redis cache-aside entry. They drag a card from one column to another, and [drag-drop](/taskflow/en/kanban-island/drag-drop/)'s optimistic update moves it on screen instantly while a `PATCH` computes a fractional position from [move-reorder](/taskflow/en/rest-api/move-reorder/), persists it, and [invalidation](/taskflow/en/caching/invalidation/) drops the now-stale cache key. That same write publishes a `card.moved` event onto a Redis `board:{id}` channel from [redis-backplane](/taskflow/en/realtime/redis-backplane/), which [ws-endpoint](/taskflow/en/realtime/ws-endpoint/) fans out over every open WebSocket, and a *second* user's [live-sync](/taskflow/en/kanban-island/live-sync/) reconciles the move into their board with no reload. One card, and it exercised auth, the REST API, the cache, the database, the realtime backplane, and two independent frontend clients.
+
+That's the thing this course was really teaching: not eleven tools in isolation, but how they connect. Every piece exists because the product needed it, and every module below adapted one Learn Hub course to build that piece for real.
+
+## What you practiced
+
+Here's the full build, module by module — what you actually practiced in each, and the Learn Hub course it adapts.
+
+| Module | What you practiced | Learn Hub course it adapts |
+| --- | --- | --- |
+| 1 · Setup & Tooling | Installing the Rust/Node/Docker toolchain, scaffolding a Cargo workspace and an Astro app, and standing up `db` + `redis` in Compose | Docker / Rust |
+| 2 · Database Design | Modeling users, boards, columns, cards, and labels in PostgreSQL with SQL migrations, indexes, and an ordering strategy | PostgreSQL |
+| 3 · Backend Foundations | Wiring an Axum server: config loading, tracing, a typed `AppError`, a PgPool + Redis pool, and a shared `AppState` | Rust / Rust for TypeScript developers |
+| 4 · Authentication | argon2 password hashing, JWT issuing and verification, and a Redis-backed token allowlist enforced in middleware | Rust + Redis + REST API Design |
+| 5 · REST API | CRUD handlers for boards, columns, cards, and labels, plus fractional-position card moves across columns | REST API Design |
+| 6 · Caching | A Redis cache-aside read path, key invalidation on writes, and a fixed-window rate limiter | Redis |
+| 7 · Realtime | A WebSocket endpoint and a Redis `board:{id}` pub/sub backplane fanning changes out to every connected client | WebSocket Design |
+| 8 · Frontend | An Astro shell — typed `apiFetch`, auth pages, and a boards list — that talks to your REST API | Astro |
+| 9 · The Kanban Island | A Preact island with HTML5 drag-and-drop, optimistic UI, live WebSocket sync, and reconnect | Astro |
+| 10 · Testing | Rust `#[sqlx::test]` integration tests against a real database, plus vitest reducer tests on the frontend | Rust testing |
+| 11 · Docker & Compose | Multi-stage images for backend and frontend, and a healthcheck-gated Compose stack that comes up with one command | Docker |
+
+## Why it fits together
+
+Notice how the hard parts of each module only made sense because of the ones around it. The fractional positions from [move-reorder](/taskflow/en/rest-api/move-reorder/) exist so a drag never has to renumber a whole column — which matters precisely because that renumbering would have to be broadcast to every client and reconciled by [live-sync](/taskflow/en/kanban-island/live-sync/). The Redis allowlist from [middleware](/taskflow/en/auth/middleware/) is what lets a logout invalidate a token instantly, the same Redis instance that backs both the [cache-reads](/taskflow/en/caching/cache-reads/) cache and the [redis-backplane](/taskflow/en/realtime/redis-backplane/) pub/sub. Cache [invalidation](/taskflow/en/caching/invalidation/) and realtime events fire from the *same* write path, so a warm cache and a live board never disagree. This is what building one coherent product buys you that eleven separate tutorials can't: the seams are where the real engineering lives, and you built every seam yourself.
+
+## Recap
+
+You built TaskFlow end to end — auth over a Redis allowlist, a REST API with fractional-position moves, a Redis cache with invalidation and rate limiting, a WebSocket realtime layer on a Redis backplane, an Astro frontend with a drag-and-drop Kanban island, tests on both sides, and a one-command Docker Compose stack — across eleven modules, each adapting a Learn Hub course to one real slice of the product. Next up: concrete ways to extend it.

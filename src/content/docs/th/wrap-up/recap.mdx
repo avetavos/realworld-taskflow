@@ -1,0 +1,40 @@
+---
+title: สิ่งที่คุณสร้างขึ้นมา
+description: มองย้อนกลับไปตลอดทั้งสิบเอ็ดโมดูลของการสร้าง TaskFlow — ว่า Rust backend, PostgreSQL, Redis, WebSocket backplane และ Astro Kanban island ประกอบกันเป็นระบบเรียลไทม์ที่กลมกลืนหนึ่งเดียวได้อย่างไร — พร้อมตารางที่แม็ปแต่ละโมดูลเข้ากับคอร์ส Learn Hub ที่นำมาปรับใช้
+sidebar:
+  order: 1
+---
+
+## What we built
+
+คุณเริ่มคอร์สนี้ด้วย repo เปล่า ๆ และไฟล์ `.env` หนึ่งไฟล์ และคุณกำลังจะจบมันด้วย **บอร์ด Kanban แบบเรียลไทม์รองรับผู้ใช้หลายคน** ที่รันได้ครบวงจรจากคำสั่ง `docker compose up --build` เพียงคำสั่งเดียว — และที่สำคัญกว่านั้น คุณเขียนทุกเลเยอร์ของมันด้วยตัวเอง
+
+ลองไล่เส้นทางที่ card ใบเดียวเดินทางผ่าน แล้วคุณจะเห็นทั้งระบบพร้อมกัน ผู้ใช้ล็อกอิน แล้ว [passwords](/taskflow/th/auth/passwords/) ตรวจสอบ hash แบบ argon2 ของเขา ขณะที่ [jwt](/taskflow/th/auth/jwt/) ออก token ที่ [middleware](/taskflow/th/auth/middleware/) จะเช็คกับ Redis allowlist ในทุก ๆ request ต่อจากนั้น เขาเปิดบอร์ดขึ้นมา แล้ว `apiFetch` แบบมี type ของ [boards-list](/taskflow/th/frontend/boards-list/) ก็เรียก REST API ที่คุณออกแบบไว้ใน [design](/taskflow/th/rest-api/design/) — การเรียกที่ เมื่อบอร์ดอุ่นอยู่แล้ว จะไม่แตะ Postgres เลย เพราะ [cache-reads](/taskflow/th/caching/cache-reads/) เสิร์ฟมันจาก entry แบบ cache-aside ใน Redis เขาลาก card จากคอลัมน์หนึ่งไปอีกคอลัมน์ แล้ว optimistic update ของ [drag-drop](/taskflow/th/kanban-island/drag-drop/) ก็เลื่อนมันบนหน้าจอทันที ขณะที่ `PATCH` คำนวณ fractional position จาก [move-reorder](/taskflow/th/rest-api/move-reorder/) บันทึกมันลงฐานข้อมูล แล้ว [invalidation](/taskflow/th/caching/invalidation/) ก็ลบ cache key ที่ล้าสมัยไปแล้วทิ้ง การเขียนเดียวกันนั้นก็ publish event `card.moved` ขึ้นบน Redis channel `board:{id}` จาก [redis-backplane](/taskflow/th/realtime/redis-backplane/) ซึ่ง [ws-endpoint](/taskflow/th/realtime/ws-endpoint/) กระจายต่อไปยังทุก WebSocket ที่เปิดอยู่ แล้ว [live-sync](/taskflow/th/kanban-island/live-sync/) ของผู้ใช้ *คนที่สอง* ก็ reconcile การย้ายนั้นเข้าบอร์ดของเขาโดยไม่ต้องรีโหลด card ใบเดียว แต่มันได้ใช้งานทั้ง auth, REST API, cache, ฐานข้อมูล, realtime backplane และ frontend client อิสระสองตัว
+
+นั่นแหละคือสิ่งที่คอร์สนี้สอนจริง ๆ ไม่ใช่เครื่องมือสิบเอ็ดตัวแบบแยกส่วน แต่คือวิธีที่มันเชื่อมโยงกัน ทุกชิ้นส่วนมีอยู่เพราะโปรดักต์ต้องการมัน และทุกโมดูลด้านล่างก็ปรับเนื้อหาจากคอร์ส Learn Hub หนึ่งคอร์สมาสร้างชิ้นส่วนนั้นขึ้นจริง
+
+## What you practiced
+
+นี่คือการสร้างทั้งหมด ไล่ทีละโมดูล — สิ่งที่คุณได้ฝึกจริง ๆ ในแต่ละโมดูล และคอร์ส Learn Hub ที่มันนำมาปรับใช้
+
+| Module | What you practiced | Learn Hub course it adapts |
+| --- | --- | --- |
+| 1 · Setup & Tooling | Installing the Rust/Node/Docker toolchain, scaffolding a Cargo workspace and an Astro app, and standing up `db` + `redis` in Compose | Docker / Rust |
+| 2 · Database Design | Modeling users, boards, columns, cards, and labels in PostgreSQL with SQL migrations, indexes, and an ordering strategy | PostgreSQL |
+| 3 · Backend Foundations | Wiring an Axum server: config loading, tracing, a typed `AppError`, a PgPool + Redis pool, and a shared `AppState` | Rust / Rust for TypeScript developers |
+| 4 · Authentication | argon2 password hashing, JWT issuing and verification, and a Redis-backed token allowlist enforced in middleware | Rust + Redis + REST API Design |
+| 5 · REST API | CRUD handlers for boards, columns, cards, and labels, plus fractional-position card moves across columns | REST API Design |
+| 6 · Caching | A Redis cache-aside read path, key invalidation on writes, and a fixed-window rate limiter | Redis |
+| 7 · Realtime | A WebSocket endpoint and a Redis `board:{id}` pub/sub backplane fanning changes out to every connected client | WebSocket Design |
+| 8 · Frontend | An Astro shell — typed `apiFetch`, auth pages, and a boards list — that talks to your REST API | Astro |
+| 9 · The Kanban Island | A Preact island with HTML5 drag-and-drop, optimistic UI, live WebSocket sync, and reconnect | Astro |
+| 10 · Testing | Rust `#[sqlx::test]` integration tests against a real database, plus vitest reducer tests on the frontend | Rust testing |
+| 11 · Docker & Compose | Multi-stage images for backend and frontend, and a healthcheck-gated Compose stack that comes up with one command | Docker |
+
+## Why it fits together
+
+สังเกตว่าส่วนที่ยากของแต่ละโมดูลมีความหมายขึ้นมาได้ก็เพราะโมดูลรอบ ๆ มันเท่านั้น fractional position จาก [move-reorder](/taskflow/th/rest-api/move-reorder/) มีอยู่เพื่อให้การลากไม่ต้องเรียงเลขคอลัมน์ใหม่ทั้งคอลัมน์ — ซึ่งสำคัญพอดีเพราะการเรียงเลขใหม่นั้นจะต้อง broadcast ไปยังทุก client และให้ [live-sync](/taskflow/th/kanban-island/live-sync/) reconcile ตาม Redis allowlist จาก [middleware](/taskflow/th/auth/middleware/) คือสิ่งที่ทำให้การ logout ทำให้ token ใช้ไม่ได้ทันที ซึ่งเป็น Redis instance ตัวเดียวกับที่รองรับทั้ง cache ของ [cache-reads](/taskflow/th/caching/cache-reads/) และ pub/sub ของ [redis-backplane](/taskflow/th/realtime/redis-backplane/) cache [invalidation](/taskflow/th/caching/invalidation/) และ realtime event ยิงออกมาจากเส้นทางการเขียน *เดียวกัน* ดังนั้น cache ที่อุ่นอยู่กับบอร์ดที่สดอยู่จึงไม่มีทางขัดแย้งกัน นี่คือสิ่งที่การสร้างโปรดักต์เดียวที่กลมกลืนกันให้คุณ ซึ่งทูทอเรียลแยกกันสิบเอ็ดตัวให้ไม่ได้ นั่นคือ รอยต่อคือที่ที่งานวิศวกรรมจริง ๆ อยู่ และคุณสร้างทุกรอยต่อด้วยตัวเอง
+
+## Recap
+
+คุณสร้าง TaskFlow แบบครบวงจร — auth บน Redis allowlist, REST API พร้อม fractional-position moves, Redis cache พร้อม invalidation และ rate limiting, เลเยอร์ realtime แบบ WebSocket บน Redis backplane, frontend ด้วย Astro พร้อม Kanban island แบบ drag-and-drop, การทดสอบทั้งสองฝั่ง และสแตก Docker Compose ที่รันด้วยคำสั่งเดียว — ตลอดสิบเอ็ดโมดูล แต่ละโมดูลปรับเนื้อหาจากคอร์ส Learn Hub มาใช้กับส่วนหนึ่งของโปรดักต์จริง ต่อไป: วิธีที่เป็นรูปธรรมในการต่อยอดมัน
