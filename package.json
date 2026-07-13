@@ -8,7 +8,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",
-    "deploy": "astro build && rm -rf .cf-assets && mkdir -p .cf-assets/taskflow && cp -R dist/. .cf-assets/taskflow/ && wrangler deploy"
+    "deploy": "astro build && rm -rf .cf-assets && mkdir -p .cf-assets/taskflow && cp -R dist/. .cf-assets/taskflow/ && npx wrangler deploy"
   },
   "dependencies": {
     "@astrojs/preact": "^5.1.5",
