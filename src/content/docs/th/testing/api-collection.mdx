@@ -1,0 +1,125 @@
+---
+title: API collection (curl & Postman)
+description: ทดสอบ TaskFlow REST API ทั้งหมดด้วยมือ — สคริปต์ smoke test ด้วย curl แบบคำสั่งเดียว และ Postman collection ที่ import ได้ซึ่งเชื่อม auth กับทุก resource ให้อัตโนมัติ
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+สองวิธีพร้อมใช้สำหรับยิง API โดยไม่ต้องผ่านฝั่ง front end: **สคริปต์ smoke test ด้วย curl** ที่ไล่ทั้ง flow ในคำสั่งเดียว และ **Postman collection** ที่ import ได้ ซึ่งจับ JWT และ ID ของทุก resource ให้คุณเอง ทั้งคู่ยิงไปที่ `http://localhost:8080` ดังนั้นต้องรันสแตกขึ้นมาก่อน:
+
+```bash
+docker compose up --build
+```
+
+ทั้งสองไฟล์ดาวน์โหลดได้จากเว็บนี้:
+
+- **สคริปต์ curl:** [`taskflow-smoke.sh`](/taskflow/taskflow-smoke.sh)
+- **Postman collection:** [`taskflow.postman_collection.json`](/taskflow/taskflow.postman_collection.json)
+
+## Why
+
+เทสต์อัตโนมัติจากบทเรียนก่อนหน้าพิสูจน์ว่าโค้ดถูกต้องแบบแยกส่วน แต่บทนี้ต่างออกไป: มันคือการ **ทดสอบแบบ black-box end-to-end** กับเซิร์ฟเวอร์ที่กำลังรันอยู่จริง — เป็นวิธีที่เร็วที่สุดในการเช็กว่า `docker compose up` ที่เพิ่งขึ้นมาทำงานถูกต้อง, reproduce บั๊ก, เดโม API ให้เพื่อนร่วมทีม หรือช่วย onboard คนใหม่ มันเสริมกับเทสต์แบบ unit/integration ไม่ได้มาแทนที่
+
+## Pros & cons
+
+- **สคริปต์ curl** — ไม่ต้องติดตั้งอะไรเพิ่มนอกจาก `curl` + `jq`, อยู่ใน version control, รันใน CI เป็น smoke test ได้, diff ง่าย แต่มันเป็นเส้นตรงและไม่ interactive
+- **Postman** — เหมาะกับการสำรวจ, มีประวัติที่บันทึกไว้, และปรับทีละ request ได้; test script ใน collection จะจับ `token`/`board_id`/`column_id`/`card_id`/`label_id` ให้อัตโนมัติเพื่อให้ request เชื่อมกัน แต่มันเป็น GUI และ collection JSON ก็ยาวเวลาจะแก้ด้วยมือ
+
+ใช้สคริปต์ curl สำหรับ "มันยังทำงานอยู่ไหม?" และใช้ Postman สำหรับ "ขอลองแหย่ดูหน่อย"
+
+## The curl smoke test
+
+เซฟไฟล์นี้เป็น `taskflow-smoke.sh` (หรือดาวน์โหลดด้านบน) แล้วรัน `bash taskflow-smoke.sh` มันจะ register ผู้ใช้ใหม่ทุกครั้งที่รัน (เพื่อให้รันซ้ำไม่ชน "email already taken") จากนั้นสร้าง board → columns → cards, ย้าย card, แนบ label แล้วพิมพ์ board tree สุดท้ายออกมา
+
+```bash
+#!/usr/bin/env bash
+# TaskFlow API smoke test — exercises the whole REST surface end to end with curl + jq.
+set -euo pipefail
+
+BASE="${BASE:-http://localhost:8080}"
+EMAIL="demo+$(date +%s)@taskflow.dev"   # unique each run
+PASSWORD="password123"
+
+say() { printf '\n\033[1;32m▶ %s\033[0m\n' "$1"; }
+
+say "Register ($EMAIL)"
+TOKEN=$(curl -s -X POST "$BASE/auth/register" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"Demo User\"}" \
+  | jq -r '.token')
+[ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "register failed"; exit 1; }
+echo "token: ${TOKEN:0:24}…"
+
+AUTH=(-H "Authorization: Bearer $TOKEN")
+JSON=(-H 'Content-Type: application/json')
+
+say "Create board"
+BOARD_ID=$(curl -s -X POST "$BASE/boards" "${AUTH[@]}" "${JSON[@]}" -d '{"title":"Smoke Test Board"}' | jq -r '.id')
+
+say "Create columns (To Do, In Progress)"
+TODO=$(curl -s -X POST "$BASE/boards/$BOARD_ID/columns" "${AUTH[@]}" "${JSON[@]}" -d '{"title":"To Do"}' | jq -r '.id')
+DOING=$(curl -s -X POST "$BASE/boards/$BOARD_ID/columns" "${AUTH[@]}" "${JSON[@]}" -d '{"title":"In Progress"}' | jq -r '.id')
+
+say "Create cards in To Do"
+CARD_A=$(curl -s -X POST "$BASE/columns/$TODO/cards" "${AUTH[@]}" "${JSON[@]}" -d '{"title":"Card A"}' | jq -r '.id')
+CARD_B=$(curl -s -X POST "$BASE/columns/$TODO/cards" "${AUTH[@]}" "${JSON[@]}" -d '{"title":"Card B","description":"has a description"}' | jq -r '.id')
+
+say "Move Card B into In Progress"
+curl -s -X PATCH "$BASE/cards/$CARD_B/move" "${AUTH[@]}" "${JSON[@]}" \
+  -d "{\"target_column_id\":\"$DOING\"}" | jq -c '{id, column_id, position}'
+
+say "Label: create + attach to Card A"
+LABEL_ID=$(curl -s -X POST "$BASE/boards/$BOARD_ID/labels" "${AUTH[@]}" "${JSON[@]}" -d '{"name":"urgent","color":"#CE422B"}' | jq -r '.id')
+curl -s -o /dev/null -w 'attach → %{http_code}\n' -X POST "$BASE/cards/$CARD_A/labels/$LABEL_ID" "${AUTH[@]}"
+
+say "Fetch the board tree"
+curl -s "$BASE/boards/$BOARD_ID" "${AUTH[@]}" \
+  | jq '{title, columns: [.columns[] | {title, cards: [.cards[].title]}]}'
+
+say "Done ✅  (board $BOARD_ID)"
+```
+
+## The Postman collection
+
+ดาวน์โหลด [`taskflow.postman_collection.json`](/taskflow/taskflow.postman_collection.json) แล้วใน Postman: **Import** → ลากไฟล์ลงไป คุณจะได้ห้าโฟลเดอร์ — **Auth · Boards · Columns · Cards · Labels** — พร้อมกับ collection variable เหล่านี้:
+
+| Variable | หน้าที่ |
+|----------|---------|
+| `base_url` | `http://localhost:8080` (เปลี่ยนได้ถ้า API อยู่บนเซิร์ฟเวอร์จริง) |
+| `email` / `password` | credential สำหรับเดโม |
+| `token` | ตั้งค่าอัตโนมัติโดย **Register** / **Login** |
+| `board_id` / `column_id` / `card_id` / `label_id` | ตั้งค่าอัตโนมัติโดยแต่ละ request **Create** |
+
+Collection ใช้ auth แบบ **Bearer `{{token}}`** ที่ระดับ collection และมีแค่ **Register**/**Login** ที่ตั้งเป็น *No Auth* การจับค่าแต่ละครั้งเป็น test script สองบรรทัด เช่นบน **Create board**:
+
+```js
+const res = pm.response.json();
+if (res.id) { pm.collectionVariables.set('board_id', res.id); }
+```
+
+นี่คือเหตุผลที่ request เชื่อมกันได้: รัน **Auth → Register** (หรือ **Login**) หนึ่งครั้ง จากนั้นรัน **Create board → Create column → Create card → Move card → Create label → Attach label** จากบนลงล่าง แล้วทุก `{{...}}` จะถูกเติมให้เรียบร้อย คุณยังรันทั้ง collection พร้อมกันได้ด้วย **Collection Runner** ของ Postman
+
+## Verify
+
+เมื่อสแตกรันอยู่ `bash taskflow-smoke.sh` ควรจบด้วยประมาณนี้:
+
+```txt
+▶ Fetch the board tree
+{
+  "title": "Smoke Test Board",
+  "columns": [
+    { "title": "To Do", "cards": ["Card A"] },
+    { "title": "In Progress", "cards": ["Card B"] }
+  ]
+}
+
+▶ Done ✅  (board 7f3a…)
+```
+
+Card B เริ่มที่ *To Do* และไปจบที่ *In Progress* — endpoint move ทำงาน และการอ่าน board tree ก็สะท้อนผลนั้น ใน Postman คุณจะเห็นแบบเดียวกันทีละ request พร้อมเครื่องหมายถูกสีเขียวของ test ที่ยืนยันการจับค่าแต่ละครั้ง
+
+## Recap
+
+ตอนนี้คุณมีสองวิธีลงมือขับทั้ง API: สคริปต์ `curl` + `jq` สำหรับ smoke test end-to-end แบบคำสั่งเดียว และ Postman collection แบบเชื่อมต่อกันสำหรับการสำรวจแบบ interactive — ทั้งคู่รู้จัก auth และครอบคลุม board, column, card, การย้าย และ label เก็บสคริปต์ smoke ไว้ใน repo เพราะมันคือการเช็ก "ฉันทำ API พังหรือเปล่า?" ที่เร็วที่สุดหลังแก้โค้ดทุกครั้ง

@@ -1,0 +1,306 @@
+{
+  "info": {
+    "name": "TaskFlow API",
+    "description": "The complete TaskFlow REST API (Rust/Axum backend). Import this, then run the requests top-to-bottom: Register or Login captures the JWT into the `token` collection variable, and the create requests capture `board_id`/`column_id`/`card_id`/`label_id` so later requests just work.\n\nBase URL defaults to http://localhost:8080 — bring the stack up first with `docker compose up`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8080" },
+    { "key": "email", "value": "demo@taskflow.dev" },
+    { "key": "password", "value": "password123" },
+    { "key": "token", "value": "" },
+    { "key": "board_id", "value": "" },
+    { "key": "column_id", "value": "" },
+    { "key": "card_id", "value": "" },
+    { "key": "label_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/auth/register", "host": ["{{base_url}}"], "path": ["auth", "register"] },
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\",\n  \"display_name\": \"Demo User\"\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.token) { pm.collectionVariables.set('token', res.token); }",
+                  "pm.test('got a token', () => pm.expect(res.token).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/auth/login", "host": ["{{base_url}}"], "path": ["auth", "login"] },
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.token) { pm.collectionVariables.set('token', res.token); }",
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}/auth/logout", "host": ["{{base_url}}"], "path": ["auth", "logout"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Boards",
+      "item": [
+        {
+          "name": "List boards",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/boards", "host": ["{{base_url}}"], "path": ["boards"] }
+          }
+        },
+        {
+          "name": "Create board",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/boards", "host": ["{{base_url}}"], "path": ["boards"] },
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"My First Board\"\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.id) { pm.collectionVariables.set('board_id', res.id); }",
+                  "pm.test('board created', () => pm.expect(res.id).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get board (tree)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/boards/{{board_id}}", "host": ["{{base_url}}"], "path": ["boards", "{{board_id}}"] }
+          }
+        },
+        {
+          "name": "Update board",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/boards/{{board_id}}", "host": ["{{base_url}}"], "path": ["boards", "{{board_id}}"] },
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Renamed Board\"\n}" }
+          }
+        },
+        {
+          "name": "Delete board",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/boards/{{board_id}}", "host": ["{{base_url}}"], "path": ["boards", "{{board_id}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Columns",
+      "item": [
+        {
+          "name": "Create column",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/boards/{{board_id}}/columns", "host": ["{{base_url}}"], "path": ["boards", "{{board_id}}", "columns"] },
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"To Do\"\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.id) { pm.collectionVariables.set('column_id', res.id); }",
+                  "pm.test('column created', () => pm.expect(res.id).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update column",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/columns/{{column_id}}", "host": ["{{base_url}}"], "path": ["columns", "{{column_id}}"] },
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"In Progress\"\n}" }
+          }
+        },
+        {
+          "name": "Delete column",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/columns/{{column_id}}", "host": ["{{base_url}}"], "path": ["columns", "{{column_id}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Cards",
+      "item": [
+        {
+          "name": "Create card",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/columns/{{column_id}}/cards", "host": ["{{base_url}}"], "path": ["columns", "{{column_id}}", "cards"] },
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Write the docs\",\n  \"description\": \"Cover the whole API\"\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.id) { pm.collectionVariables.set('card_id', res.id); }",
+                  "pm.test('card created', () => pm.expect(res.id).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get card",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/cards/{{card_id}}", "host": ["{{base_url}}"], "path": ["cards", "{{card_id}}"] }
+          }
+        },
+        {
+          "name": "Update card",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/cards/{{card_id}}", "host": ["{{base_url}}"], "path": ["cards", "{{card_id}}"] },
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Write the docs (v2)\",\n  \"description\": \"Include curl + Postman\"\n}" }
+          }
+        },
+        {
+          "name": "Move card",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/cards/{{card_id}}/move", "host": ["{{base_url}}"], "path": ["cards", "{{card_id}}", "move"] },
+            "body": { "mode": "raw", "raw": "{\n  \"target_column_id\": \"{{column_id}}\"\n}" }
+          }
+        },
+        {
+          "name": "Delete card",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/cards/{{card_id}}", "host": ["{{base_url}}"], "path": ["cards", "{{card_id}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Labels",
+      "item": [
+        {
+          "name": "Create label",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/boards/{{board_id}}/labels", "host": ["{{base_url}}"], "path": ["boards", "{{board_id}}", "labels"] },
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"urgent\",\n  \"color\": \"#E5484D\"\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.id) { pm.collectionVariables.set('label_id', res.id); }",
+                  "pm.test('label created', () => pm.expect(res.id).to.be.a('string'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List labels",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/boards/{{board_id}}/labels", "host": ["{{base_url}}"], "path": ["boards", "{{board_id}}", "labels"] }
+          }
+        },
+        {
+          "name": "Attach label to card",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}/cards/{{card_id}}/labels/{{label_id}}", "host": ["{{base_url}}"], "path": ["cards", "{{card_id}}", "labels", "{{label_id}}"] }
+          }
+        },
+        {
+          "name": "Detach label from card",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/cards/{{card_id}}/labels/{{label_id}}", "host": ["{{base_url}}"], "path": ["cards", "{{card_id}}", "labels", "{{label_id}}"] }
+          }
+        },
+        {
+          "name": "Delete label",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/labels/{{label_id}}", "host": ["{{base_url}}"], "path": ["labels", "{{label_id}}"] }
+          }
+        }
+      ]
+    }
+  ]
+}

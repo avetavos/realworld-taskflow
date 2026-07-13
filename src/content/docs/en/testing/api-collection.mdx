@@ -1,0 +1,125 @@
+---
+title: API collection (curl & Postman)
+description: Exercise the whole TaskFlow REST API by hand — a one-command curl smoke test and an importable Postman collection that chains auth and every resource.
+sidebar:
+  order: 3
+---
+
+## What we're building
+
+Two ready-to-run ways to hit the API without the front end: a **curl smoke-test script** that walks the entire flow in one command, and an importable **Postman collection** that captures the JWT and every resource ID for you. Both target `http://localhost:8080`, so bring the stack up first:
+
+```bash
+docker compose up --build
+```
+
+Both files are downloadable from this site:
+
+- **curl script:** [`taskflow-smoke.sh`](/taskflow/taskflow-smoke.sh)
+- **Postman collection:** [`taskflow.postman_collection.json`](/taskflow/taskflow.postman_collection.json)
+
+## Why
+
+The automated tests from the previous lessons prove the code is correct in isolation. This is different: it's **black-box, end-to-end exploration** against the running server — the fastest way to sanity-check a fresh `docker compose up`, reproduce a bug, demo the API to a teammate, or onboard a new contributor. It complements the unit/integration tests; it doesn't replace them.
+
+## Pros & cons
+
+- **curl script** — no tools to install beyond `curl` + `jq`, lives in version control, runs in CI as a smoke test, diffable. But it's linear and not interactive.
+- **Postman** — great for exploration, saved history, and tweaking one request at a time; the collection's test scripts auto-capture `token`/`board_id`/`column_id`/`card_id`/`label_id` so requests chain. But it's a GUI and the collection JSON is verbose to hand-edit.
+
+Use the curl script for "is it alive?", Postman for "let me poke at it."
+
+## The curl smoke test
+
+Save this as `taskflow-smoke.sh` (or download it above) and run `bash taskflow-smoke.sh`. It registers a fresh user each run (so re-runs never hit "email already taken"), then creates a board → columns → cards, moves a card, attaches a label, and prints the final board tree.
+
+```bash
+#!/usr/bin/env bash
+# TaskFlow API smoke test — exercises the whole REST surface end to end with curl + jq.
+set -euo pipefail
+
+BASE="${BASE:-http://localhost:8080}"
+EMAIL="demo+$(date +%s)@taskflow.dev"   # unique each run
+PASSWORD="password123"
+
+say() { printf '\n\033[1;32m▶ %s\033[0m\n' "$1"; }
+
+say "Register ($EMAIL)"
+TOKEN=$(curl -s -X POST "$BASE/auth/register" \
+  -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"display_name\":\"Demo User\"}" \
+  | jq -r '.token')
+[ -n "$TOKEN" ] && [ "$TOKEN" != "null" ] || { echo "register failed"; exit 1; }
+echo "token: ${TOKEN:0:24}…"
+
+AUTH=(-H "Authorization: Bearer $TOKEN")
+JSON=(-H 'Content-Type: application/json')
+
+say "Create board"
+BOARD_ID=$(curl -s -X POST "$BASE/boards" "${AUTH[@]}" "${JSON[@]}" -d '{"title":"Smoke Test Board"}' | jq -r '.id')
+
+say "Create columns (To Do, In Progress)"
+TODO=$(curl -s -X POST "$BASE/boards/$BOARD_ID/columns" "${AUTH[@]}" "${JSON[@]}" -d '{"title":"To Do"}' | jq -r '.id')
+DOING=$(curl -s -X POST "$BASE/boards/$BOARD_ID/columns" "${AUTH[@]}" "${JSON[@]}" -d '{"title":"In Progress"}' | jq -r '.id')
+
+say "Create cards in To Do"
+CARD_A=$(curl -s -X POST "$BASE/columns/$TODO/cards" "${AUTH[@]}" "${JSON[@]}" -d '{"title":"Card A"}' | jq -r '.id')
+CARD_B=$(curl -s -X POST "$BASE/columns/$TODO/cards" "${AUTH[@]}" "${JSON[@]}" -d '{"title":"Card B","description":"has a description"}' | jq -r '.id')
+
+say "Move Card B into In Progress"
+curl -s -X PATCH "$BASE/cards/$CARD_B/move" "${AUTH[@]}" "${JSON[@]}" \
+  -d "{\"target_column_id\":\"$DOING\"}" | jq -c '{id, column_id, position}'
+
+say "Label: create + attach to Card A"
+LABEL_ID=$(curl -s -X POST "$BASE/boards/$BOARD_ID/labels" "${AUTH[@]}" "${JSON[@]}" -d '{"name":"urgent","color":"#CE422B"}' | jq -r '.id')
+curl -s -o /dev/null -w 'attach → %{http_code}\n' -X POST "$BASE/cards/$CARD_A/labels/$LABEL_ID" "${AUTH[@]}"
+
+say "Fetch the board tree"
+curl -s "$BASE/boards/$BOARD_ID" "${AUTH[@]}" \
+  | jq '{title, columns: [.columns[] | {title, cards: [.cards[].title]}]}'
+
+say "Done ✅  (board $BOARD_ID)"
+```
+
+## The Postman collection
+
+Download [`taskflow.postman_collection.json`](/taskflow/taskflow.postman_collection.json), then in Postman: **Import** → drop the file in. You get five folders — **Auth · Boards · Columns · Cards · Labels** — plus these collection variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `base_url` | `http://localhost:8080` (change for a deployed API) |
+| `email` / `password` | the demo credentials |
+| `token` | set automatically by **Register** / **Login** |
+| `board_id` / `column_id` / `card_id` / `label_id` | set automatically by each **Create** request |
+
+The collection uses **Bearer `{{token}}`** auth at the collection level, and **Register**/**Login** are the only requests set to *No Auth*. Each capture is a two-line test script, e.g. on **Create board**:
+
+```js
+const res = pm.response.json();
+if (res.id) { pm.collectionVariables.set('board_id', res.id); }
+```
+
+That's why the requests chain: run **Auth → Register** (or **Login**) once, then run **Create board → Create column → Create card → Move card → Create label → Attach label** top to bottom and every `{{...}}` is already filled in. You can also run the whole collection at once with Postman's **Collection Runner**.
+
+## Verify
+
+With the stack running, `bash taskflow-smoke.sh` should end with something like:
+
+```txt
+▶ Fetch the board tree
+{
+  "title": "Smoke Test Board",
+  "columns": [
+    { "title": "To Do", "cards": ["Card A"] },
+    { "title": "In Progress", "cards": ["Card B"] }
+  ]
+}
+
+▶ Done ✅  (board 7f3a…)
+```
+
+Card B started in *To Do* and ended in *In Progress* — the move endpoint worked, and the board tree read reflects it. In Postman you'll see the same, request by request, with the green test checkmarks confirming each capture.
+
+## Recap
+
+You now have two hands-on ways to drive the whole API: a `curl` + `jq` script for a one-command end-to-end smoke test, and a chained Postman collection for interactive exploration — both auth-aware and covering boards, columns, cards, moves, and labels. Keep the smoke script in the repo; it's the quickest possible "did I break the API?" check after any change.
