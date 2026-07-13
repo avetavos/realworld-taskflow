@@ -7,5 +7,11 @@
   "compatibility_date": "2024-09-23",
   "assets": {
     "directory": "./.cf-assets"
-  }
+  },
+  // projects.avetavos.com is the shared host for the Real-World Projects.
+  // TaskFlow is served under /taskflow/* (Astro base). Bound as a custom domain
+  // (auto-creates the proxied DNS record on the avetavos.com zone).
+  "routes": [
+    { "pattern": "projects.avetavos.com", "custom_domain": true }
+  ]
 }
