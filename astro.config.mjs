@@ -10,6 +10,7 @@ export default defineConfig({
   integrations: [starlight({
     title: 'TaskFlow — Real-World Project',
     head: [
+      { tag: 'script', attrs: { type: 'module', src: '/taskflow/mermaid-init.js' } },
       { tag: 'link', attrs: { rel: 'manifest', href: '/taskflow/manifest.webmanifest' } },
       { tag: 'link', attrs: { rel: 'apple-touch-icon', href: '/taskflow/apple-touch-icon.png' } },
       { tag: 'link', attrs: { rel: 'icon', type: 'image/png', sizes: '192x192', href: '/taskflow/icon-192.png' } },
