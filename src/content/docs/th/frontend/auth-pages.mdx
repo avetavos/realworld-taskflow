@@ -5,30 +5,30 @@ sidebar:
   order: 2
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 `frontend/src/pages/login.astro` กับ `register.astro` — สองหน้าแรกที่ห่อตัวเองด้วย [`Base`](/taskflow/th/frontend/shell-layout/) แต่ละหน้าเป็นฟอร์ม HTML ธรรมดา (`login`: email + password; `register`: display name + email + password) พร้อม `<script>` แบบ inline ที่ตอน submit จะเรียก `POST /auth/login` หรือ `POST /auth/register` ผ่าน `apiFetch` wrapper แบบมี type เก็บ token ที่ได้กลับมา แล้ว redirect ไปที่ `/`
 
-wrapper นั้น — `frontend/src/lib/api.ts` — จริง ๆ แล้วเป็นหัวข้อของบทถัดไป [api-client](/taskflow/th/frontend/api-client/) แต่สองฟอร์มนี้เรียก backend ไม่ได้เลยถ้าไม่มีมัน บทนี้จึงสร้างไฟล์นี้เต็มรูปแบบตั้งแต่ตอนนี้ ตรงกับ contract เป๊ะ ๆ ที่ api-client จะไล่อธิบายทีละ function ทีหลัง ถือว่าถูก introduce ที่นี่ แล้วอธิบายที่นั่น
+wrapper นั้น — `frontend/src/lib/api.ts` — จริง ๆ แล้วเป็นหัวข้อของบทถัดไป [api-client](/taskflow/th/frontend/api-client/) แต่สองฟอร์มนี้เรียก backend ไม่ได้เลยถ้าไม่มีไฟล์นั้น บทนี้จึงสร้างไฟล์นี้เต็มรูปแบบตั้งแต่ตอนนี้ ตรงกับ contract เป๊ะ ๆ ที่ api-client จะไล่อธิบายทีละ function ทีหลัง ถือว่าถูก introduce ที่นี่ แล้วอธิบายที่นั่น
 
-## Why
+## ทำไม
 
 ฟอร์ม login หรือ register ต้องการ state แค่ชิ้นเดียวตอน submit: สำเร็จหรือล้มเหลว `new FormData(form)` อ่านค่าปัจจุบันของทุก field ได้อยู่แล้ว โดยไม่ต้องมี `onChange` handler ทุกครั้งที่พิมพ์ หรือ component state ให้ต่อสาย — เป็นอีกเหตุผลที่ Pros & cons ของ [shell-layout](/taskflow/th/frontend/shell-layout/) เลือก Astro ธรรมดาแทน island สำหรับหน้าแบบนี้
 
-การ submit คือ `event.preventDefault()` ตามด้วยการเรียก `fetch` ไม่ใช่ form `POST` แบบ HTML ธรรมดาตรงไปที่ backend เพราะการ submit form จริง ๆ คือการ navigate ทั้งหน้า ไม่มีที่ให้ดัก JSON response body ได้เลย `POST /auth/login` กับ `POST /auth/register` ทั้งคู่คืน `{token, user}` ([handlers](/taskflow/th/auth/handlers/) สร้าง response shape นี้ไว้) token ต้องมาอยู่ในมือของ JavaScript เพื่อให้ `setToken` เก็บมันก่อนที่อย่างอื่นจะเกิดขึ้น
+การ submit คือ `event.preventDefault()` ตามด้วยการเรียก `fetch` ไม่ใช่ form `POST` แบบ HTML ธรรมดาตรงไปที่ backend เพราะการ submit form จริง ๆ คือการ navigate ทั้งหน้า ไม่มีที่ให้ดัก JSON response body ได้เลย `POST /auth/login` กับ `POST /auth/register` ทั้งคู่คืน `{token, user}` ([handlers](/taskflow/th/auth/handlers/) สร้าง response shape นี้ไว้) token ต้องมาอยู่ในมือของ JavaScript เพื่อให้ `setToken` เก็บลง storage ก่อนที่อย่างอื่นจะเกิดขึ้น
 
 ลำดับสำคัญในฝั่งที่สำเร็จ: `setToken(result.token)` รันก่อน *แล้วค่อย* `window.location.href = '/'` [boards-list](/taskflow/th/frontend/boards-list/) หน้าที่ redirect ไปลง เช็คหา token ทันทีที่โหลด — ถ้า redirect เกิดก่อน token จะยังไม่อยู่ใน `localStorage` ตอนที่เช็คนั้นรัน แล้วหน้าใหม่ก็จะเด้งกลับไปที่ `/login` ทันที
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **เก็บ token ใน `localStorage` (ตัวที่เราใช้) เทียบกับ httpOnly cookie**
 
-- ข้อดี: ฝั่ง backend ไม่ต้องแก้อะไรเลยเพื่อรองรับมัน — [handlers](/taskflow/th/auth/handlers/) คืน `{token, user}` เป็น JSON body ธรรมดาอยู่แล้ว และ JSON body คือสิ่งเดียวที่ static frontend จัดการได้ง่าย ๆ `apiFetch` (บทถัดไป) อ่าน token ตรง ๆ จาก `localStorage` แล้วแนบ `Authorization: Bearer <token>` ให้ทุก request ด้วยโค้ดบรรทัดเดียว ไม่ต้องมี `credentials: 'include'` ไม่ต้องปรับ `SameSite` และไม่ต้องยุ่งกับความซับซ้อนของ cookie ข้าม origin ซึ่งสำคัญตรงนี้เพราะ static frontend กับ Rust API เป็นสอง deployment แยกกัน ไม่ใช่ origin เดียวที่เสิร์ฟทั้งคู่
-- ข้อเสีย: JavaScript อะไรก็ตามที่รันบนหน้านั้นอ่าน `localStorage.getItem('token')` ได้ — รวมถึง XSS injection ที่สำเร็จจาก dependency ที่ถูกแฮ็ก หรือ stored-XSS bug ที่ไหนก็ได้บน origin เดียวกัน httpOnly cookie มองไม่เห็นจาก JavaScript เลย — แม้แต่ XSS payload เต็มรูปแบบที่รันอยู่บนหน้านั้นก็อ่านค่า cookie ไม่ได้ ทำได้แค่ให้มันแนบไปกับ request ที่ browser แนบให้อัตโนมัติอยู่แล้วเท่านั้น
+- ข้อดี: ฝั่ง backend ไม่ต้องแก้อะไรเลยเพื่อรองรับ — [handlers](/taskflow/th/auth/handlers/) คืน `{token, user}` เป็น JSON body ธรรมดาอยู่แล้ว และ JSON body คือสิ่งเดียวที่ static frontend จัดการได้ง่าย ๆ `apiFetch` (บทถัดไป) อ่าน token ตรง ๆ จาก `localStorage` แล้วแนบ `Authorization: Bearer <token>` ให้ทุก request ด้วยโค้ดบรรทัดเดียว ไม่ต้องมี `credentials: 'include'` ไม่ต้องปรับ `SameSite` และไม่ต้องยุ่งกับความซับซ้อนของ cookie ข้าม origin ซึ่งสำคัญตรงนี้เพราะ static frontend กับ Rust API เป็นสอง deployment แยกกัน ไม่ใช่ origin เดียวที่เสิร์ฟทั้งคู่
+- ข้อเสีย: JavaScript อะไรก็ตามที่รันบนหน้านั้นอ่าน `localStorage.getItem('token')` ได้ — รวมถึง XSS injection ที่สำเร็จจาก dependency ที่ถูกแฮ็ก หรือ stored-XSS bug ที่ไหนก็ได้บน origin เดียวกัน httpOnly cookie มองไม่เห็นจาก JavaScript เลย — แม้แต่ XSS payload เต็มรูปแบบที่รันอยู่บนหน้านั้นก็อ่านค่า cookie ไม่ได้ ทำได้แค่อาศัย request ที่ browser แนบ cookie ให้อัตโนมัติอยู่แล้วเท่านั้น
 - trade-off ที่ตรงไปตรงมา: คอร์สนี้เลือก `localStorage` เพราะ frontend เป็น static site ที่ไม่มี server-side request ไหนตั้งค่า `Set-Cookie` ข้าม origin ได้โดยไม่ต้องจัดการ `SameSite=None; Secure` กับ CORS `credentials` อย่างระมัดระวัง — ไม่ใช่เพราะ `localStorage` "โอเค" เฉย ๆ ระบบ production ที่ปกป้องอะไรที่ sensitive กว่าบอร์ด Kanban ในคอร์สนี้ควรใช้ httpOnly cookie เป็นค่าเริ่มต้น แล้วมอง token ใน `localStorage` เป็นข้อยกเว้นที่ต้องมีเหตุผลรองรับ ไม่ใช่กลับกัน
 - แนวทางบรรเทาความเสี่ยง ถ้าแอปจริงยังใช้ `localStorage` ต่อ: Content-Security-Policy ที่เข้มงวด (`script-src 'self'` ไม่มี `unsafe-inline`) ที่บล็อก script ที่ไม่ได้รับอนุญาตไม่ให้รันได้เลย ปิดช่องทางที่พบบ่อยที่สุดที่ attacker จะทำให้ JavaScript รันบนหน้าได้ตั้งแต่ต้น; token TTL สั้น ๆ เพื่อให้ token ที่หลุดมีหน้าต่างที่ใช้ประโยชน์ได้แคบ — [jwt](/taskflow/th/auth/jwt/) ตั้ง `exp` ของ TaskFlow ไว้ 24 ชั่วโมงเพราะการสร้าง refresh flow อยู่นอกขอบเขตของบทนั้นโดยเฉพาะ ไม่ใช่เพราะ 24 ชั่วโมงคือตัวเลขที่ถูกต้องสำหรับระบบ production; และ refresh-token flow — token ตัวที่สองที่เก็บใน httpOnly cookie ใช้แค่ผลิต access token อายุสั้นใหม่เท่านั้น เพื่อให้แม้แต่ access token ที่ถูกขโมยก็หมดอายุเร็ว และ credential ที่สำคัญจริง ๆ ในระยะยาวไม่มีทาง JavaScript อ่านได้เลย ไม่มีอะไรในนี้ถูกสร้างในคอร์สนี้ แต่นั่นคือทิศทางที่แอปจริงเติบโตต่อจากนี้
 
-## Build it
+## ลงมือสร้าง
 
 ### 1. `frontend/src/env.d.ts`
 
@@ -44,7 +44,7 @@ interface ImportMeta {
 }
 ```
 
-ไฟล์นี้ทำให้ `import.meta.env.PUBLIC_API_URL` มี type จริง — `string` — แทนที่จะตกไปใช้สิ่งที่ `ImportMetaEnv` ในตัวของ Astro ประกาศไว้สำหรับ key ที่ไม่รู้จัก [api-client](/taskflow/th/frontend/api-client/) จะอธิบาย `PUBLIC_API_URL` เองอย่างละเอียดอีกที ไฟล์นี้แค่ต้องมีอยู่ก่อนที่อะไรจะ import มัน
+ไฟล์นี้ทำให้ `import.meta.env.PUBLIC_API_URL` มี type จริง — `string` — แทนที่จะตกไปใช้สิ่งที่ `ImportMetaEnv` ในตัวของ Astro ประกาศไว้สำหรับ key ที่ไม่รู้จัก [api-client](/taskflow/th/frontend/api-client/) จะอธิบาย `PUBLIC_API_URL` เองอย่างละเอียดอีกที ไฟล์นี้แค่ต้องมีอยู่ก่อนที่อะไรจะ import เข้าไป
 
 ### 2. `frontend/.env`
 
@@ -52,7 +52,7 @@ interface ImportMeta {
 PUBLIC_API_URL=http://localhost:8080
 ```
 
-มีแค่ตัวแปรที่ขึ้นต้นด้วย `PUBLIC_` เท่านั้นที่จะถูก bundle เข้าไปในโค้ดฝั่ง client — นี่เป็นกฎของ Vite และ Astro รับมาใช้ตรง ๆ `PUBLIC_API_URL` ไม่ใช่ความลับ (มันอ่านได้จาก JavaScript bundle ที่ส่งออกไปอยู่ดี) ดังนั้นเรื่องนี้จริง ๆ แล้วเป็นเรื่อง configuration ไม่ใช่ความลับ — มันคือบรรทัดเดียวที่เปลี่ยนระหว่าง backend local ที่ `:8080` กับ backend ที่ deploy จริง
+มีแค่ตัวแปรที่ขึ้นต้นด้วย `PUBLIC_` เท่านั้นที่จะ bundle เข้าไปในโค้ดฝั่ง client — นี่เป็นกฎของ Vite และ Astro รับมาใช้ตรง ๆ ค่า `PUBLIC_API_URL` ไม่ใช่ความลับ เพราะอ่านได้จาก JavaScript bundle ที่ส่งออกไปอยู่ดี เรื่องนี้จึงเป็นเรื่อง configuration ล้วน ๆ — เป็นบรรทัดเดียวที่เปลี่ยนระหว่าง backend local ที่ `:8080` กับ backend ที่ deploy จริง
 
 ### 3. `frontend/src/lib/api.ts`
 
@@ -274,15 +274,15 @@ input {
 }
 ```
 
-## Verify
+## ตรวจสอบผล
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-เปิด backend ให้รันอยู่ (`cargo run -p api` จาก [handlers](/taskflow/th/auth/handlers/)) เปิดหน้า `/register` กรอกฟอร์ม แล้ว submit คุณควรจะไปลงที่ `/` โดยที่ nav bar (จาก [shell-layout](/taskflow/th/frontend/shell-layout/)) โชว์ "Boards / Log out" อยู่แล้ว เปิด devtools เช็ค `localStorage.getItem('token')` แล้วยืนยันว่ามันเก็บ JWT ที่ backend ออกให้ไว้ log out ไปที่ `/login` แล้ว log in กลับด้วย credential เดิม — ผลลัพธ์เดียวกัน ลอง submit ฟอร์มไหนก็ได้ด้วยรหัสผ่านผิด แล้วยืนยันว่าย่อหน้า error โชว์ข้อความจริงจาก backend (`Unauthorized` จาก error mapping ของ [handlers](/taskflow/th/auth/handlers/)) แทนที่จะเป็นข้อความ fail แบบทั่วไป
+เปิด backend ให้รันอยู่ (`cargo run -p api` จาก [handlers](/taskflow/th/auth/handlers/)) เปิดหน้า `/register` กรอกฟอร์ม แล้ว submit คุณควรจะไปลงที่ `/` โดยที่ nav bar (จาก [shell-layout](/taskflow/th/frontend/shell-layout/)) โชว์ "Boards / Log out" อยู่แล้ว เปิด devtools เช็ค `localStorage.getItem('token')` แล้วยืนยันว่าเก็บ JWT ที่ backend ออกให้ไว้จริง log out ไปที่ `/login` แล้ว log in กลับด้วย credential เดิม — ผลลัพธ์เดียวกัน ลอง submit ฟอร์มไหนก็ได้ด้วยรหัสผ่านผิด แล้วยืนยันว่าย่อหน้า error โชว์ข้อความจริงจาก backend (`Unauthorized` จาก error mapping ของ [handlers](/taskflow/th/auth/handlers/)) แทนที่จะเป็นข้อความ fail แบบทั่วไป
 
-## Recap
+## สรุป
 
-คุณสร้าง `login.astro` กับ `register.astro` — สองฟอร์มที่ submit handler เรียก backend ผ่าน `apiFetch` เก็บ token ที่ได้กลับมาด้วย `setToken` แล้ว redirect ไปที่ `/` ระหว่างทาง `frontend/src/lib/api.ts` ก็เกิดขึ้นก่อนเวลาโดยความจำเป็น และคุณเทียบ token storage แบบ `localStorage` กับ httpOnly cookie อย่างตรงไปตรงมา: มันคือทางเลือกที่ pragmatic สำหรับ static frontend ที่คุยกับ API แยกต่างหาก ไม่ใช่ทางเลือกที่ปลอดภัยแบบไม่มีเงื่อนไข และแอปจริงจะเสริม CSP, TTL สั้น ๆ, กับ refresh flow ทับเข้าไปแทนที่จะมอง `localStorage` เป็นเส้นชัย ต่อไป [api-client](/taskflow/th/frontend/api-client/) จะย้อนกลับไปไล่ `api.ts` ทีละ function — deep dive ที่บทนี้เลื่อนไปทำทีหลัง
+คุณสร้าง `login.astro` กับ `register.astro` — สองฟอร์มที่ submit handler เรียก backend ผ่าน `apiFetch` เก็บ token ที่ได้กลับมาด้วย `setToken` แล้ว redirect ไปที่ `/` ระหว่างทาง `frontend/src/lib/api.ts` ก็เกิดขึ้นก่อนเวลาโดยความจำเป็น และคุณเทียบ token storage แบบ `localStorage` กับ httpOnly cookie อย่างตรงไปตรงมา — `localStorage` คือทางเลือกที่ pragmatic สำหรับ static frontend ที่คุยกับ API แยกต่างหาก ไม่ใช่ทางเลือกที่ปลอดภัยแบบไม่มีเงื่อนไข และแอปจริงจะเสริม CSP, TTL สั้น ๆ, กับ refresh flow ทับเข้าไปแทนที่จะมอง `localStorage` เป็นเส้นชัย ต่อไป [api-client](/taskflow/th/frontend/api-client/) จะย้อนกลับไปไล่ `api.ts` ทีละ function — deep dive ที่บทนี้เลื่อนไปทำทีหลัง

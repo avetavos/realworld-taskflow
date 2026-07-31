@@ -5,11 +5,11 @@ sidebar:
   order: 2
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 โมดูล `config.rs` ที่มี struct `Config` และ constructor `Config::from_env()` ที่อ่านและ parse `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, `APP_PORT` และ `FRONTEND_ORIGIN` ครั้งเดียวตอนเริ่มต้น — แทนที่การเรียก `std::env::var(...).unwrap_or_else(...)` กระจัดกระจายจากบทเรียนก่อนหน้า ควบคู่กันไป เราจะตั้งค่า `tracing_subscriber` เพื่อให้ server log ข้อความแบบมีโครงสร้างและมีระดับความสำคัญ แทนที่ `println!` โดยความละเอียดของ log ควบคุมได้ผ่านตัวแปร environment `RUST_LOG`
 
-## Why
+## ทำไม
 
 นี่คือหลักการ config ของ [12-factor app](https://12factor.net/config) ในทางปฏิบัติ: **เก็บ config ไว้ใน environment** ไม่ใช่ในโค้ด และไม่ผสม config กับ secret ที่ commit เข้า git struct `Config` ที่มี type ชัดเจนและอ่านครั้งเดียวตอนบูต ให้สิ่งที่การเรียก `env::var` กระจัดกระจายทุกครั้งที่ต้องใช้ค่าไม่มีให้สองอย่าง:
 
@@ -18,24 +18,24 @@ sidebar:
 
 การ log แบบมีโครงสร้างก็สำคัญด้วยเหตุผลเดียวกับ `Config` ที่มี type ชัดเจน: ตอนตีสองระหว่างเกิดเหตุฉุกเฉิน `println!("error: {e}")` ที่กระจายอยู่ทั่วโค้ดเบส ให้คุณแค่ noise ที่ไม่มีโครงสร้าง ไม่มีทาง filter ตาม severity หรือ module ได้ `tracing` ให้ทุกบรรทัด log มีระดับ (`info`, `warn`, `error`, ...) และให้คุณเพิ่มความละเอียดของ module ใดโมดูลหนึ่งได้ (`RUST_LOG=taskflow_api=debug,tower_http=debug`) โดยไม่ต้อง compile ใหม่
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **struct `Config` ที่มี type ชัดเจน อ่านครั้งเดียว (ตัวที่เราใช้) เทียบกับ `std::env::var` กระจัดกระจายทั่วโค้ด**
 
 - ข้อดี: ตัวแปรที่จำเป็นทุกตัวถูก validate ในฟังก์ชันเดียว จุดเดียว มี error path เดียวที่ชัดเจน; โค้ดที่อยู่ปลายน้ำรับ `&Config` ซึ่ง mock ได้ง่ายในเทสต์ทีหลัง; การเพิ่มตัวแปรใหม่หมายถึงแตะ struct เดียว ไม่ใช่ grep หา `env::var` ทั้ง crate
-- ข้อเสีย: มี type อีกตัวที่ต้อง thread ผ่านทั้งแอป (`AppState` จะแบกมันไว้ อย่างที่จะเห็นในโมดูลถัดไป); อะไรก็ตามที่ต้องการตัวแปร environment *ใหม่* ต้องเพิ่ม field ใน `Config` และ deploy struct ใหม่ ไม่ใช่แค่เรียก `env::var` บรรทัดเดียวตรงไหนก็ได้ที่สะดวก
+- ข้อเสีย: มี type อีกตัวที่ต้อง thread ผ่านทั้งแอป (`AppState` จะแบก `Config` ไว้ อย่างที่จะเห็นในโมดูลถัดไป); อะไรก็ตามที่ต้องการตัวแปร environment *ใหม่* ต้องเพิ่ม field ใน `Config` และ deploy struct ใหม่ ไม่ใช่แค่เรียก `env::var` บรรทัดเดียวตรงไหนก็ได้ที่สะดวก
 
 **`anyhow::Result<Config>` (ตัวที่เราใช้) เทียบกับ enum `ConfigError` เฉพาะทาง**
 
 - ข้อดี: `Config::from_env()` รันแค่ครั้งเดียวตอนเริ่มต้น และทุก failure คือ fatal — process จะออกไม่ว่ากรณีไหน `?` ของ `anyhow` บวกกับ `.context("...")` ให้ error message ที่อ่านง่าย เชื่อมโยงกันได้ ("DATABASE_URL must be set") โดยแทบไม่มี boilerplate
-- ข้อเสีย: `anyhow::Error` ลบ type ของ error ต้นตอทิ้งไป ทำให้โค้ดที่เรียกใช้ `match` ไม่ได้ว่าตัวแปรไหนหายไปเพื่อตอบสนองต่างกัน ตรงนี้ไม่เป็นปัญหาเพราะไม่มีอะไร (และไม่ควรมีอะไร) พยายามกู้คืนจาก config ที่ขาดตอนเริ่มต้น — แต่มันคือตัวเลือกที่ผิดสำหรับ error ที่ผู้เรียกใช้ต้องแยกกรณี ซึ่งเป็นเหตุผลว่าทำไมบทเรียนถัดไป `AppError` ถึงใช้ variant ที่มี type ชัดเจนจาก `thiserror` แทน
+- ข้อเสีย: `anyhow::Error` ลบ type ของ error ต้นตอทิ้งไป ทำให้โค้ดที่เรียกใช้ `match` ไม่ได้ว่าตัวแปรไหนหายไปเพื่อตอบสนองต่างกัน ตรงนี้ไม่เป็นปัญหาเพราะไม่มีอะไร (และไม่ควรมีอะไร) พยายามกู้คืนจาก config ที่ขาดตอนเริ่มต้น — แต่ก็เป็นตัวเลือกที่ผิดสำหรับ error ที่ผู้เรียกใช้ต้องแยกกรณี และนั่นคือเหตุผลที่บทเรียนถัดไป `AppError` ถึงใช้ variant ที่มี type ชัดเจนจาก `thiserror` แทน
 
 **`tracing` (ตัวที่เราใช้) เทียบกับ crate `log` ธรรมดา**
 
 - ข้อดี: field แบบ key-value มีโครงสร้าง (`tracing::info!(port = %port, "listening")`) แทนที่จะ interpolate string อย่างเดียว; span เชื่อมโยง log หลายบรรทัดเข้ากับ request หรือ task เดียวกัน ซึ่งสำคัญเมื่อ handler เป็น async และสลับกันทำงาน; ecosystem ที่กว้างกว่า (`TraceLayer` ของ `tower-http`, การ log query ของ `sqlx`) สร้างอยู่บน `tracing` ทำให้เราได้ log ของ request/response และ query มาฟรี ๆ ทีหลัง
 - ข้อเสีย: ต้องตั้งค่ามากกว่า `log::info!("...")` — ต้องมี subscriber ไม่ใช่แค่เรียก macro logging เฉย ๆ — และ API ของ structured field มี learning curve สูงกว่าการ format string ธรรมดา
 
-## Build it
+## ลงมือสร้าง
 
 ### 1. เพิ่ม dependency `anyhow`
 
@@ -126,7 +126,7 @@ async fn health() -> Json<serde_json::Value> {
 
 มีสามจุดที่เปลี่ยนจากบทเรียนก่อนหน้า: `main` ตอนนี้คืนค่า `anyhow::Result<()>` ดังนั้นทุกขั้นตอนที่ fail ได้จะใช้ `?` แทน `.unwrap()`/`.expect()`; `Config::from_env()` แทนที่การเรียก `std::env::var` แบบเฉพาะกิจทุกจุด; และ `tracing_subscriber::fmt().with_env_filter(EnvFilter::from_default_env()).init()` ตั้งค่า subscriber ที่พิมพ์บรรทัด log แบบจัดรูปแบบและเคารพค่า `RUST_LOG` โดยเรียกครั้งเดียวก่อนอย่างอื่นทั้งหมดจะทำงาน `tracing::info!` แทนที่ `println!` สำหรับข้อความตอนเริ่มต้น
 
-## Verify
+## ตรวจสอบผล
 
 รันด้วยค่า default (ไม่ตั้ง `RUST_LOG` จะ default เป็นระดับ `error` เท่านั้น — คุณอาจไม่เห็น output อะไรเลย):
 
@@ -158,6 +158,6 @@ curl -s http://localhost:8080/health
 
 สุดท้าย ยืนยันพฤติกรรม fail-fast: ลอง comment หรือเปลี่ยนชื่อ `JWT_SECRET` ใน `.env` ชั่วคราว รัน `cargo run -p api` อีกครั้ง แล้วยืนยันว่า process ออกทันทีพร้อม error ที่พูดถึง `JWT_SECRET must be set` แทนที่จะเริ่มทำงานแล้วค่อยพังทีหลัง อย่าลืมคืนค่า `.env` กลับหลังจากนั้น
 
-## Recap
+## สรุป
 
 คุณแทนที่การเรียก `std::env::var` กระจัดกระจายด้วย `Config::from_env()` ตัวเดียวที่อ่าน `DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`, `APP_PORT` และ `FRONTEND_ORIGIN` ครั้งเดียวตอนเริ่มต้น พร้อมล้มเร็วด้วย error message ที่ชัดเจนจาก `anyhow` ถ้ามีอะไรที่จำเป็นหายไป คุณยังสลับ `println!` เป็น `tracing_subscriber` ด้วย ทำให้ทุกบรรทัด log มีระดับ severity ที่ควบคุมได้ตอน runtime ผ่าน `RUST_LOG` ต่อไปเราจะรวมศูนย์วิธีที่ server แปลง failure เป็น HTTP response ใน [error-handling](/taskflow/th/backend-foundations/error-handling/)

@@ -5,15 +5,17 @@ sidebar:
   order: 2
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
-`jwt.rs` มี struct `Claims` (`sub` — user id, `jti` — unique token id, `exp` — วันหมดอายุ) และสองฟังก์ชัน: `issue(user_id, secret) -> anyhow::Result<(String, String)>` ที่เซ็น token ใหม่ให้ผู้ใช้และคืนทั้ง token กับ `jti` ของมัน และ `verify(token, secret) -> anyhow::Result<Claims>` ที่เช็ค signature และวันหมดอายุของ token แล้วคืน claims ของมัน
+`jwt.rs` มี struct `Claims` (`sub` — user id, `jti` — unique token id, `exp` — วันหมดอายุ) และอีกสองฟังก์ชัน ตัวแรกคือ `issue(user_id, secret) -> anyhow::Result<(String, String)>` เซ็น token ใหม่ให้ผู้ใช้แล้วคืนทั้งตัว token และ `jti` ตัวที่สองคือ `verify(token, secret) -> anyhow::Result<Claims>` เช็ค signature กับวันหมดอายุของ token แล้วคืน claims ออกมา
 
-`issue` คือสิ่งที่ `register` และ `login` เรียกเมื่อยืนยันตัวตนของผู้ใช้ได้แล้ว `verify` คือสิ่งที่ extractor `AuthUser` ในบทเรียนถัดไปจะเรียกทุกครั้งที่มี request มาที่ route ที่ต้อง login
+`register` และ `login` จะเรียก `issue` หลังยืนยันตัวตนของผู้ใช้ผ่านแล้ว ส่วน `verify` นั้น extractor `AuthUser` ในบทเรียนถัดไปจะเรียกทุกครั้งที่มี request เข้ามาที่ route ที่ต้อง login
 
-## Why
+## ทำไม
 
-REST API ของ TaskFlow เป็น stateless ในความหมายดั้งเดิม — server ไม่เก็บ session ใน memory ต่อ client เลย — ดังนั้นทุก request ต้องพิสูจน์ตัวเองว่าใครเป็นคนส่งมา โดยใช้แค่สิ่งที่อยู่ใน request นั้นเอง **JWT (JSON Web Token)** คือ string ที่กะทัดรัดและใช้ใน URL ได้ ที่ client ส่งมาใน header `Authorization: Bearer <token>` ซึ่ง server สามารถ verify ด้วยวิธี cryptographic โดยไม่ต้องไปที่ฐานข้อมูล: ตัว token เองพก claim ("ฉันคือผู้ใช้ X") และ signature ที่พิสูจน์ว่า server ของ TaskFlow เป็นคนออก token นี้ และไม่มีใครแก้ไขมันระหว่างทาง
+REST API ของ TaskFlow เป็น stateless ในความหมายดั้งเดิม — server ไม่เก็บ session ใน memory ต่อ client เลย — ทุก request จึงต้องพิสูจน์ตัวเองว่าใครเป็นคนส่งมา โดยใช้แค่สิ่งที่ติดมากับ request นั้นเอง
+
+**JWT (JSON Web Token)** คือ string ที่กะทัดรัดและใช้ใน URL ได้ ฝั่ง client ส่งมาใน header `Authorization: Bearer <token>` แล้ว server verify ด้วยวิธี cryptographic ได้เลยโดยไม่ต้องแตะฐานข้อมูล ตัว token พก claim ("ฉันคือผู้ใช้ X") มาเอง พร้อม signature ที่พิสูจน์ว่า server ของ TaskFlow เป็นคนออก token นี้ และไม่มีใครแก้ไขระหว่างทาง
 
 JWT มีสามส่วนที่เข้ารหัสแบบ base64url คั่นด้วยจุด — `header.payload.signature`:
 
@@ -25,26 +27,30 @@ flowchart LR
 ```
 
 - **Header** — algorithm ไหนเป็นคนเซ็น (`HS256` ในที่นี้ — HMAC ด้วย SHA-256 โดยใช้ `jwt_secret` ที่เราแชร์กัน)
-- **Payload** — struct `Claims` ที่เรานิยาม: `sub` (subject — id ของผู้ใช้), `jti` (JWT ID — ตัวระบุที่ไม่ซ้ำกันของ *token ตัวนี้โดยเฉพาะ*) และ `exp` (วันหมดอายุ เป็น Unix timestamp) payload **ถูก base64-encode ไม่ใช่ encrypt** — ใครก็ decode และอ่านได้ แค่พวกเขาปลอม signature ที่ถูกต้องสำหรับเวอร์ชันที่ถูกแก้ไขไม่ได้ ถ้าไม่มี secret
-- **Signature** — `jsonwebtoken::encode` ทำ HMAC กับ header และ payload รวมกันโดยใช้ `jwt_secret`; `jsonwebtoken::decode` คำนวณ HMAC นั้นใหม่แล้วเทียบกัน ซึ่งเป็นสิ่งที่ทำให้การแก้ไข `sub` หรือ `exp` ถูกจับได้ — เปลี่ยนแค่บิตเดียวใน payload แล้ว signature จะไม่ตรงกันอีกต่อไป
+- **Payload** — struct `Claims` ที่เรานิยาม: `sub` (subject — id ของผู้ใช้), `jti` (JWT ID — ตัวระบุที่ไม่ซ้ำของ *token ตัวนี้โดยเฉพาะ*) และ `exp` (วันหมดอายุ เป็น Unix timestamp) ส่วนนี้เป็นแค่ base64-encode **ไม่ได้ encrypt** ใครก็ decode ออกมาอ่านได้ เพียงแต่ถ้าไม่มี secret ก็ปลอม signature ให้ตรงกับ payload ที่แก้แล้วไม่ได้
+- **Signature** — `jsonwebtoken::encode` ทำ HMAC กับ header และ payload รวมกันโดยใช้ `jwt_secret` ฝั่ง `jsonwebtoken::decode` คำนวณ HMAC นั้นใหม่แล้วเอามาเทียบ การแก้ `sub` หรือ `exp` จึงโดนจับได้ทันที เปลี่ยนแค่บิตเดียวใน payload แล้ว signature ก็ไม่ตรงอีกต่อไป
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **JWT (ตัวที่เราใช้) เทียบกับ server-side session (session ID ใน cookie ข้อมูล session ใน Redis/Postgres)**
 
-- ข้อดี: ไม่ต้องมีการ query ฐานข้อมูลหรือ Redis เลยแค่เพื่อรู้ว่า *ใคร* กำลังส่ง request มาและ token ยังไม่หมดอายุ — `verify` คือการคำนวณล้วน ๆ แค่เช็ค signature บวกเทียบ timestamp นี่ scale แบบ horizontal ได้โดยไม่มี shared state ระหว่าง instance ของ API เลย: instance ไหนก็ตามที่ถือ `jwt_secret` verify token ไหนก็ได้ ไม่ต้องมี sticky session หรือ shared session store
-- ข้อเสีย: ความเป็น stateless แบบเดียวกันนี้เองที่ทำให้การ revoke ยาก — เมื่อ JWT ถูกออกไปแล้ว มันถูกต้องเชิง cryptographic จนถึง `exp` และไม่มีวิธีในตัวที่จะบอกว่า "จริง ๆ แล้ว invalidate token ตัวนี้เดี๋ยวนี้เลย" session ID มี trade-off ตรงข้ามกัน: การ revoke มันคือแค่ `DELETE` เดียว เพราะ server เป็นแหล่งความจริงของความถูกต้องมาตลอด ไม่ใช่ตัว token เอง
+- ข้อดี: ไม่ต้อง query ฐานข้อมูลหรือ Redis เลยแค่เพื่อรู้ว่า *ใคร* ส่ง request มาและ token ยังไม่หมดอายุ `verify` เป็นการคำนวณล้วน ๆ แค่เช็ค signature บวกเทียบ timestamp แบบนี้ scale แนวนอนได้โดยไม่ต้องมี shared state ระหว่าง instance ของ API เลย instance ไหนถือ `jwt_secret` ก็ verify token ได้ทุกใบ ไม่ต้องมี sticky session หรือ shared session store
+- ข้อเสีย: ความ stateless แบบเดียวกันนี้เองที่ทำให้การ revoke ยาก พอออก JWT ไปแล้ว token ใบนั้นถูกต้องเชิง cryptographic ไปจนถึง `exp` และไม่มีกลไกในตัวที่จะบอกว่า "invalidate ใบนี้เดี๋ยวนี้เลย" ส่วน session ID มี trade-off ตรงข้ามกัน การ revoke คือ `DELETE` ครั้งเดียวจบ เพราะแหล่งความจริงของความถูกต้องอยู่ที่ server มาตลอด ไม่ใช่ที่ตัว token
 
 **ทำไมเราถึงเก็บ Redis allowlist (`auth:token:{jti}`) เพิ่มด้วย นอกเหนือจาก JWT**
 
-นี่คือคำตอบของข้อเสียด้านบน และเป็นเหตุผลที่ `Claims` มี field `jti` ตั้งแต่แรก JWT เปล่า ๆ revoke ไม่ได้ — การ logout หรือ admin แบนบัญชีที่ถูก compromise ไม่มีผลอะไรกับ token ที่ถูกแจกไปแล้ว มันจะยังใช้ได้จนถึง `exp` (24 ชั่วโมง ในกรณีของเรา) ไม่ว่ายังไงก็ตาม การเก็บ `auth:token:{jti} = user_id` ใน Redis ด้วย TTL *เดียวกัน* กับ token และให้ทุก route ที่ต้อง login เช็คว่า key นั้นยังอยู่ (บทเรียนถัดไป) ให้เรามีสัญญาณที่ชัดเจนและเช็คได้ว่า "token ตัวนี้โดยเฉพาะยังใช้ได้อยู่ไหม" โดยไม่ทิ้งข้อดีหลักของ JWT — การเช็ค signature ที่ไม่ต้องมี I/O ยังคงเกิดขึ้นก่อนเสมอ และมีแค่ token ที่ valid และยังไม่หมดอายุเท่านั้นที่จะไปถึงขั้นการเช็ค Redis `logout` กลายเป็นแค่ Redis `DEL` เดียวบน `jti` ตัวนั้น ถูกเท่ากับการ revoke session ID เป๊ะ ในขณะที่ request ที่ผ่านการยืนยันตัวตนทุกตัวยัง verify signature โดยไม่ต้องพึ่งฐานข้อมูลหรือ Redis เลย... ยกเว้นว่ามันไม่ fail open: key ที่หายไปหมายถึง "ไม่ได้รับอนุญาต" จบ เรายอมรับ Redis round trip หนึ่งครั้งต่อ request ที่ยืนยันตัวตนแล้ว เป็นต้นทุนที่ทำให้ logout ทำงานได้จริง — JWT แบบ stateless ล้วน ๆ ทำสิ่งนี้เองไม่ได้
+นี่คือคำตอบของข้อเสียด้านบน และเป็นเหตุผลที่ `Claims` มี field `jti` มาตั้งแต่แรก JWT เปล่า ๆ revoke ไม่ได้ — ผู้ใช้กด logout หรือ admin แบนบัญชีที่โดน compromise ก็ไม่มีผลอะไรกับ token ที่แจกออกไปแล้ว token ใบนั้นยังใช้ได้จนถึง `exp` (24 ชั่วโมง ในกรณีของเรา) อยู่ดี
+
+ทางแก้คือเก็บ `auth:token:{jti} = user_id` ไว้ใน Redis ด้วย TTL *เดียวกัน* กับ token แล้วให้ทุก route ที่ต้อง login เช็คว่า key นั้นยังอยู่ไหม (บทเรียนถัดไป) เท่านี้เราก็มีสัญญาณที่ชัดเจนและเช็คได้ว่า "token ใบนี้ยังใช้ได้อยู่ไหม" โดยไม่ทิ้งข้อดีหลักของ JWT ไป การเช็ค signature ที่ไม่ต้องแตะ I/O ยังเกิดขึ้นก่อนเสมอ และมีแค่ token ที่ valid และยังไม่หมดอายุเท่านั้นที่เดินไปถึงขั้นเช็ค Redis
+
+`logout` จึงเหลือแค่ Redis `DEL` ครั้งเดียวบน `jti` ใบนั้น ถูกพอ ๆ กับการ revoke session ID ส่วน request ที่ยืนยันตัวตนแล้วทุกตัวก็ยัง verify signature ได้เองโดยไม่ต้องพึ่งฐานข้อมูล และการเช็ค Redis ก็ไม่ fail open — key หายไปเมื่อไหร่ แปลว่าไม่ได้รับอนุญาต จบ เรายอมจ่าย Redis round trip หนึ่งครั้งต่อหนึ่ง request ที่ยืนยันตัวตนแล้ว แลกกับการทำให้ logout ใช้งานได้จริง ซึ่ง JWT แบบ stateless ล้วน ๆ ทำเองไม่ได้
 
 **`exp` ตั้งเป็น 24 ชั่วโมง ไม่มี refresh token (ตัวที่เราใช้) เทียบกับ access token อายุสั้น + refresh token อายุยาว**
 
 - ข้อดี: token ประเภทเดียว code path เดียว ไม่ต้องสร้าง refresh endpoint ไม่ต้องตัดสินใจว่าจะเก็บ refresh token ไว้ที่ไหนอย่างปลอดภัย สำหรับโปรเจกต์ขนาดคอร์สแบบนี้ นี่คือความซับซ้อนที่พอดี
-- ข้อเสีย: token ที่ถูกขโมยจะใช้ได้นานถึง 24 ชั่วโมง โดยไม่มีทางย่นระยะเวลานั้นได้เลยนอกจาก revoke ผ่าน Redis allowlist (ซึ่งต้องรู้ก่อนว่าถูก compromise) ระบบ production ที่จัดการข้อมูลอ่อนไหวน่าจะใช้ access token อายุสั้น (นาที) บวกกับ refresh token อายุยาวกว่าที่ใช้ได้ครั้งเดียว — pattern ที่ควรรู้ไว้แม้เราจะไม่ได้สร้างมันที่นี่
+- ข้อเสีย: token ที่ถูกขโมยจะใช้ได้นานถึง 24 ชั่วโมง โดยไม่มีทางย่นระยะเวลานั้นได้เลยนอกจาก revoke ผ่าน Redis allowlist (ซึ่งต้องรู้ก่อนว่าถูก compromise) ระบบ production ที่จัดการข้อมูลอ่อนไหวน่าจะใช้ access token อายุสั้น (นาที) บวกกับ refresh token อายุยาวกว่าที่ใช้ได้ครั้งเดียว — pattern ที่ควรรู้ไว้ แม้คอร์สนี้จะไม่ได้สร้างขึ้นมาจริง
 
-## Build it
+## ลงมือสร้าง
 
 ### 1. เพิ่ม dependency `jsonwebtoken`
 
@@ -126,10 +132,10 @@ mod tests {
 
 มีรายละเอียดสองสามอย่างที่ควรพูดถึง:
 
-- `Header::default()` เลือก `HS256` — HMAC-SHA256 — ซึ่งเหมาะเป๊ะสำหรับ setup แบบ single-server-secret อย่างของเรา; algorithm แบบ asymmetric (`RS256`, `ES256`) จะคุ้มค่าก็ต่อเมื่อมีบริการ *อื่น* ที่ต้อง verify token โดยไม่ถือ secret ที่ใช้เซ็นมันด้วย
-- `Validation::default()` verify `exp` ให้อัตโนมัติ — `decode` คืน `Err` สำหรับ token ที่หมดอายุก่อนที่ `verify` จะได้ดู `claims.exp` เองด้วยซ้ำ ดังนั้น token ที่หมดอายุจะไม่มีทางไปถึง `AuthUser` ราวกับว่ามันยัง valid อยู่ได้เลย
+- `Header::default()` เลือก `HS256` — HMAC-SHA256 — ซึ่งเหมาะเป๊ะสำหรับ setup แบบ single-server-secret อย่างของเรา; algorithm แบบ asymmetric (`RS256`, `ES256`) จะคุ้มค่าก็ต่อเมื่อมีบริการ *อื่น* ที่ต้อง verify token โดยไม่ถือ secret ที่ใช้เซ็น
+- `Validation::default()` verify `exp` ให้อัตโนมัติ — `decode` คืน `Err` สำหรับ token ที่หมดอายุก่อนที่ `verify` จะได้ดู `claims.exp` เองด้วยซ้ำ ดังนั้น token ที่หมดอายุจะไม่มีทางเล็ดลอดไปถึง `AuthUser` ราวกับยัง valid อยู่ได้เลย
 - `jti: Uuid::new_v4().to_string()` ถูกสร้างใหม่ทุกครั้งที่เรียก `issue` — แม้แต่ผู้ใช้คนเดียวกัน login สองครั้ง ก็ได้ `jti` สองตัวที่ต่างกัน ดังนั้นการ revoke session หนึ่ง (browser หนึ่ง, device หนึ่ง) จึงไม่กระทบอีกอันหนึ่ง
-- ทั้งสองฟังก์ชันคืนค่า `anyhow::Result<...>` ตรงกับ pattern ของ `password.rs` — ประเภท `Error` ของ `jsonwebtoken` implement `std::error::Error` ดังนั้น `?` แปลงมันผ่าน blanket `From` impl ของ `anyhow` ได้โดยไม่ต้อง map เองเลย ต่างจากประเภท error ของ `argon2` ในบทเรียนก่อนหน้า
+- ทั้งสองฟังก์ชันคืนค่า `anyhow::Result<...>` ตรงกับ pattern ของ `password.rs` — ประเภท `Error` ของ `jsonwebtoken` implement `std::error::Error` ดังนั้น `?` จึงแปลงค่าผ่าน blanket `From` impl ของ `anyhow` ได้โดยไม่ต้อง map เองเลย ต่างจากประเภท error ของ `argon2` ในบทเรียนก่อนหน้า
 
 ### 3. เพิ่ม `jwt` เข้า module `auth`
 
@@ -140,7 +146,7 @@ pub mod jwt;
 pub mod password;
 ```
 
-## Verify
+## ตรวจสอบผล
 
 ```bash
 cargo check -p api
@@ -164,6 +170,6 @@ test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 เหมือนกับ `password.rs` คาดว่าจะเจอ warning ประเภท `dead_code` จาก `cargo check -p api` — `issue` และ `verify` ยังไม่ถูกเรียกจาก handler หรือ extractor ใดจนกว่าจะถึง [middleware](/taskflow/th/auth/middleware/) และ [handlers](/taskflow/th/auth/handlers/)
 
-## Recap
+## สรุป
 
-คุณสร้าง `issue` และ `verify` ใน `jwt.rs` เซ็นและเช็ค JWT แบบ `HS256` ที่ payload เป็น `{ sub, jti, exp }` คุณเห็นแล้วว่าทำไม JWT ถึงชนะ server-side session ในเรื่องการ verify แบบ stateless และทำไมความ stateless แบบเดียวกันนั้นถึงทำให้การ revoke ยากพอดี — ซึ่งเป็นเหตุผลที่ `jti` ของทุก token กำลังจะกลายเป็น key ใน Redis allowlist ต่อไปเราจะสร้าง extractor `AuthUser` ที่รัน `verify` และเช็ค allowlist นั้นทุกครั้งที่มี request มาที่ route ที่ต้อง login ใน [middleware](/taskflow/th/auth/middleware/)
+คุณสร้าง `issue` และ `verify` ใน `jwt.rs` เซ็นและเช็ค JWT แบบ `HS256` ที่ payload เป็น `{ sub, jti, exp }` คุณเห็นแล้วว่าทำไม JWT ถึงชนะ server-side session ในเรื่องการ verify แบบ stateless และทำไมความ stateless แบบเดียวกันนั้นถึงทำให้การ revoke ยากพอดี — และนั่นคือเหตุผลที่ `jti` ของทุก token กำลังจะกลายเป็น key ใน Redis allowlist ต่อไปเราจะสร้าง extractor `AuthUser` ที่รัน `verify` และเช็ค allowlist นั้นทุกครั้งที่มี request มาที่ route ที่ต้อง login ใน [middleware](/taskflow/th/auth/middleware/)

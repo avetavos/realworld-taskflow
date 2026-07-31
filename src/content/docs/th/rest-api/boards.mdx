@@ -5,31 +5,31 @@ sidebar:
   order: 2
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 module `boards`: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, และ `mod.rs` ใต้ `taskflow/backend/api/src/boards/` ห้า endpoint — list, create, read (เป็น tree เต็ม), rename, delete — บวกสอง function ที่ทุก module ในบทหลังของคอร์สนี้จะเรียก: `assert_member` และ `assert_owner`
 
-`model.rs` ในบทนี้มีมากกว่าแค่ `Board`: มันยังนิยาม `Column`, `Card`, `ColumnWithCards`, และ `BoardTree` ด้วย ทั้งที่ `columns` กับ `cards` ยังไม่มี module ของตัวเองเลย นี่คือความตั้งใจ ไม่ใช่ความผิดพลาด — `GET /boards/:id` คืน *tree ทั้งหมด* ดังนั้น `boards::model` ต้องรู้รูปร่างของ column-พร้อม-card ของมัน ก่อนที่ resource เหล่านั้นจะมี endpoint CRUD ของตัวเองในสองบทถัดไป
+`model.rs` ในบทนี้มีมากกว่าแค่ `Board` เพราะยังนิยาม `Column`, `Card`, `ColumnWithCards` และ `BoardTree` ด้วย ทั้งที่ `columns` กับ `cards` ยังไม่มี module ของตัวเองเลย นี่คือความตั้งใจ ไม่ใช่ความผิดพลาด — `GET /boards/:id` คืน *tree ทั้งหมด* ดังนั้น `boards::model` ต้องรู้รูปร่างของ column-พร้อม-card ก่อนที่ resource เหล่านั้นจะมี endpoint CRUD ของตัวเองในสองบทถัดไป
 
-## Why
+## ทำไม
 
-`assert_member` และ `assert_owner` อยู่ใน `boards::service` — ไม่ถูกก็อปไปซ้ำใน `columns`, `cards`, หรือ `labels` — เพราะทุก resource เหล่านั้นสุดท้ายก็ขึ้นกับ membership ของ board column เป็นของ board; card เป็นของ column ที่เป็นของ board; label เป็นของ board โดยตรง ไม่ว่า request จะเกี่ยวกับ resource ไหน คำถามจริง ๆ ก็คือ "แถว `board_members` ของ board นี้สำหรับ user นี้มีไหม" เสมอ ซึ่งเป็นสิ่งที่ `assert_member` เช็คพอดี สร้างมันครั้งเดียวที่นี่ หมายความว่า `columns::service`, `cards::service`, และ `labels::service` ในสามบทถัดไปไม่ต้อง implement มันซ้ำเลย — มัน resolve board id ของ *resource ของตัวเอง* แล้วเรียก `boards_service::assert_member(db, user_id, board_id)`
+`assert_member` และ `assert_owner` อยู่ใน `boards::service` โดยไม่ก็อปไปซ้ำใน `columns`, `cards` หรือ `labels` เพราะทุก resource เหล่านั้นสุดท้ายก็ขึ้นกับ membership ของ board column เป็นของ board; card เป็นของ column ที่เป็นของ board; label เป็นของ board โดยตรง ไม่ว่า request จะเกี่ยวกับ resource ไหน คำถามจริง ๆ ก็คือ "แถว `board_members` ของ board นี้สำหรับ user นี้มีไหม" เสมอ นั่นคือสิ่งที่ `assert_member` เช็คพอดี การสร้างไว้ครั้งเดียวที่นี่หมายความว่า `columns::service`, `cards::service`, และ `labels::service` ในสามบทถัดไปไม่ต้อง implement ซ้ำเลย — แต่ละตัวแค่ resolve board id ของ *resource ของตัวเอง* แล้วเรียก `boards_service::assert_member(db, user_id, board_id)`
 
-`get_tree` ประกอบ `BoardTree` ใน service function เดียว — แทนที่ frontend จะยิง request แยกกันสี่ครั้ง (board แล้วก็ column ของมัน แล้วก็ card ของแต่ละ column) — ตรงกับวิธีใช้งาน Kanban board จริง ๆ: คุณไม่เคย render board โดยไม่มี column กับ card ของมัน ดังนั้น API ไม่ควรทำให้ client ต้องจ่าย round trip สี่ครั้งเพื่อเอาข้อมูลที่ต้องใช้ด้วยกันเสมอ
+`get_tree` ประกอบ `BoardTree` ใน service function เดียว — แทนที่ frontend จะยิง request แยกกันสี่ครั้ง (board, column ของ board, แล้วก็ card ของแต่ละ column) — ตรงกับวิธีใช้งาน Kanban board จริง ๆ: คุณไม่เคย render board โดยไม่มี column กับ card ข้างใน ดังนั้น API ไม่ควรทำให้ client ต้องจ่าย round trip สี่ครั้งเพื่อเอาข้อมูลที่ต้องใช้ด้วยกันเสมอ
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **`Column`/`Card` นิยามใน `boards::model`, re-export โดย `columns::model`/`cards::model` (ตัวที่เราใช้) เทียบกับนิยาม struct แต่ละตัวใน module resource ของตัวเอง แล้ว import เข้า `boards::model`**
 
-- ข้อดี: `BoardTree` มีอยู่ได้ตั้งแต่บทนี้ ซึ่งเป็นสิ่งที่ทำให้ `GET /boards/:id` — อาจเป็น read ที่สำคัญที่สุดในทั้ง API — ออกได้ในบท 2 แทนที่จะรอจนกว่า `columns` กับ `cards` จะมีทั้งคู่ มีนิยาม `Column` แค่จุดเดียว และ `Card` แค่จุดเดียวในทั้ง codebase — `columns/model.rs` และ `cards/model.rs` เป็น re-export บรรทัดเดียว (`pub use crate::boards::model::Column;`) ไม่ใช่นิยาม struct ที่สองที่แยกกันและอาจ drift ไม่ตรงกับสิ่งที่ `BoardTree` มีจริง
+- ข้อดี: `BoardTree` มีอยู่ได้ตั้งแต่บทนี้ และนั่นคือสิ่งที่ทำให้ `GET /boards/:id` — อาจเป็น read ที่สำคัญที่สุดในทั้ง API — ออกได้ในบท 2 แทนที่จะรอจนกว่า `columns` กับ `cards` จะมีทั้งคู่ มีนิยาม `Column` แค่จุดเดียว และ `Card` แค่จุดเดียวในทั้ง codebase — `columns/model.rs` และ `cards/model.rs` เป็น re-export บรรทัดเดียว (`pub use crate::boards::model::Column;`) ไม่ใช่นิยาม struct ที่สองที่แยกกันและอาจ drift ไม่ตรงกับสิ่งที่ `BoardTree` มีจริง
 - ข้อเสีย: `columns` กับ `cards` ต้องพึ่ง `boards` สำหรับ type หลักของตัวเอง ซึ่งกลับด้านความคาดหวังปกติที่ resource module เป็นเจ้าของ model ของตัวเอง — คนอ่าน `columns/model.rs` ครั้งแรกต้องตาม `pub use` หนึ่งจุดเพื่อไปหานิยามจริง นี่เป็น trade-off ที่ยุติธรรมสำหรับคอร์สที่สร้าง resource ตามลำดับการสอนแบบเฉพาะ — codebase ที่สร้างแบบ resource-first ตั้งแต่วันแรก (รู้ schema เต็มตั้งแต่ต้น) น่าจะเอา type แบบ read-model ที่ใช้ร่วมกันอย่าง `BoardTree` ไปไว้ใน `boards::model` เฉพาะ โดย*ไม่*เก็บนิยามหลักของ `Column`/`Card` ไว้ที่นั่นด้วย — แต่นั่นไม่ใช่ลำดับที่คอร์สนี้สร้าง
 
-**ประกอบ `BoardTree` ด้วย N+1 query — หนึ่งสำหรับ column, หนึ่งต่อ column สำหรับ card ของมัน (ตัวที่เราใช้) เทียบกับ query `JOIN` เดียวที่คืนแถวแบบ denormalized**
+**ประกอบ `BoardTree` ด้วย N+1 query — หนึ่งครั้งสำหรับ column และอีกหนึ่งครั้งต่อ column เพื่อดึง card ข้างใน (ตัวที่เราใช้) เทียบกับ query `JOIN` เดียวที่คืนแถวแบบ denormalized**
 
-- ข้อดี: `repo::find_columns` และ `repo::find_cards_for_column` เป็น function เล็ก ๆ ใช้ซ้ำได้อิสระ ทดสอบได้อิสระ — `find_cards_for_column` คือ query เดียวกับที่ endpoint `GET /columns/:id/cards` ในอนาคตจะใช้ ไม่ซ้ำซ้อนเลย ฝั่ง Rust (`service::get_tree`) ทำการประกอบด้วย loop ธรรมดา ไม่ต้องเขียน logic การจัดกลุ่มแถวเองให้ถูกต้อง
+- ข้อดี: `repo::find_columns` และ `repo::find_cards_for_column` เป็น function เล็ก ๆ ใช้ซ้ำได้อิสระ ทดสอบได้อิสระ — `find_cards_for_column` คือ query เดียวกับที่ endpoint `GET /columns/:id/cards` ในอนาคตจะใช้ ไม่ซ้ำซ้อนเลย ฝั่ง Rust (`service::get_tree`) ประกอบด้วย loop ธรรมดา ไม่ต้องเขียน logic การจัดกลุ่มแถวเองให้ถูกต้อง
 - ข้อเสีย: สำหรับ board ที่มี 10 column, `get_tree` รัน 11 query แทนที่จะเป็น 1 — ต้นทุน N+1 query จริง ๆ สำหรับขนาดของ TaskFlow (column ไม่กี่อันต่อ board, `cards(column_id, position)` มี index จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/) ทำให้แต่ละ per-column query เร็ว) นี่เป็น trade-off ที่ยอมรับได้และง่าย ระบบที่ board หนักมากในโปรดักชันอาจดึง card ทั้งหมดของ board ใน query เดียวที่มี index แล้วจัดกลุ่มด้วย `column_id` ใน Rust แทน แลก round trip น้อยลงหนึ่งครั้งกับขั้นตอนสร้าง `HashMap` เพิ่มขึ้นหนึ่งขั้น
 
-## Build it
+## ลงมือสร้าง
 
 ### 1. `boards/model.rs`
 
@@ -278,7 +278,7 @@ pub async fn delete_board(db: &PgPool, user_id: Uuid, board_id: Uuid) -> AppResu
 }
 ```
 
-`update_board` ต้องการแค่ `assert_member` (สมาชิกคนไหนก็เปลี่ยนชื่อ board ได้) ในขณะที่ `delete_board` ต้องการ `assert_owner` — ความต่างที่ตั้งใจ ไม่ใช่การมองข้าม ตรงกับตารางใน [design](/taskflow/th/rest-api/design/): การเปลี่ยนชื่อย้อนกลับได้และความเสี่ยงต่ำ การลบพา column, card, และ label ทั้งหมดไปด้วยผ่านสาย `ON DELETE CASCADE` จาก [schema](/taskflow/th/database/schema/) ดังนั้นมีแค่ owner ที่สั่งมันได้
+`update_board` ต้องการแค่ `assert_member` (สมาชิกคนไหนก็เปลี่ยนชื่อ board ได้) ส่วน `delete_board` ต้องการ `assert_owner` — ความต่างที่ตั้งใจ ไม่ใช่การมองข้าม ตรงกับตารางใน [design](/taskflow/th/rest-api/design/): การเปลี่ยนชื่อย้อนกลับได้และความเสี่ยงต่ำ การลบพา column, card, และ label ทั้งหมดไปด้วยผ่านสาย `ON DELETE CASCADE` จาก [schema](/taskflow/th/database/schema/) ดังนั้นมีแค่ owner ที่สั่งลบได้
 
 ### 4. `boards/handlers.rs`
 
@@ -383,7 +383,7 @@ pub fn routes() -> Router<AppState> {
 
 `.route("/boards", get(...).post(...))` และ `.route("/boards/:id", get(...).patch(...).delete(...))` — เรียก `.route()` ครั้งเดียวต่อ path โดยเชื่อทุก HTTP method ที่ path นั้นตอบสนองเข้ากับ `MethodRouter` ตัวเดียวกัน ตรงกับตารางใน [design](/taskflow/th/rest-api/design/) เป๊ะ: สอง path ห้า endpoint
 
-### 6. Mount `boards::routes()` in `main.rs`
+### 6. Mount `boards::routes()` ใน `main.rs`
 
 อัปเดต chain `Router::new()` ใน `taskflow/backend/api/src/main.rs`:
 
@@ -405,7 +405,7 @@ let app = Router::new()
 
 `.merge(boards::routes())` ไม่ใช่ `.nest(...)` — `boards::routes()` สร้าง path ของตัวเองเป็น absolute อยู่แล้ว (`/boards`, `/boards/:id`) ต่างจาก `auth::routes()` ที่สร้าง path แบบ relative (`/register`) ที่ต้องการ `.nest("/auth", ...)` เพื่อเติม prefix `Router::merge` รวมสอง router ที่ตกลง path เต็มของตัวเองอยู่แล้วเข้าด้วยกัน ทุก module ที่เหลือของคอร์สนี้ (`columns`, `cards`, `labels`) ตาม pattern ของ `boards` และถูก `.merge` แบบเดียวกัน
 
-## Verify
+## ตรวจสอบผล
 
 ```bash
 cargo check -p api
@@ -459,7 +459,7 @@ curl -s -X PATCH http://localhost:8080/boards/$BOARD_ID \
   -d '{"title":"Sprint 12 (final)"}'
 ```
 
-ยืนยันว่าคนแปลกหน้าเห็นมันไม่ได้ — สมัคร user คนที่สองแล้วลอง `GET` เดียวกัน:
+ยืนยันว่าคนนอกเห็น board นี้ไม่ได้ — สมัคร user คนที่สองแล้วลอง `GET` เดียวกัน:
 
 ```bash
 TOKEN2=$(curl -s -X POST http://localhost:8080/auth/register \
@@ -475,7 +475,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/boards/$BOARD_ID 
 403
 ```
 
-ลบมัน ในฐานะ owner:
+ลบ board ในฐานะ owner:
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:8080/boards/$BOARD_ID \
@@ -486,6 +486,6 @@ curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:8080/boards/
 204
 ```
 
-## Recap
+## สรุป
 
 คุณสร้าง module `boards` ครบวงจร: `model.rs` (รวม `Column`, `Card`, และ `BoardTree` ก่อน module resource ของตัวเอง เพื่อให้ tree endpoint มีได้ตั้งแต่ตอนนี้), SQLx query ของ `repo.rs` ต่อ `boards` กับ `board_members`, `assert_member`/`assert_owner` ของ `service.rs` — สอง function ที่ resource module ที่เหลือทุกตัวจะเรียก — และ handler บาง ๆ ห้าตัวของ `handlers.rs` `boards::routes()` รวมเข้า router ของ `main.rs` ให้ TaskFlow มี REST resource ที่ authorize จริงตัวแรก: list, create, read-as-tree, rename, และ delete ที่ owner เท่านั้นทำได้ ถัดไป เราจะสร้าง [columns](/taskflow/th/rest-api/columns/) — module แรกที่ใช้ `assert_member` ซ้ำแทนที่จะนิยามของตัวเอง

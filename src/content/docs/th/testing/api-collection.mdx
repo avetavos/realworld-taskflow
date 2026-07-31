@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 สองวิธีพร้อมใช้สำหรับยิง API โดยไม่ต้องผ่านฝั่ง front end: **สคริปต์ smoke test ด้วย curl** ที่ไล่ทั้ง flow ในคำสั่งเดียว และ **Postman collection** ที่ import ได้ ซึ่งจับ JWT และ ID ของทุก resource ให้คุณเอง ทั้งคู่ยิงไปที่ `http://localhost:8080` ดังนั้นต้องรันสแตกขึ้นมาก่อน:
 
@@ -18,20 +18,20 @@ docker compose up --build
 - **สคริปต์ curl:** [`taskflow-smoke.sh`](/taskflow/taskflow-smoke.sh)
 - **Postman collection:** [`taskflow.postman_collection.json`](/taskflow/taskflow.postman_collection.json)
 
-## Why
+## ทำไม
 
-เทสต์อัตโนมัติจากบทเรียนก่อนหน้าพิสูจน์ว่าโค้ดถูกต้องแบบแยกส่วน แต่บทนี้ต่างออกไป: มันคือการ **ทดสอบแบบ black-box end-to-end** กับเซิร์ฟเวอร์ที่กำลังรันอยู่จริง — เป็นวิธีที่เร็วที่สุดในการเช็กว่า `docker compose up` ที่เพิ่งขึ้นมาทำงานถูกต้อง, reproduce บั๊ก, เดโม API ให้เพื่อนร่วมทีม หรือช่วย onboard คนใหม่ มันเสริมกับเทสต์แบบ unit/integration ไม่ได้มาแทนที่
+เทสต์อัตโนมัติจากบทเรียนก่อนหน้าพิสูจน์ว่าโค้ดถูกต้องแบบแยกส่วน แต่บทนี้ต่างออกไป เพราะเป็นการ **ทดสอบแบบ black-box end-to-end** กับเซิร์ฟเวอร์ที่กำลังรันอยู่จริง — เป็นวิธีที่เร็วที่สุดในการเช็กว่า `docker compose up` ที่เพิ่งขึ้นมาทำงานถูกต้อง, reproduce บั๊ก, เดโม API ให้เพื่อนร่วมทีม หรือช่วย onboard คนใหม่ วิธีนี้เสริมเทสต์แบบ unit/integration ไม่ได้มาแทนที่
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
-- **สคริปต์ curl** — ไม่ต้องติดตั้งอะไรเพิ่มนอกจาก `curl` + `jq`, อยู่ใน version control, รันใน CI เป็น smoke test ได้, diff ง่าย แต่มันเป็นเส้นตรงและไม่ interactive
-- **Postman** — เหมาะกับการสำรวจ, มีประวัติที่บันทึกไว้, และปรับทีละ request ได้; test script ใน collection จะจับ `token`/`board_id`/`column_id`/`card_id`/`label_id` ให้อัตโนมัติเพื่อให้ request เชื่อมกัน แต่มันเป็น GUI และ collection JSON ก็ยาวเวลาจะแก้ด้วยมือ
+- **สคริปต์ curl** — ไม่ต้องติดตั้งอะไรเพิ่มนอกจาก `curl` + `jq`, อยู่ใน version control, รันใน CI เป็น smoke test ได้, diff ง่าย แต่เป็นเส้นตรงและไม่ interactive
+- **Postman** — เหมาะกับการสำรวจ, มีประวัติที่บันทึกไว้, และปรับทีละ request ได้; test script ใน collection จะจับ `token`/`board_id`/`column_id`/`card_id`/`label_id` ให้อัตโนมัติเพื่อให้ request เชื่อมกัน แต่ก็เป็น GUI และ collection JSON ก็ยาวเวลาจะแก้ด้วยมือ
 
-ใช้สคริปต์ curl สำหรับ "มันยังทำงานอยู่ไหม?" และใช้ Postman สำหรับ "ขอลองแหย่ดูหน่อย"
+ใช้สคริปต์ curl สำหรับ "ยังทำงานอยู่ไหม?" และใช้ Postman สำหรับ "ขอลองแหย่ดูหน่อย"
 
-## The curl smoke test
+## ชุด smoke test ด้วย curl
 
-เซฟไฟล์นี้เป็น `taskflow-smoke.sh` (หรือดาวน์โหลดด้านบน) แล้วรัน `bash taskflow-smoke.sh` มันจะ register ผู้ใช้ใหม่ทุกครั้งที่รัน (เพื่อให้รันซ้ำไม่ชน "email already taken") จากนั้นสร้าง board → columns → cards, ย้าย card, แนบ label แล้วพิมพ์ board tree สุดท้ายออกมา
+เซฟไฟล์นี้เป็น `taskflow-smoke.sh` (หรือดาวน์โหลดด้านบน) แล้วรัน `bash taskflow-smoke.sh` สคริปต์จะ register ผู้ใช้ใหม่ทุกครั้งที่รัน (เพื่อให้รันซ้ำไม่ชน "email already taken") จากนั้นสร้าง board → columns → cards, ย้าย card, แนบ label แล้วพิมพ์ board tree สุดท้ายออกมา
 
 ```bash
 #!/usr/bin/env bash
@@ -81,7 +81,7 @@ curl -s "$BASE/boards/$BOARD_ID" "${AUTH[@]}" \
 say "Done ✅  (board $BOARD_ID)"
 ```
 
-## The Postman collection
+## ชุด Postman collection
 
 ดาวน์โหลด [`taskflow.postman_collection.json`](/taskflow/taskflow.postman_collection.json) แล้วใน Postman: **Import** → ลากไฟล์ลงไป คุณจะได้ห้าโฟลเดอร์ — **Auth · Boards · Columns · Cards · Labels** — พร้อมกับ collection variable เหล่านี้:
 
@@ -99,9 +99,9 @@ const res = pm.response.json();
 if (res.id) { pm.collectionVariables.set('board_id', res.id); }
 ```
 
-นี่คือเหตุผลที่ request เชื่อมกันได้: รัน **Auth → Register** (หรือ **Login**) หนึ่งครั้ง จากนั้นรัน **Create board → Create column → Create card → Move card → Create label → Attach label** จากบนลงล่าง แล้วทุก `{{...}}` จะถูกเติมให้เรียบร้อย คุณยังรันทั้ง collection พร้อมกันได้ด้วย **Collection Runner** ของ Postman
+นี่คือเหตุผลที่ request เชื่อมกันได้: รัน **Auth → Register** (หรือ **Login**) หนึ่งครั้ง จากนั้นรัน **Create board → Create column → Create card → Move card → Create label → Attach label** จากบนลงล่าง แล้วทุก `{{...}}` จะเติมค่าให้เองเรียบร้อย คุณยังรันทั้ง collection พร้อมกันได้ด้วย **Collection Runner** ของ Postman
 
-## Verify
+## ตรวจสอบผล
 
 เมื่อสแตกรันอยู่ `bash taskflow-smoke.sh` ควรจบด้วยประมาณนี้:
 
@@ -120,6 +120,6 @@ if (res.id) { pm.collectionVariables.set('board_id', res.id); }
 
 Card B เริ่มที่ *To Do* และไปจบที่ *In Progress* — endpoint move ทำงาน และการอ่าน board tree ก็สะท้อนผลนั้น ใน Postman คุณจะเห็นแบบเดียวกันทีละ request พร้อมเครื่องหมายถูกสีเขียวของ test ที่ยืนยันการจับค่าแต่ละครั้ง
 
-## Recap
+## สรุป
 
-ตอนนี้คุณมีสองวิธีลงมือขับทั้ง API: สคริปต์ `curl` + `jq` สำหรับ smoke test end-to-end แบบคำสั่งเดียว และ Postman collection แบบเชื่อมต่อกันสำหรับการสำรวจแบบ interactive — ทั้งคู่รู้จัก auth และครอบคลุม board, column, card, การย้าย และ label เก็บสคริปต์ smoke ไว้ใน repo เพราะมันคือการเช็ก "ฉันทำ API พังหรือเปล่า?" ที่เร็วที่สุดหลังแก้โค้ดทุกครั้ง
+ตอนนี้คุณมีสองวิธีลงมือขับทั้ง API: สคริปต์ `curl` + `jq` สำหรับ smoke test end-to-end แบบคำสั่งเดียว และ Postman collection แบบเชื่อมต่อกันสำหรับการสำรวจแบบ interactive — ทั้งคู่รู้จัก auth และครอบคลุม board, column, card, การย้าย และ label เก็บสคริปต์ smoke ไว้ใน repo เพราะเป็นวิธีเช็ก "ฉันทำ API พังหรือเปล่า?" ที่เร็วที่สุดหลังแก้โค้ดทุกครั้ง

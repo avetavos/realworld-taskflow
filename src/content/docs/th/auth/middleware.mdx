@@ -5,31 +5,35 @@ sidebar:
   order: 3
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
-`middleware.rs` มี extractor `AuthUser(pub uuid::Uuid)` ที่ implement `FromRequestParts<AppState>` ของ Axum การเพิ่ม `AuthUser` เป็น argument ใน handler ไหนก็ตาม จะบังคับให้ request นั้นต้องมี header `Authorization: Bearer <token>` ที่ valid และยังไม่ถูก revoke โดยอัตโนมัติ — Axum รันการ extract ก่อนที่ body ของ handler จะทำงานเลย และการ extract ที่ล้มเหลวจะตัดจบไปที่ HTTP response ทันที ไม่ต้องเช็ค `if` มือในตัว handler เลย
+`middleware.rs` มี extractor `AuthUser(pub uuid::Uuid)` ที่ implement `FromRequestParts<AppState>` ของ Axum ใส่ `AuthUser` เป็น argument ใน handler ตัวไหน handler ตัวนั้นก็บังคับให้ request ต้องมี header `Authorization: Bearer <token>` ที่ valid และยังไม่โดน revoke ทันที
 
-ภายใต้ผิว `AuthUser` ทำสามอย่างตามลำดับ: ดึง bearer token ออกจาก header `Authorization`, verify signature และวันหมดอายุของมันด้วย `jwt::verify` จากบทเรียนก่อน แล้วยืนยันว่า `jti` ของมันยังอยู่ใน Redis allowlist (`auth:token:{jti}`) ก่อนที่จะเชื่อมัน
+Axum รันการ extract ก่อน body ของ handler จะทำงาน และถ้า extract ไม่ผ่านก็ตัดจบไปที่ HTTP response เลย ไม่ต้องเขียน `if` เช็คเองในตัว handler สักบรรทัด
 
-## Why
+ภายใต้ผิว `AuthUser` ทำสามอย่างตามลำดับ: ดึง bearer token ออกจาก header `Authorization`, verify signature และวันหมดอายุด้วย `jwt::verify` จากบทเรียนก่อน แล้วยืนยันว่า `jti` ยังอยู่ใน Redis allowlist (`auth:token:{jti}`) ก่อนจะเชื่อถือ token นั้น
 
-ทุก route ที่ต้อง login ใน module REST API ต้องการการเช็คสามอย่างเหมือนกัน — มี token ไหม, มันเป็น JWT ที่เซ็นถูกต้องและยังไม่หมดอายุไหม, และมันถูก revoke แล้วหรือยัง — และ logic พวกนั้นไม่ควรถูก duplicate อยู่ในทุก handler เลย ระบบ extractor ของ Axum มีไว้เพื่อสิ่งนี้โดยเฉพาะ: type ที่ implement `FromRequestParts` สามารถถูกเพิ่มเป็น argument ของ handler ได้ และ Axum รัน logic การ extract ให้อัตโนมัติ ก่อนที่ code ของ handler เองจะรัน โดยใช้แค่ `Parts` ของ request (method, URI, header — ทุกอย่างยกเว้น body) และ `AppState` ที่แชร์กันอยู่
+## ทำไม
 
-นั่นเปลี่ยน "route นี้ต้องการผู้ใช้ที่ login แล้ว" ให้กลายเป็น type signature เทียบ `async fn get_board(State(state): State<AppState>, Path(id): Path<Uuid>)` (ไม่ต้อง login) กับ `async fn get_board(State(state): State<AppState>, AuthUser(user_id): AuthUser, Path(id): Path<Uuid>)` (ต้อง login) — เวอร์ชันที่สองเรียกไม่ได้เลยถ้าไม่มี token ที่ valid ผ่าน `AuthUser::from_request_parts` มาก่อน และ compiler บังคับว่าทุก handler ที่ต้องการ `user_id` ต้องขอมันจริง ๆ
+ทุก route ที่ต้อง login ใน module REST API ต้องการการเช็คสามอย่างเหมือนกัน — มี token ไหม, เป็น JWT ที่เซ็นถูกต้องและยังไม่หมดอายุไหม, โดน revoke ไปแล้วหรือยัง — และ logic ชุดนี้ไม่ควรไป duplicate อยู่ในทุก handler
 
-## Pros & cons
+ระบบ extractor ของ Axum มีไว้เพื่อสิ่งนี้โดยเฉพาะ: type ที่ implement `FromRequestParts` ใส่เป็น argument ของ handler ได้ แล้ว Axum จะรัน logic การ extract ให้อัตโนมัติก่อนโค้ดของ handler โดยใช้แค่ `Parts` ของ request (method, URI, header — ทุกอย่างยกเว้น body) กับ `AppState` ที่แชร์กันอยู่
+
+นั่นเปลี่ยน "route นี้ต้องการผู้ใช้ที่ login แล้ว" ให้กลายเป็น type signature ลองเทียบ `async fn get_board(State(state): State<AppState>, Path(id): Path<Uuid>)` (ไม่ต้อง login) กับ `async fn get_board(State(state): State<AppState>, AuthUser(user_id): AuthUser, Path(id): Path<Uuid>)` (ต้อง login) เวอร์ชันที่สองเรียกไม่ได้เลยถ้าไม่มี token ที่ valid ผ่าน `AuthUser::from_request_parts` มาก่อน และ compiler ก็บังคับให้ทุก handler ที่ต้องใช้ `user_id` ขอเข้ามาตรง ๆ
+
+## ข้อดีข้อเสีย
 
 **extractor `FromRequestParts` แบบกำหนดเอง (ตัวที่เราใช้) เทียบกับ `tower` middleware layer**
 
-- ข้อดี: `AuthUser` เป็น opt-in ต่อ route ในระดับ type — handler จะขอ `AuthUser` ใน signature ของมันหรือไม่ก็ได้ และ route สาธารณะ (`register`, `login`, `/health`) ก็แค่ไม่ใส่มันเข้าไป `tower::Layer` ห่อทั้ง `Router` หรือกลุ่ม route ทั้งกลุ่มแบบเดียวกันหมด ซึ่งหมายความว่าต้องสร้าง router ที่สองสำหรับ route สาธารณะ หรือไม่ก็ต้องร้อย logic "path นี้ยกเว้นไหม" เข้าไปใน layer เอง สำหรับชุด route ที่ endpoint ส่วนใหญ่ — แต่ไม่ใช่ทั้งหมด — ต้อง login extractor ทำให้การตัดสินใจ "สิ่งนี้ต้อง login ไหม" อยู่ในที่เดียวกันและอ่านง่ายที่ signature ของแต่ละ handler
-- ข้อเสีย: extractor รันแค่สำหรับ handler เฉพาะที่มันถูกเพิ่มเข้าไปเท่านั้น — ไม่มีที่เดียวที่จะเห็นว่า "ทุก route ใต้ `/boards` ต้อง login" แบบที่ `.route_layer()` ที่ใช้กับ router ที่ nest ไว้จะให้ได้ ถ้า TaskFlow มี block ใหญ่ของ route ที่ต้อง login เหมือนกันหมดในภายหลัง `tower` layer ที่ห่อแค่ sub-router นั้น (ยังสร้างบน extractor `AuthUser` เดิมภายใน) ก็คุ้มค่าที่จะกลับมาพิจารณาใหม่
+- ข้อดี: `AuthUser` เป็น opt-in ต่อ route ในระดับ type — handler จะขอ `AuthUser` ใน signature หรือไม่ก็ได้ ส่วน route สาธารณะ (`register`, `login`, `/health`) ก็แค่ไม่ใส่เข้าไป ขณะที่ `tower::Layer` ห่อทั้ง `Router` หรือกลุ่ม route ทั้งกลุ่มแบบเดียวกันหมด แปลว่าต้องสร้าง router ที่สองสำหรับ route สาธารณะ หรือไม่ก็ร้อย logic "path นี้ยกเว้นไหม" เข้าไปใน layer เอง สำหรับชุด route ที่ endpoint ส่วนใหญ่ — แต่ไม่ใช่ทั้งหมด — ต้อง login แบบนี้ ตัว extractor ทำให้คำตอบของ "อันนี้ต้อง login ไหม" อยู่ที่เดียวและอ่านออกได้จาก signature ของแต่ละ handler
+- ข้อเสีย: extractor รันเฉพาะกับ handler ที่ใส่เข้าไปเท่านั้น จึงไม่มีจุดเดียวที่มองเห็นว่า "ทุก route ใต้ `/boards` ต้อง login" แบบที่ `.route_layer()` บน router ที่ nest ไว้ให้ได้ ถ้าวันหนึ่ง TaskFlow มี block ใหญ่ของ route ที่ต้อง login เหมือนกันหมด `tower` layer ที่ห่อแค่ sub-router นั้น (โดยยังสร้างบน extractor `AuthUser` เดิมภายใน) ก็คุ้มที่จะกลับมาพิจารณาใหม่
 
 **`type Rejection = AppError` (ตัวที่เราใช้) เทียบกับ rejection type เฉพาะทาง**
 
-- ข้อดี: `AppError` implement `IntoResponse` อยู่แล้ว — ทุก variant map ไปที่ status code และรูปแบบ `{ "error": "<code>", "message": "<text>" }` เดียวกันกับที่ error ของทุก handler เองสร้างออกมา การใช้มันซ้ำหมายความว่า token ที่หมดอายุ, token ที่ถูก revoke และ header ที่หายไป ล้วน fail ด้วย JSON body `401 unauthorized` แบบเดียวกันเป๊ะกับที่ `Err(AppError::Unauthorized)` ของ handler เองจะสร้างออกมา — รูปแบบ error เดียว ทั่วทั้ง API รวมถึงส่วน auth ด้วย
+- ข้อดี: `AppError` implement `IntoResponse` อยู่แล้ว — ทุก variant map ไปที่ status code และรูปแบบ `{ "error": "<code>", "message": "<text>" }` เดียวกันกับที่ error ของทุก handler สร้างออกมา การใช้ซ้ำจึงทำให้ token ที่หมดอายุ, token ที่โดน revoke และ header ที่หายไป fail ด้วย JSON body `401 unauthorized` แบบเดียวกันเป๊ะกับที่ `Err(AppError::Unauthorized)` ในตัว handler จะสร้างออกมา — รูปแบบ error เดียวทั่วทั้ง API รวมถึงส่วน auth ด้วย
 - ข้อเสีย: `AppError` มี variant (`NotFound`, `Conflict`, ...) ที่ไม่สมเหตุสมผลเลยในฐานะความล้มเหลวของการ extract — `AuthUser` สร้างได้แค่ `Unauthorized` หรือ `Internal` เท่านั้น ดังนั้น type นี้จึงกว้างกว่าที่จำเป็นจริง ๆ ในที่นี้ เป็น trade-off ที่ยอมรับได้ เพื่อไม่ต้องดูแล `IntoResponse` impl ที่สองแค่สำหรับ extractor ตัวนี้ตัวเดียว
 
-## Build it
+## ลงมือสร้าง
 
 สร้าง `taskflow/backend/api/src/auth/middleware.rs`:
 
@@ -108,9 +112,9 @@ impl FromRequestParts<AppState> for AuthUser {
 
 - `FromRequestParts<AppState>` — ไม่ใช่ `FromRequestParts<S>` แบบ generic ที่ docs ของ Axum เองแสดงไว้ — เพราะ `AuthUser` ต้องการ `state.config.jwt_secret` และ `state.redis` โดยเฉพาะ การผูก impl เข้ากับ `AppState` ที่เป็นรูปธรรมของเรา (แทนที่จะ generic ข้าม `S` ไหนก็ได้) เหมาะเป๊ะสำหรับ extractor เฉพาะแอปแบบนี้ ตรงข้ามกับ extractor แบบ library ที่ใช้ซ้ำได้
 - `#[async_trait]` จำเป็นต้องมีตรงนี้: trait `FromRequestParts` ของ Axum 0.7 เองถูกนิยามด้วย macro `async_trait` ดังนั้น `impl` ที่เขียนมือ (ตรงข้ามกับ helper สไตล์ `#[derive(FromRequestParts)]` ซึ่งใช้ไม่ได้กับ extractor ที่เขียนมือแบบนี้) ต้องใช้ macro เดียวกันเพื่อสร้าง signature ที่ตรงกัน
-- `bearer_token` เป็นฟังก์ชันเล็ก ๆ แยกออกมา ไม่ได้ inline เข้าไปใน `from_request_parts` — [handlers](/taskflow/th/auth/handlers/) ใช้มันซ้ำเป๊ะ ๆ ใน `logout` ซึ่งต้องการ token ดิบด้วยเหตุผลเดียวกัน (เพื่อกู้ `jti` ของมัน) โดยไม่ต้อง duplicate logic การ parse header
-- การเช็ค Redis query ที่ key `auth:token:{jti}` — key เป๊ะ ๆ ที่ `register` และ `login` จะเขียนในบทเรียนถัดไป — และถือว่า key ที่หายไปคือ `Unauthorized` ไม่ใช่ "fail open" token อาจมี signature ที่ valid สมบูรณ์แบบแต่ยังถูกปฏิเสธตรงนี้ได้ ซึ่งเป็นประเด็นทั้งหมด: นี่คือการเช็ค revocation ที่ JWT เปล่า ๆ ให้ไม่ได้ด้วยตัวเอง
-- `state.redis.get()` คืน `deadpool_redis::Connection` แบบ pooled สังเกตว่า import คือ `deadpool_redis::redis::AsyncCommands` ไม่ใช่ crate `redis` ระดับบนสุดที่ version แยกต่างหาก — `deadpool-redis` re-export version `redis` เป๊ะที่ type `Connection` ของมัน implement ไว้ การดึง command trait จากที่อื่นจะ fail แบบเงียบ ๆ ในการเติม trait bound ให้ครบ
+- `bearer_token` เป็นฟังก์ชันเล็ก ๆ แยกออกมา ไม่ได้ inline เข้าไปใน `from_request_parts` — [handlers](/taskflow/th/auth/handlers/) ใช้ซ้ำเป๊ะ ๆ ใน `logout` ที่ต้องการ token ดิบด้วยเหตุผลเดียวกัน (เพื่อกู้ `jti`) โดยไม่ต้อง duplicate logic การ parse header
+- การเช็ค Redis query ที่ key `auth:token:{jti}` — key เป๊ะ ๆ ที่ `register` และ `login` จะเขียนในบทเรียนถัดไป — และถือว่า key ที่หายไปคือ `Unauthorized` ไม่ใช่ "fail open" token ที่มี signature valid สมบูรณ์แบบก็ยังโดนปฏิเสธตรงนี้ได้ และนั่นคือประเด็นทั้งหมด: นี่คือการเช็ค revocation ที่ JWT เปล่า ๆ ทำเองไม่ได้
+- `state.redis.get()` คืน `deadpool_redis::Connection` แบบ pooled สังเกตว่า import คือ `deadpool_redis::redis::AsyncCommands` ไม่ใช่ crate `redis` ระดับบนสุดที่แยก version ต่างหาก — `deadpool-redis` re-export `redis` เวอร์ชันเป๊ะที่ type `Connection` implement ไว้ ถ้าดึง command trait มาจากที่อื่น trait bound จะไม่ครบและ compile ไม่ผ่านแบบงง ๆ
 
 ### เพิ่ม `middleware` เข้า module `auth`
 
@@ -122,14 +126,16 @@ pub mod middleware;
 pub mod password;
 ```
 
-## Verify
+## ตรวจสอบผล
 
 ```bash
 cargo check -p api
 ```
 
-ผลลัพธ์ที่ควรได้: compile ผ่านพร้อม warning ประเภท `dead_code`/`never constructed` อยู่บ้าง — `AuthUser` ยังไม่ถูกใช้เป็น argument ของ handler ใดจนกว่าจะถึง [handlers](/taskflow/th/auth/handlers/) ที่เชื่อม `logout` เข้ามา นี่เป็นเรื่องปกติในขั้นนี้ เหมือนกับทุก module ที่เป็นโครงเตรียมไว้ก่อนหน้านี้
+ผลลัพธ์ที่ควรได้: compile ผ่านพร้อม warning ประเภท `dead_code`/`never constructed` อยู่บ้าง เพราะยังไม่มี handler ตัวไหนรับ `AuthUser` เป็น argument จนกว่าจะถึง [handlers](/taskflow/th/auth/handlers/) ที่เชื่อม `logout` เข้ามา นี่เป็นเรื่องปกติในขั้นนี้ เหมือนกับทุก module ที่เป็นโครงเตรียมไว้ก่อนหน้า
 
-## Recap
+## สรุป
 
-คุณสร้าง extractor `AuthUser` ใน `middleware.rs` โดย implement `FromRequestParts<AppState>` เพื่อเปลี่ยน "route นี้ต้องการผู้ใช้ที่ login แล้ว" ให้เป็นข้อกำหนดระดับ type แทนการเช็คมือในทุก handler `AuthUser::from_request_parts` ต่อการเช็คสามอย่างเป็นลูกโซ่ — มี bearer token, JWT signature และวันหมดอายุ valid, `jti` ยังอยู่ใน Redis allowlist — และ fail แบบปิดไปที่ `AppError::Unauthorized` ที่จุดแรกที่ไม่ผ่าน ต่อไปเราจะเขียน handler `register`, `login` และ `logout` ที่ออก token, เติม allowlist และสุดท้ายก็ใช้ `AuthUser` จริง ๆ ใน [handlers](/taskflow/th/auth/handlers/)
+คุณสร้าง extractor `AuthUser` ใน `middleware.rs` โดย implement `FromRequestParts<AppState>` เพื่อเปลี่ยน "route นี้ต้องการผู้ใช้ที่ login แล้ว" ให้เป็นข้อกำหนดระดับ type แทนการไล่เช็คเองในทุก handler
+
+ตัว `AuthUser::from_request_parts` ต่อการเช็คสามอย่างเป็นลูกโซ่ — มี bearer token, JWT signature กับวันหมดอายุยัง valid, `jti` ยังอยู่ใน Redis allowlist — แล้ว fail แบบปิดไปที่ `AppError::Unauthorized` ทันทีที่จุดแรกไม่ผ่าน ต่อไปเราจะเขียน handler `register`, `login` และ `logout` ที่ออก token, เติม allowlist และได้ใช้ `AuthUser` จริง ๆ ใน [handlers](/taskflow/th/auth/handlers/)

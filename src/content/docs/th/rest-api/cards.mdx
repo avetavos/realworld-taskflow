@@ -1,35 +1,37 @@
 ---
 title: Cards
-description: สร้าง cards/{model,repo,service,handlers,mod}.rs สำหรับ create, get, patch, และ delete — resolve board ของ card ผ่าน column ของมัน และ pattern COALESCE update สำหรับ body ของ PATCH แบบ partial
+description: สร้าง cards/{model,repo,service,handlers,mod}.rs สำหรับ create, get, patch, และ delete — resolve board ของ card ผ่าน column ที่ card อยู่ และ pattern COALESCE update สำหรับ body ของ PATCH แบบ partial
 sidebar:
   order: 4
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
-module `cards`: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, `mod.rs` ใต้ `taskflow/backend/api/src/cards/` สี่ endpoint — สร้าง card ใน column, ดึง card ตัวเดียว, patch title และ/หรือ description ของมัน, ลบมัน (`move` การกระทำที่ห้าและน่าสนใจที่สุดของ card มีบทของตัวเองแยกไป: [move-reorder](/taskflow/th/rest-api/move-reorder/))
+module `cards`: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, `mod.rs` ใต้ `taskflow/backend/api/src/cards/` สี่ endpoint — สร้าง card ใน column, ดึง card ตัวเดียว, patch title และ/หรือ description, ลบทิ้ง (`move` การกระทำที่ห้าและน่าสนใจที่สุดของ card มีบทของตัวเองแยกไป: [move-reorder](/taskflow/th/rest-api/move-reorder/))
 
-เหมือน `columns/model.rs` ก่อนหน้า `cards/model.rs` เป็น re-export บรรทัดเดียวของ `Card` จาก `boards::model` ที่เหลือทุกอย่างที่นี่ใหม่หมด: `cards::service` คือ module แรกที่การ resolve "นี่เป็นของ board ไหน" ต้องกระโดดสองครั้งแทนที่จะเป็นครั้งเดียว — board ของ card มาจาก `board_id` ของ *column* ของมัน ไม่ใช่คอลัมน์ `board_id` บน `cards` เอง (ไม่มีคอลัมน์นั้น — เช็ค schema ใน [schema](/taskflow/th/database/schema/) ได้)
+เหมือน `columns/model.rs` ก่อนหน้า `cards/model.rs` เป็น re-export บรรทัดเดียวของ `Card` จาก `boards::model` ที่เหลือทุกอย่างที่นี่ใหม่หมด: `cards::service` คือ module แรกที่การ resolve "นี่เป็นของ board ไหน" ต้องกระโดดสองครั้งแทนที่จะเป็นครั้งเดียว — board ของ card มาจาก `board_id` ของ *column* ที่ card ใบนั้นอยู่ ไม่ใช่คอลัมน์ `board_id` บน `cards` เอง (ไม่มีคอลัมน์นั้น — เช็ค schema ใน [schema](/taskflow/th/database/schema/) ได้)
 
-## Why
+## ทำไม
 
-`cards::service::card_board_id` — helper เล็ก ๆ แบบ private ที่หา column ของ card แล้วอ่าน `board_id` ของ column นั้น — มีอยู่เพราะ `cards` ไม่มี foreign key ตรงไปที่ `boards` เลย นี่ไม่ใช่ช่องว่างที่ต้องหาทางแก้ มันคือ schema ที่ซื่อสัตย์ต่อลำดับชั้นจริง: `boards → columns → cards` handler ทุกตัวในบทนี้ที่ไม่ใช่ `create_card` (ซึ่งมี `column_id` จาก URL อยู่แล้ว) ต้องการการ resolve สองชั้นนี้ก่อนจะเรียก `assert_member` ได้ และการทำใน function เล็ก ๆ ตัวเดียวหมายความว่า `get_card`, `update_card`, และ `delete_card` แต่ละตัวเรียกมันครั้งเดียวแทนที่จะ inline การ lookup สองครั้งเดียวกันซ้ำสามรอบ
+`cards::service::card_board_id` — helper เล็ก ๆ แบบ private ที่หา column ของ card แล้วอ่าน `board_id` ของ column นั้น — มีอยู่เพราะ `cards` ไม่มี foreign key ตรงไปที่ `boards` เลย นี่ไม่ใช่ช่องว่างที่ต้องหาทางแก้ แต่คือ schema ที่ซื่อสัตย์ต่อลำดับชั้นจริง: `boards → columns → cards`
 
-pattern `COALESCE($2, title)` ของ `update_card` คือจุดเดียวในบทนี้ที่มีการตัดสินใจ trade-off ขอบเขตจริง ๆ และมีการบันทึกไว้: request `PATCH` อัปเดต `title`, `description`, ทั้งคู่ หรือไม่มีอันไหนเลยได้ แต่มันไม่มีวัน *เคลียร์* `description` กลับเป็น `NULL` ได้เมื่อตั้งค่าไปแล้ว ครอบคลุมใน Pros & cons ด้านล่าง — เป็นการตัดสินใจเรื่องความง่ายอย่างตั้งใจ ไม่ใช่อุบัติเหตุ
+handler ทุกตัวในบทนี้ที่ไม่ใช่ `create_card` (ซึ่งมี `column_id` จาก URL อยู่แล้ว) ต้อง resolve สองชั้นนี้ก่อนจะเรียก `assert_member` ได้ การรวบไว้ใน function เล็ก ๆ ตัวเดียวทำให้ `get_card`, `update_card` และ `delete_card` แต่ละตัวเรียก helper นี้ครั้งเดียว แทนที่จะ inline การ lookup ชุดเดิมซ้ำสามรอบ
 
-## Pros & cons
+pattern `COALESCE($2, title)` ของ `update_card` คือจุดเดียวในบทนี้ที่มีการตัดสินใจ trade-off ขอบเขตจริง ๆ และมีการบันทึกไว้: request `PATCH` อัปเดต `title`, `description`, ทั้งคู่ หรือไม่มีอันไหนเลยได้ แต่ไม่มีวัน *เคลียร์* `description` กลับเป็น `NULL` ได้เมื่อตั้งค่าไปแล้ว ครอบคลุมใน Pros & cons ด้านล่าง — เป็นการตัดสินใจเรื่องความง่ายอย่างตั้งใจ ไม่ใช่อุบัติเหตุ
+
+## ข้อดีข้อเสีย
 
 **`UpdateCardRequest { title: Option<String>, description: Option<String> }` พร้อม `COALESCE` (ตัวที่เราใช้) เทียบกับ double-`Option` (`Option<Option<String>>`) ที่แยก "ไม่ได้ส่งมา" ออกจาก "ตั้งใจส่ง null มา"**
 
-- ข้อดี: `UpdateCardRequest` เป็น struct ธรรมดา — `Deserialize` เริ่มต้นของ `serde` จัดการมันได้โดยไม่ต้องเขียนโค้ดพิเศษเลย `SET title = COALESCE($2, title), description = COALESCE($3, description)` ของ `repo::update_card` คือ `UPDATE` เดียวอ่านง่าย ที่ปล่อย field ไหนก็ตามที่ผู้เรียกไม่ได้ส่งมาไว้เหมือนเดิม ซึ่งครอบคลุมสองรูปแบบ `PATCH` ที่พบบ่อยที่สุดถูกต้อง: "อัปเดตแค่ title" กับ "อัปเดตแค่ description"
-- ข้อเสีย: ไม่มีทางส่ง `PATCH` ที่เคลียร์ `description` เดิมกลับเป็น `NULL` ได้เลย — ส่ง `"description": null` ใน JSON body จะ deserialize เป็น `None` ซึ่ง `COALESCE` ปฏิบัติเหมือนกับ "field ถูกละไว้ทั้งหมด" ทำให้ description เดิมยังอยู่ การแยกสองกรณีนี้ต้องการ `Deserialize` แบบกำหนดเอง (มักเป็น `Option<Option<T>>` ห่อด้วย `#[serde(default, with = "...")]` หรือ enum สามสถานะ) ที่ track ว่า JSON key มีอยู่จริงไหม แยกจากค่าของมัน TaskFlow ยังไม่ต้องการมัน — ไม่มีที่ไหนใน frontend module ที่เคลียร์ description ให้ว่างเปล่า — เราเลยยอมรับรูปแบบที่ง่ายกว่า และบันทึกไว้ชัดเจนว่าขอบเขตอยู่ตรงไหน แทนที่จะสร้าง mechanism ทั่วไปล่วงหน้า
+- ข้อดี: `UpdateCardRequest` เป็น struct ธรรมดา — `Deserialize` เริ่มต้นของ `serde` จัดการได้โดยไม่ต้องเขียนโค้ดพิเศษเลย `SET title = COALESCE($2, title), description = COALESCE($3, description)` ของ `repo::update_card` คือ `UPDATE` เดียวอ่านง่าย ที่ปล่อย field ไหนก็ตามที่ผู้เรียกไม่ได้ส่งมาไว้เหมือนเดิม ซึ่งครอบคลุมสองรูปแบบ `PATCH` ที่พบบ่อยที่สุดถูกต้อง: "อัปเดตแค่ title" กับ "อัปเดตแค่ description"
+- ข้อเสีย: ไม่มีทางส่ง `PATCH` ที่เคลียร์ `description` เดิมกลับเป็น `NULL` ได้เลย — ส่ง `"description": null` ใน JSON body จะ deserialize เป็น `None` ซึ่ง `COALESCE` ปฏิบัติเหมือนกับ "field ถูกละไว้ทั้งหมด" ทำให้ description เดิมยังอยู่ การแยกสองกรณีนี้ต้องการ `Deserialize` แบบกำหนดเอง (มักเป็น `Option<Option<T>>` ห่อด้วย `#[serde(default, with = "...")]` หรือ enum สามสถานะ) ที่ track ว่า JSON key มีอยู่จริงไหม แยกจากค่าที่อยู่ข้างใน แต่ TaskFlow ยังไม่ต้องใช้ เพราะไม่มีที่ไหนใน frontend module ที่เคลียร์ description ให้ว่างเปล่า — เราเลยยอมรับรูปแบบที่ง่ายกว่า และบันทึกไว้ชัดเจนว่าขอบเขตอยู่ตรงไหน แทนที่จะสร้าง mechanism ทั่วไปล่วงหน้า
 
 **`cards::service::card_board_id` resolve column ใหม่ทุกครั้งที่เรียก (ตัวที่เราใช้) เทียบกับ `cards::repo::find_card` join `columns` ตรง ๆ เพื่อคืน `board_id` มาพร้อม card**
 
 - ข้อดี: `Card` (จาก `boards::model`) มี column ตรงตามที่ table `cards` มีเป๊ะ — ไม่มี field `board_id` เพิ่มที่มีอยู่แค่เพราะความต้องการ authorization ทำให้ struct เป็นภาพสะท้อน 1:1 ที่ซื่อสัตย์ต่อ table ที่ `sqlx::FromRow` อ่านมา `card_board_id` เป็น function แยกที่ชื่อชัดเจนว่า "สำหรับ authorization" ผู้อ่านมองเห็นได้ แทนที่จะเป็น field `board_id` บน `Card` เองที่เข้าใจผิดว่าเป็น schema จริงได้ง่าย
-- ข้อเสีย: `get_card`, `update_card`, และ `delete_card` แต่ละตัวรัน query เพิ่มสองครั้ง (หา card แล้วหา column ของมัน) ก่อนจะทำงานจริง — `JOIN` ใน `find_card` คืน card พร้อม `board_id` ของมันในคิวรีเดียวได้ นี่คือ trade-off round-trip-กับ-ความชัดเจนเดียวกับที่ [columns](/taskflow/th/rest-api/columns/) ตัดสินใจไปแล้วสำหรับ `find_column`-แล้ว-`assert_member` เพียงแค่ใช้ลึกลงไปอีกชั้นในลำดับชั้น ที่ขนาดของ TaskFlow ทั้งสอง query เพิ่มรวมกันยังต่ำกว่าหนึ่งมิลลิวินาทีมากเมื่อเทียบกับ indexed primary-key lookup
+- ข้อเสีย: `get_card`, `update_card`, และ `delete_card` แต่ละตัวรัน query เพิ่มสองครั้ง (หา card แล้วหา column ที่ card อยู่) ก่อนจะทำงานจริง — `JOIN` ใน `find_card` คืน card พร้อม `board_id` ในคิวรีเดียวได้ นี่คือ trade-off round-trip-กับ-ความชัดเจนเดียวกับที่ [columns](/taskflow/th/rest-api/columns/) ตัดสินใจไปแล้วสำหรับ `find_column`-แล้ว-`assert_member` เพียงแค่ใช้ลึกลงไปอีกชั้นในลำดับชั้น ที่ขนาดของ TaskFlow ทั้งสอง query เพิ่มรวมกันยังต่ำกว่าหนึ่งมิลลิวินาทีมากเมื่อเทียบกับ indexed primary-key lookup
 
-## Build it
+## ลงมือสร้าง
 
 ### 1. `cards/model.rs`
 
@@ -124,7 +126,7 @@ pub async fn delete_card(db: &PgPool, id: Uuid) -> AppResult<bool> {
 }
 ```
 
-`description: Option<&str>` ของ `insert_card` bind เข้า sqlx ตรง ๆ — `None` กลายเป็น SQL `NULL` ใน `INSERT` ตรงกับคอลัมน์ nullable `cards.description` จาก [schema](/taskflow/th/database/schema/) function `move_card` ของ repo เองครอบคลุมในบทถัดไป [move-reorder](/taskflow/th/rest-api/move-reorder/) — มันอยู่ในไฟล์เดียวกันนี้ แต่จะแนะนำที่นั่น คู่กับเลขคณิต position ที่มันรับใช้
+`description: Option<&str>` ของ `insert_card` bind เข้า sqlx ตรง ๆ — `None` กลายเป็น SQL `NULL` ใน `INSERT` ตรงกับคอลัมน์ nullable `cards.description` จาก [schema](/taskflow/th/database/schema/) ส่วน function `move_card` ของ repo เองอธิบายในบทถัดไป [move-reorder](/taskflow/th/rest-api/move-reorder/) — แม้จะอยู่ในไฟล์เดียวกันนี้ แต่จะแนะนำที่บทนั้น คู่กับเลขคณิต position ที่รองรับกันอยู่
 
 ### 3. `cards/service.rs`
 
@@ -215,7 +217,7 @@ pub async fn delete_card(db: &PgPool, user_id: Uuid, card_id: Uuid) -> AppResult
 }
 ```
 
-`card_board_id` รับ `&Card` ไม่ใช่ `card_id` ที่มันหาเอง — ผู้เรียกทุกคนมี `Card` อยู่ในมือแล้วจาก `repo::find_card` ของตัวเอง `card_board_id` เลยใช้ค่านั้นซ้ำแทนที่จะ lookup ครั้งที่สี่ซ้ำซ้อน `move_card` ที่ครอบคลุมในบทถัดไปก็เรียก helper private ตัวเดียวกันนี้
+`card_board_id` รับ `&Card` ไม่ใช่ `card_id` ที่ต้องไปหาเอง เพราะผู้เรียกทุกคนมี `Card` อยู่ในมือแล้วจาก `repo::find_card` ของตัวเอง `card_board_id` จึงใช้ค่านั้นซ้ำแทนที่จะ lookup ครั้งที่สี่ซ้ำซ้อน `move_card` ที่ครอบคลุมในบทถัดไปก็เรียก helper private ตัวเดียวกันนี้
 
 ### 4. `cards/handlers.rs`
 
@@ -317,7 +319,7 @@ pub fn routes() -> Router<AppState> {
 
 route `/cards/:id/move` เข้าร่วม chain `.route()` เดียวกันนี้ในบทถัดไป เมื่อ `handlers::move_card` มีอยู่ให้ route ไปหา
 
-### 6. Mount `cards::routes()` in `main.rs`
+### 6. Mount `cards::routes()` ใน `main.rs`
 
 ```rust
 mod auth;
@@ -339,7 +341,7 @@ let app = Router::new()
     .with_state(state);
 ```
 
-## Verify
+## ตรวจสอบผล
 
 ```bash
 cargo check -p api
@@ -362,7 +364,7 @@ CARD_ID=$(curl -s -X POST http://localhost:8080/columns/$COLUMN_ID/cards \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 ```
 
-ดึงมันตรง ๆ:
+ดึง card ออกมาตรง ๆ:
 
 ```bash
 curl -s http://localhost:8080/cards/$CARD_ID -H "Authorization: Bearer $TOKEN"
@@ -384,7 +386,7 @@ curl -s -X PATCH http://localhost:8080/cards/$CARD_ID \
 {"id":"...","column_id":"...","title":"Write the cards lesson","description":"Boards, columns, cards, labels","position":1.0,"created_at":"..."}
 ```
 
-ลบมัน:
+ลบทิ้ง:
 
 ```bash
 curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:8080/cards/$CARD_ID \
@@ -395,6 +397,8 @@ curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:8080/cards/$
 204
 ```
 
-## Recap
+## สรุป
 
-คุณสร้าง module `cards` — `model.rs` re-export `Card`, query ของ `repo.rs` แบบ insert-at-end และ partial-update ด้วย `COALESCE`, `service.rs`'s `card_board_id` helper ที่ resolve board ของ card ผ่าน column ของมัน (การ lookup authorization สองชั้นครั้งแรกในคอร์ส), และ `handlers.rs` บาง ๆ สี่ตัว `cards::routes()` รวมเข้า `main.rs` คุณยังเห็นขอบเขตที่บันทึกไว้ของ pattern `COALESCE`: มันตั้งค่า field ได้แต่ไม่มีวันเคลียร์กลับเป็น `NULL` ได้ ถัดไป [move-reorder](/taskflow/th/rest-api/move-reorder/) เพิ่มการกระทำที่ห้าและสุดท้ายของ card — ตัวที่ต้องการเลขคณิต fractional-position จริง ๆ ที่การออกแบบฐานข้อมูลทั้งหมดนี้ถูกสร้างขึ้นมาเพื่อรองรับ
+คุณสร้าง module `cards` — `model.rs` re-export `Card`, query ของ `repo.rs` แบบ insert-at-end และ partial-update ด้วย `COALESCE`, helper `card_board_id` ใน `service.rs` ที่ resolve board ของ card ผ่าน column ที่ card อยู่ (การ lookup authorization สองชั้นครั้งแรกในคอร์ส), และ `handlers.rs` บาง ๆ สี่ตัว โดยรวม `cards::routes()` เข้า `main.rs`
+
+คุณยังเห็นขอบเขตที่บันทึกไว้ของ pattern `COALESCE` ด้วย — ตั้งค่า field ได้ แต่ไม่มีวันเคลียร์กลับเป็น `NULL` ถัดไป [move-reorder](/taskflow/th/rest-api/move-reorder/) เพิ่มการกระทำที่ห้าและสุดท้ายของ card — ตัวที่ต้องการเลขคณิต fractional-position จริง ๆ ที่การออกแบบฐานข้อมูลทั้งหมดนี้ถูกสร้างขึ้นมาเพื่อรองรับ

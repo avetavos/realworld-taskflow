@@ -5,33 +5,33 @@ sidebar:
   order: 6
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
-function ใหม่หนึ่งตัว `move_card` เพิ่มเข้า `cards/service.rs` บวก handler และ DTO `MoveCardRequest` ของมันเพิ่มเข้า `cards/handlers.rs` บวก route ใหม่หนึ่งตัว `PATCH /cards/:id/move` เพิ่มเข้า `cards/mod.rs` นี่คือ endpoint ที่ทุกบทก่อนหน้าใน module นี้กำลังค่อย ๆ สร้างไปหา: ลาก card ไปตำแหน่งใหม่ — อาจเป็น column อื่นก็ได้ — แล้วบันทึกตำแหน่งที่มันตกลงพอดีด้วยการเขียนแค่แถวเดียว โดยใช้กลยุทธ์ `position` แบบ fractional จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/)
+function ใหม่หนึ่งตัว `move_card` เพิ่มเข้า `cards/service.rs` บวก handler กับ DTO `MoveCardRequest` เพิ่มเข้า `cards/handlers.rs` บวก route ใหม่หนึ่งตัว `PATCH /cards/:id/move` เพิ่มเข้า `cards/mod.rs` นี่คือ endpoint ที่ทุกบทก่อนหน้าใน module นี้กำลังค่อย ๆ สร้างไปหา: ลาก card ไปตำแหน่งใหม่ — อาจเป็น column อื่นก็ได้ — แล้วบันทึกตำแหน่งที่ card ตกลงพอดีด้วยการเขียนแค่แถวเดียว โดยใช้กลยุทธ์ `position` แบบ fractional จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/)
 
 `move_card` รับ `state: &AppState` ไม่ใช่ `db: &PgPool` เหมือน function อื่น ๆ ใน `service.rs` ของ module นี้ — ความต่างของ signature ที่ตั้งใจหนึ่งเดียวในทั้ง REST API module อธิบายด้านล่าง
 
-## Why
+## ทำไม
 
-`move_card` รับ `&AppState` แทน `&PgPool` เพราะมันคือ function เดียวในทั้ง module นี้ที่ Module 7 (Realtime) จะขยายด้วยความสามารถที่สอง: broadcast event `card.moved` ไปยังทุก client อื่นที่กำลังดู board เดียวกันอยู่ ผ่าน WebSocket hub ที่ module นั้นสร้าง hub นั้นจะอยู่บน `AppState` เหมือนกับที่ `db` และ `redis` อยู่แล้ว — ดังนั้นการให้ `move_card` มี `AppState` ทั้งตัวตอนนี้ แม้ตอนนี้มันจะเอื้อมไปแค่ `state.db` เท่านั้น หมายความว่า Module 7 เพิ่มแค่บรรทัดเดียว (การเรียก broadcast) โดยไม่ต้องเปลี่ยน signature ของ function นี้เลย และไม่ต้องแตะจุดเรียกของ `cards::handlers::move_card` ด้วย comment `// Module 7 wires realtime broadcast of card.moved here` ทำเครื่องหมายจุดที่บรรทัดนั้นจะไปอยู่พอดี
+`move_card` รับ `&AppState` แทน `&PgPool` เพราะเป็น function เดียวในทั้ง module นี้ที่ Module 7 (Realtime) จะขยายด้วยความสามารถที่สอง: broadcast event `card.moved` ไปยังทุก client อื่นที่กำลังดู board เดียวกันอยู่ ผ่าน WebSocket hub ที่ module นั้นสร้าง hub นั้นจะอยู่บน `AppState` เหมือนกับที่ `db` และ `redis` อยู่แล้ว — การให้ `move_card` ถือ `AppState` ทั้งตัวตั้งแต่ตอนนี้ แม้จะเอื้อมไปแค่ `state.db` จึงหมายความว่า Module 7 เพิ่มแค่บรรทัดเดียว (การเรียก broadcast) โดยไม่ต้องเปลี่ยน signature ของ function นี้เลย และไม่ต้องแตะจุดเรียกของ `cards::handlers::move_card` ด้วย comment `// Module 7 wires realtime broadcast of card.moved here` ทำเครื่องหมายจุดที่บรรทัดนั้นจะไปอยู่พอดี
 
 เลขคณิตตำแหน่งเองคือการแปลตรงตัวของกฎที่ [indexes-ordering](/taskflow/th/database/indexes-ordering/) กำหนดไว้แล้ว: หาค่าเฉลี่ยของเพื่อนบ้านสองข้าง, ก้าว `±1.0` ผ่านปลายข้างใดข้างหนึ่ง, หรือเริ่มที่ `1.0` สำหรับ target ที่ว่างเปล่า หน้าที่ของ `move_card` คือระบุให้ถูกว่ากรณีไหนที่ใช้ได้จาก `before_id`/`after_id` และปฏิเสธ request ที่พยายามย้าย card ไปอีก board อย่างถูกต้อง — เลขคณิตเองถูกตัดสินใจไปแล้วสอง module ก่อนหน้านี้
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **`before_id`/`after_id` เป็น `Option<Uuid>` สองตัวที่ระบุเพื่อนบ้านใหม่ของ card (ตัวที่เราใช้) เทียบกับ client ส่ง target `position: f64` ดิบที่คำนวณเอง**
 
-- ข้อดี: server เป็นที่เดียวที่ implement สูตร fractional-position — client (Kanban frontend ใน Module 9) แค่ต้องบอกว่า "ฉันวาง card นี้ระหว่าง card A กับ card B" (หรือ "ที่บนสุด" หรือ "ที่ล่างสุด" หรือ "เข้า column ว่าง") โดยใช้ id ที่มันมีอยู่แล้วจากการ render board ไม่มีวันต้องรู้ตำแหน่งตัวเลขปัจจุบันของอะไรเลย เลยไม่มีวันส่งค่าที่ชนกับ หรือ drift ไม่ตรงลำดับเมื่อเทียบกับตำแหน่งของเพื่อนบ้านเพราะการอ่านฝั่ง client ที่เก่าเกินไปได้
-- ข้อเสีย: `move_card` จ่ายค่า `SELECT` เพิ่มสูงสุดสองครั้ง — ดึง `before` กับ `after` ด้วย id ถ้าให้มา — ก่อนที่จะคำนวณอะไรได้เลย ในขณะที่ `position: f64` ที่ client ส่งมาจะไม่ต้องการ query เพิ่มเลย นี่คือ trade-off ที่ถูกต้อง: การเชื่อให้ client คำนวณตำแหน่งเองถูกต้องหมายถึงต้องเชื่อให้ทุก frontend ในอนาคต (web ตอนนี้ อาจมี mobile ทีหลัง) implement กฎ fractional-averaging เดียวกันเป๊ะได้เหมือนกันและไม่มีวันส่งค่าเก่า — พื้นที่ที่ตรวจสอบยากกว่าและใหญ่กว่ามากเทียบกับ indexed primary-key lookup สองครั้งต่อการย้ายหนึ่งครั้ง
+- ข้อดี: server เป็นที่เดียวที่ implement สูตร fractional-position — client (Kanban frontend ใน Module 9) แค่ต้องบอกว่า "ฉันวาง card นี้ระหว่าง card A กับ card B" (หรือ "ที่บนสุด" หรือ "ที่ล่างสุด" หรือ "เข้า column ว่าง") โดยใช้ id ที่มีอยู่แล้วจากการ render board ไม่มีวันต้องรู้ตำแหน่งตัวเลขปัจจุบันของอะไรเลย เลยไม่มีวันส่งค่าที่ชนกับ หรือ drift ไม่ตรงลำดับเมื่อเทียบกับตำแหน่งของเพื่อนบ้านเพราะการอ่านฝั่ง client ที่เก่าเกินไปได้
+- ข้อเสีย: `move_card` จ่ายค่า `SELECT` เพิ่มสูงสุดสองครั้ง — ดึง `before` กับ `after` ด้วย id ถ้าให้มา — ก่อนที่จะคำนวณอะไรได้เลย ส่วน `position: f64` ที่ client ส่งมาจะไม่ต้องการ query เพิ่มเลย นี่คือ trade-off ที่ถูกต้อง: การเชื่อให้ client คำนวณตำแหน่งเองถูกต้องหมายถึงต้องเชื่อให้ทุก frontend ในอนาคต (web ตอนนี้ อาจมี mobile ทีหลัง) implement กฎ fractional-averaging เดียวกันเป๊ะได้เหมือนกันและไม่มีวันส่งค่าเก่า — พื้นที่ที่ตรวจสอบยากกว่าและใหญ่กว่ามากเทียบกับ indexed primary-key lookup สองครั้งต่อการย้ายหนึ่งครั้ง
 
 **ปฏิเสธการย้ายข้าม-board ด้วย `AppError::Forbidden` (ตัวที่เราใช้) เทียบกับเปลี่ยน parent ของ card อย่างเงียบ ๆ ไปยัง board ที่เพื่อนบ้าน `before`/`after` เป็นของ**
 
-- ข้อดี: `target_column.board_id != source_board_id` ถูกเช็คและปฏิเสธอย่างชัดเจน ด้วย `403` *ก่อน* เลขคณิตตำแหน่งจะรัน หรือแถวไหนจะถูกเขียนด้วยซ้ำ — สมาชิกของ board A ไม่มีวันใช้ `move_card` ลักลอบย้าย card จาก board A ไปยัง column บน board B ได้ แม้ว่าเขาจะบังเอิญเป็นสมาชิกของ board B ด้วยก็ตาม (ช่องโหว่ประเภทเดียวกับที่ [labels](/taskflow/th/rest-api/labels/) เคยเช็คสำหรับ attach/detach มาแล้ว ที่นี่ใช้กับการกระทำ move แทน)
-- ข้อเสีย: นี่ทำให้การย้าย card ข้าม-board ไม่ถูกรองรับเลยโดยสิ้นเชิง — ไม่มี endpoint ไหนในทั้ง API นี้สำหรับ "ย้าย card นี้ไปอีก board" มีแค่ "ย้าย card นี้ไปอีก column บน board เดียวกัน" ถ้า TaskFlow ต้องการมันเป็นฟีเจอร์จริงสักวัน (เช่น การกระทำ "คัดลอก card นี้ไปอีก board" ที่ตั้งใจ) มันต้องการ endpoint ที่ชัดเจนของตัวเอง พร้อม authorization story ของตัวเอง — ไม่ใช่ผลข้างเคียงจากการผ่อน check นี้
+- ข้อดี: `target_column.board_id != source_board_id` ถูกเช็คและปฏิเสธอย่างชัดเจน ด้วย `403` *ก่อน* เลขคณิตตำแหน่งจะรัน หรือก่อนจะเขียนแถวไหนด้วยซ้ำ — สมาชิกของ board A ไม่มีวันใช้ `move_card` ลักลอบย้าย card จาก board A ไปยัง column บน board B ได้ แม้ว่าเขาจะบังเอิญเป็นสมาชิกของ board B ด้วยก็ตาม (ช่องโหว่ประเภทเดียวกับที่ [labels](/taskflow/th/rest-api/labels/) เคยเช็คสำหรับ attach/detach มาแล้ว ที่นี่ใช้กับการกระทำ move แทน)
+- ข้อเสีย: นี่ทำให้การย้าย card ข้าม-board ไม่ถูกรองรับเลยโดยสิ้นเชิง — ไม่มี endpoint ไหนในทั้ง API นี้สำหรับ "ย้าย card นี้ไปอีก board" มีแค่ "ย้าย card นี้ไปอีก column บน board เดียวกัน" ถ้า TaskFlow ต้องการเป็นฟีเจอร์จริงสักวัน (เช่น การกระทำ "คัดลอก card นี้ไปอีก board" ที่ตั้งใจ) ก็ต้องมี endpoint ที่ชัดเจนของตัวเอง พร้อม authorization story ของตัวเอง — ไม่ใช่ผลข้างเคียงจากการผ่อน check นี้
 
-## Build it
+## ลงมือสร้าง
 
-### 1. `move_card` in `cards/repo.rs`
+### 1. `move_card` ใน `cards/repo.rs`
 
 เพิ่ม function นี้เข้าไฟล์ `taskflow/backend/api/src/cards/repo.rs` ที่สร้างไว้ใน [cards](/taskflow/th/rest-api/cards/):
 
@@ -56,11 +56,11 @@ pub async fn move_card(
 }
 ```
 
-`UPDATE` เดียวเขียนทั้ง `column_id` และ `position` ในคำสั่งเดียว — การย้ายภายใน column เดียวกัน (`column_id` ไม่เปลี่ยน) และการย้ายข้าม column เป็น query เดียวกัน เพราะการตั้ง column ให้เท่ากับค่าปัจจุบันของมันเองเป็น no-op ที่ไม่มีผลเสียหาย
+`UPDATE` เดียวเขียนทั้ง `column_id` และ `position` ในคำสั่งเดียว — การย้ายภายใน column เดียวกัน (`column_id` ไม่เปลี่ยน) และการย้ายข้าม column เป็น query เดียวกัน เพราะการตั้ง column ให้เท่ากับค่าเดิมเป็น no-op ที่ไม่มีผลเสียหาย
 
-### 2. `move_card` in `cards/service.rs`
+### 2. `move_card` ใน `cards/service.rs`
 
-เพิ่ม function นี้เข้า `cards/service.rs` คู่กับ `create_card`, `get_card`, `update_card`, และ `delete_card` จาก [cards](/taskflow/th/rest-api/cards/) — มันต้องการ `crate::state::AppState` import เข้าด้านบนไฟล์ด้วย:
+เพิ่ม function นี้เข้า `cards/service.rs` คู่กับ `create_card`, `get_card`, `update_card`, และ `delete_card` จาก [cards](/taskflow/th/rest-api/cards/) — ต้อง import `crate::state::AppState` เข้าด้านบนไฟล์ด้วย:
 
 ```rust
 pub async fn move_card(
@@ -115,9 +115,9 @@ pub async fn move_card(
 ไล่ลำดับทีละขั้น:
 
 1. **Resolve และ authorize card ที่กำลังย้าย** `repo::find_card` แล้ว `card_board_id` แล้ว `assert_member` — pattern สามขั้นเดียวกับที่ `get_card`/`update_card`/`delete_card` กำหนดไว้แล้วใน [cards](/taskflow/th/rest-api/cards/)
-2. **Resolve และ validate target column** `columns::repo::find_column` เอา `board_id` ของ `target_column_id` มา; ถ้ามันไม่ตรงกับ `source_board_id` การย้ายถูกปฏิเสธด้วย `403` ก่อนที่อย่างอื่นจะเกิดขึ้น
+2. **Resolve และ validate target column** `columns::repo::find_column` เอา `board_id` ของ `target_column_id` มา ถ้าไม่ตรงกับ `source_board_id` ระบบจะปฏิเสธการย้ายด้วย `403` ก่อนที่อย่างอื่นจะเกิดขึ้น
 3. **Resolve เพื่อนบ้านที่เป็น optional** `before_id`/`after_id` แต่ละตัวถูก lookup ถ้ามีมา — id ของ `before`/`after` ที่ไม่ resolve ไปยัง card จริงคือ `AppError::NotFound` การจัดการ "id ที่ให้มาไม่ resolve ไปอะไรเลย" แบบเดียวกับ lookup อื่น ๆ ใน module นี้
-4. **คำนวณตำแหน่ง** ด้วย `match (&before, &after)` สี่ทาง — match `&before`/`&after` (reference) ไม่ใช่ move `before`/`after` เพราะทั้งคู่ถูกอ่านอีกครั้งเพื่อ field `.position` ของมัน และไม่มีเหตุผลที่จะ consume มัน
+4. **คำนวณตำแหน่ง** ด้วย `match (&before, &after)` สี่ทาง — match `&before`/`&after` (reference) ไม่ใช่ move `before`/`after` เพราะยังต้องอ่าน field `.position` ของทั้งคู่อีกครั้ง จึงไม่มีเหตุผลที่จะ consume ไปเลย
 5. **บันทึกและคืนค่า** `repo::move_card` คือการเขียนหนึ่งเดียวใน function นี้ — ทุกอย่างข้างบนเป็น read หรือ check ทั้งนั้น
 
 ### 3. `MoveCardRequest` และ handler ใน `cards/handlers.rs`
@@ -154,7 +154,7 @@ pub async fn move_card(
 
 `&state` ไม่ใช่ `&state.db` — handler เดียวใน module นี้ที่ส่ง `AppState` ทั้งตัวลงไปยัง function `service` ตรงกับ signature `&AppState` ของ `move_card` จากขั้นตอนที่ 2
 
-### 4. Add the route in `cards/mod.rs`
+### 4. เพิ่ม route ใน `cards/mod.rs`
 
 อัปเดต `cards::routes()`:
 
@@ -174,7 +174,7 @@ pub fn routes() -> Router<AppState> {
 
 `patch` ต้องถูกเพิ่มเข้า import `axum::routing` ด้านบนไฟล์คู่กับ `get` และ `post` ถ้ายังไม่มีอยู่แล้วจาก [cards](/taskflow/th/rest-api/cards/)
 
-## Verify
+## ตรวจสอบผล
 
 ```bash
 cargo check -p api
@@ -200,7 +200,7 @@ CARD_B=$(curl -s -X POST http://localhost:8080/columns/$TODO/cards \
   -d '{"title":"Card B"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
 ```
 
-`$CARD_A` มี `position = 1.0`, `$CARD_B` มี `position = 2.0` ย้าย `$CARD_B` เข้า column `$DOING` ที่ว่างเปล่า — ไม่มี `before_id`/`after_id` เลยมันไปอยู่ที่ `1.0`:
+`$CARD_A` มี `position = 1.0`, `$CARD_B` มี `position = 2.0` ย้าย `$CARD_B` เข้า column `$DOING` ที่ว่างเปล่า — ไม่มี `before_id`/`after_id` การ์ดจึงไปอยู่ที่ `1.0`:
 
 ```bash
 curl -s -X PATCH http://localhost:8080/cards/$CARD_B/move \
@@ -224,7 +224,7 @@ curl -s -X PATCH http://localhost:8080/cards/$CARD_B/move \
 {"id":"...","column_id":"...","title":"Card B","description":null,"position":2.0,"created_at":"..."}
 ```
 
-สร้าง card ที่สามแล้ววางมันไว้*ระหว่าง* A กับ B:
+สร้าง card ที่สามแล้ววางไว้*ระหว่าง* A กับ B:
 
 ```bash
 CARD_C=$(curl -s -X POST http://localhost:8080/columns/$TODO/cards \
@@ -251,7 +251,7 @@ curl -s http://localhost:8080/boards/$BOARD_ID -H "Authorization: Bearer $TOKEN"
 ['Card A', 'Card C', 'Card B']
 ```
 
-สุดท้าย ยืนยันการปฏิเสธข้าม-board: สร้าง board ที่สองแล้วลองย้าย card เข้า column ของมัน:
+สุดท้าย ยืนยันการปฏิเสธข้าม-board: สร้าง board ที่สองแล้วลองย้าย card เข้า column ของ board นั้น:
 
 ```bash
 BOARD2=$(curl -s -X POST http://localhost:8080/boards \
@@ -271,6 +271,6 @@ curl -s -o /dev/null -w "%{http_code}\n" -X PATCH http://localhost:8080/cards/$C
 403
 ```
 
-## Recap
+## สรุป
 
-คุณเพิ่ม `move_card` — endpoint ที่ทั้ง REST API module กำลังนำไปสู่ — เข้า `cards/service.rs`, `cards/handlers.rs`, และ `cards/mod.rs` มัน resolve และ authorize card กับ target column ของมัน ปฏิเสธการย้ายข้าม-board ด้วย `403` ก่อนที่การเขียนใด ๆ จะเกิด resolve เพื่อนบ้าน `before`/`after` แบบ optional ของมัน และใช้กฎ fractional-position เป๊ะที่ `indexes-ordering` กำหนดไว้สอง module ก่อนหน้านี้: หาค่าเฉลี่ยของเพื่อนบ้านสองข้าง, ก้าว `±1.0` ผ่านปลายข้างใดข้างหนึ่ง, หรือ `1.0` เข้า column ว่าง `move_card` รับ `&AppState` แทน `&PgPool` — ความต่างของ signature ที่ตั้งใจหนึ่งเดียวในทั้ง module นี้ — เพื่อให้ Module 7 เพิ่ม broadcast `card.moved` ที่ comment ที่ทำเครื่องหมายไว้ได้ โดยไม่ต้องเปลี่ยน signature ของ function นี้หรือจุดเรียกของ handler ของมันเลย นั่นคือการปิด Module 5: REST API ของ TaskFlow ตอนนี้มี CRUD เต็มรูปแบบครอบคลุม boards, columns, cards, และ labels, authorization ตาม membership ในทุก endpoint, และการกระทำเดียว — การจัดลำดับใหม่ — ที่การออกแบบฐานข้อมูลทั้งหมดใน Module 2 ถูกสร้างมาเพื่อรองรับอย่างถูก ถัดไป [Caching](/taskflow/th/caching/) เอา Redis มาใช้เร่งความเร็วการอ่านที่ module นี้เพิ่งสร้างขึ้นมา
+คุณเพิ่ม `move_card` — endpoint ที่ทั้ง REST API module กำลังนำไปสู่ — เข้า `cards/service.rs`, `cards/handlers.rs`, และ `cards/mod.rs` โดย function นี้ resolve และ authorize ทั้ง card และ target column ปฏิเสธการย้ายข้าม-board ด้วย `403` ก่อนที่การเขียนใด ๆ จะเกิด resolve เพื่อนบ้าน `before`/`after` แบบ optional แล้วใช้กฎ fractional-position เป๊ะที่ `indexes-ordering` กำหนดไว้สอง module ก่อนหน้านี้: หาค่าเฉลี่ยของเพื่อนบ้านสองข้าง, ก้าว `±1.0` ผ่านปลายข้างใดข้างหนึ่ง, หรือ `1.0` เข้า column ว่าง `move_card` รับ `&AppState` แทน `&PgPool` — ความต่างของ signature ที่ตั้งใจหนึ่งเดียวในทั้ง module นี้ — เพื่อให้ Module 7 เพิ่ม broadcast `card.moved` ที่ comment ที่ทำเครื่องหมายไว้ได้ โดยไม่ต้องเปลี่ยน signature ของ function นี้หรือจุดเรียกในฝั่ง handler เลย นั่นคือการปิด Module 5: REST API ของ TaskFlow ตอนนี้มี CRUD เต็มรูปแบบครอบคลุม boards, columns, cards, และ labels, authorization ตาม membership ในทุก endpoint, และการกระทำเดียว — การจัดลำดับใหม่ — ที่การออกแบบฐานข้อมูลทั้งหมดใน Module 2 ถูกสร้างมาเพื่อรองรับอย่างถูก ถัดไป [Caching](/taskflow/th/caching/) เอา Redis มาใช้เร่งความเร็วการอ่านที่ module นี้เพิ่งสร้างขึ้นมา

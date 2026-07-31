@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-## What we're building
+## สิ่งที่จะสร้าง
 
 **Cargo workspace** ของ Rust จริง ๆ ภายใน `taskflow/backend/` โดยมี member crate ตัวเดียวคือ `api` (ชื่อ package `taskflow-api`) ที่จะเติบโตกลายเป็น Axum server เต็มรูปแบบในโมดูลถัดไป เมื่อจบบทเรียนนี้ `cargo run` จะพิมพ์ `TaskFlow API` ออกทาง terminal — เป็นหลักฐานว่า workspace, crate และทุก dependency คอมไพล์เข้าด้วยกันได้ ก่อนที่เราจะเขียน handler สักตัว
 
@@ -18,11 +18,11 @@ backend/
         └── main.rs
 ```
 
-## Why
+## ทำไม
 
 **Cargo workspace** ให้หลาย crate ใช้ `Cargo.lock` และไดเรกทอรี build `target/` ร่วมกันได้ วันนี้ TaskFlow มี crate เดียว (`api`) แต่การจัดโครงสร้างเป็น workspace ตั้งแต่แรกหมายความว่าการเพิ่ม crate ตัวที่สองในภายหลัง — เช่น library `taskflow-core` ที่รวม domain type ที่ใช้ร่วมกัน หรือเครื่องมือ CLI สำหรับ admin — จะเป็นแค่การเพิ่มบรรทัดเดียวใน `members` โดยไม่ต้องปรับโครงสร้างใหม่และไม่ต้องมี dependency เวอร์ชันซ้ำซ้อน
 
-## Pros & cons
+## ข้อดีข้อเสีย
 
 **ข้อดี**
 
@@ -37,7 +37,7 @@ backend/
 
 เรายอมรับ overhead เล็กน้อยนี้ตอนนี้ เพราะโมดูล testing ของ TaskFlow ในภายหลังจะเพิ่มการตั้งค่า integration test ที่ได้ประโยชน์จากโครงสร้าง workspace
 
-## Build it
+## ลงมือสร้าง
 
 ### 1. สร้าง crate ด้วย `cargo new`
 
@@ -60,7 +60,7 @@ members = ["api"]
 resolver = "2"
 ```
 
-`members` ระบุ crate ทุกตัวที่เป็นสมาชิกของ workspace นี้ — ตอนนี้มีแค่ `api` `resolver = "2"` คือการเลือกใช้ feature resolver รุ่นใหม่ของ Cargo ซึ่งเป็นค่า default สำหรับ workspace ใหม่ และช่วยหลีกเลี่ยงปัญหาการรวม feature ข้าม crate ที่ไม่คาดคิด
+`members` ระบุ crate ทุกตัวที่เป็นสมาชิกของ workspace นี้ — ตอนนี้มีแค่ `api` `resolver = "2"` คือการเลือกใช้ feature resolver รุ่นใหม่ของ Cargo ที่เป็นค่า default สำหรับ workspace ใหม่ และช่วยหลีกเลี่ยงปัญหาการรวม feature ข้าม crate ที่ไม่คาดคิด
 
 ### 3. `api/Cargo.toml` — รายการ dependency ครบชุด
 
@@ -100,12 +100,12 @@ dependency แต่ละตัวมีไว้ทำอะไร:
 - **`sqlx`** (`runtime-tokio`, `postgres`, `uuid`, `chrono`, `macros`) — driver PostgreSQL แบบ async ที่ตรวจ query ตอน compile-time; `uuid` และ `chrono` ให้ SQLx map คอลัมน์ `uuid` และ timestamp ของ Postgres ไปเป็น Rust type ได้ตรง ๆ `macros` เปิดใช้ `query!`/`query_as!`
 - **`serde`** (`derive`) — `#[derive(Serialize, Deserialize)]` สำหรับทุก struct ของ request/response และโมเดลฐานข้อมูล
 - **`serde_json`** — encode/decode JSON ที่ `axum::Json` ใช้ภายใน และตรงไหนก็ตามที่เราสร้าง JSON เอง
-- **`uuid`** (`v4`, `serde`) — สร้าง UUID แบบ v4 แบบสุ่ม ที่ใช้เป็น primary key ของ board, column และ card; `serde` ทำให้มัน (de)serialize เป็น JSON ได้
+- **`uuid`** (`v4`, `serde`) — สร้าง UUID แบบ v4 แบบสุ่ม ที่ใช้เป็น primary key ของ board, column และ card; ส่วน `serde` ทำให้ (de)serialize เป็น JSON ได้
 - **`chrono`** (`serde`) — type สำหรับวันที่/เวลา สำหรับคอลัมน์ `created_at`/`updated_at` พร้อม `serde` รองรับ timestamp ใน JSON
 - **`jsonwebtoken`** — encode และ verify JWT access/refresh token ที่ออกในโมดูล Authentication
 - **`argon2`** — hash และ verify รหัสผ่านผู้ใช้; ห้ามเก็บหรือเปรียบเทียบรหัสผ่านแบบ plaintext เด็ดขาด
 - **`deadpool-redis`** — connection pool แบบ async สำหรับ Redis เพื่อให้ handler ยืม connection แทนที่จะเปิดใหม่ทุกครั้งที่มี request
-- **`redis`** (`tokio-comp`) — Redis client แบบ async ที่อยู่เบื้องหลัง `deadpool-redis`; `tokio-comp` ทำให้มันเข้ากันได้กับ Tokio runtime ของเรา
+- **`redis`** (`tokio-comp`) — Redis client แบบ async ที่อยู่เบื้องหลัง `deadpool-redis`; ส่วน `tokio-comp` ทำให้เข้ากันได้กับ Tokio runtime ของเรา
 - **`thiserror`** — derive `std::error::Error` และ `Display` ให้ enum error ของ domain เรา ซึ่งภายหลังเราจะแปลงเป็น HTTP response
 - **`tracing`** — logging/instrumentation แบบมีโครงสร้างและมีระดับ (level) ครอบคลุมทั้ง server
 - **`tracing-subscriber`** (`env-filter`) — ต่อสาย output ของ `tracing`; `env-filter` ให้เราควบคุมความละเอียดของ log ผ่านตัวแปร environment `RUST_LOG`
@@ -120,9 +120,9 @@ fn main() {
 }
 ```
 
-โค้ดนี้ตั้งใจให้ยังไม่ทำอะไรมากไปกว่านี้ โมดูล Backend Foundations (โมดูล 3) จะแทนที่มันด้วยการตั้งค่า Axum server จริง — router, state และ `axum::serve`
+โค้ดนี้ตั้งใจให้ยังไม่ทำอะไรมากไปกว่านี้ โมดูล Backend Foundations (โมดูล 3) จะแทนที่ด้วยการตั้งค่า Axum server จริง — router, state และ `axum::serve`
 
-## Verify
+## ตรวจสอบผล
 
 จาก `taskflow/backend/` build และรัน crate `api`:
 
@@ -136,7 +136,7 @@ cargo run -p api
 TaskFlow API
 ```
 
-ถ้ามัน compile ได้และพิมพ์บรรทัดนั้นออกมา แปลว่า workspace ต่อสายถูกต้องและ dependency ทุกเวอร์ชัน resolve ได้ ยืนยันเพิ่มด้วยว่าการเช็กทั้ง workspace ผ่านสะอาด:
+ถ้า compile ผ่านและพิมพ์บรรทัดนั้นออกมา แปลว่า workspace ต่อสายถูกต้องและ dependency ทุกเวอร์ชัน resolve ได้ ยืนยันเพิ่มด้วยว่าการเช็กทั้ง workspace ผ่านสะอาด:
 
 ```bash
 cargo check --workspace
@@ -144,6 +144,6 @@ cargo check --workspace
 
 ควร exit โดยไม่มี error (คำเตือนเรื่อง dependency ที่ยังไม่ได้ใช้เป็นเรื่องปกติในขั้นนี้ — เรายังไม่ได้ใช้ dependency ส่วนใหญ่)
 
-## Recap
+## สรุป
 
 คุณสร้าง Cargo workspace ที่ `taskflow/backend/` แล้ว โดยมี member ตัวเดียวคือ crate `taskflow-api` ใน `api/` `Cargo.toml` ที่ root ประกาศ `members = ["api"]`; `api/Cargo.toml` ล็อก dependency ครบชุดที่ TaskFlow ต้องการ — Axum, Tokio, SQLx, Serde, JWT, Argon2, Redis และ tracing — แต่ละตัวมีจุดประสงค์ที่คุณเข้าใจแล้ว `main.rs` แบบขั้นต่ำพิสูจน์ว่าทุกอย่าง compile และรันได้ด้วย `cargo run -p api` ต่อไปเราจะสร้างโครง frontend ใน [frontend-init](/taskflow/th/setup/frontend-init/)
