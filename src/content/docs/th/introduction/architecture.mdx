@@ -39,7 +39,7 @@ flowchart TD
 
 นี่คือ flow แบบคลาสสิก — อ่านบอร์ด, ย้าย card, สร้างคอลัมน์:
 
-1. **browser** ส่ง HTTP request ไปยัง **Axum API** (เช่น `GET /boards/:id` หรือ `PATCH /cards/:id`) ทั้ง Preact island และ static shell คุยกับ REST endpoint ชุดเดียวกัน
+1. **browser** ส่ง HTTP request ไปยัง **Axum API** (เช่น `GET /boards/{id}` หรือ `PATCH /cards/{id}`) ทั้ง Preact island และ static shell คุยกับ REST endpoint ชุดเดียวกัน
 2. Axum ยืนยันตัวตนของ request (JWT) แล้วรัน handler ที่ตรงกับ route นั้น
 3. สำหรับการอ่าน handler จะเช็ค **Redis** ก่อนว่ามีสำเนา cache ไว้ไหม ถ้าเจอ (hit) ก็คืนค่ากลับทันที ถ้าไม่เจอ (miss) ก็ query **PostgreSQL** ด้วย SQLx เก็บผลลัพธ์ไว้ใน Redis แล้วคืนค่า
 4. สำหรับการเขียน handler จะอัปเดต **PostgreSQL** (แหล่งความจริง) ล้าง cache ของ Redis ที่เกี่ยวข้อง และที่สำคัญคือ **publish event** ไปยัง Redis เพื่อบอกว่ามีอะไรเปลี่ยนไป

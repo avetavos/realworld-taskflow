@@ -7,7 +7,7 @@ sidebar:
 
 ## สิ่งที่จะสร้าง
 
-เพิ่มบรรทัดเดียว `cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;` เข้าไปในทุก service function ของ `boards`/`columns`/`cards`/`labels` ที่เปลี่ยนสิ่งที่ `GET /boards/:id` คืนกลับมา: `update_board`, `create_column`, `update_column`, `delete_column`, `create_card`, `update_card`, `delete_card`, `move_card`, `attach_label`, `detach_label`
+เพิ่มบรรทัดเดียว `cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;` เข้าไปในทุก service function ของ `boards`/`columns`/`cards`/`labels` ที่เปลี่ยนสิ่งที่ `GET /boards/{id}` คืนกลับมา: `update_board`, `create_column`, `update_column`, `delete_column`, `create_card`, `update_card`, `delete_card`, `move_card`, `attach_label`, `detach_label`
 
 ก่อนหน้านั้นแต่ละตัวต้องปรับ plumbing เล็ก ๆ เหมือนกันก่อน — เปลี่ยน parameter แรกจาก `db: &PgPool` เป็น `state: &AppState` แล้วเพิ่ม `let db = &state.db;` เป็นบรรทัดแรก — เพื่อให้ function หยิบ `state.redis` มา invalidate ได้
 

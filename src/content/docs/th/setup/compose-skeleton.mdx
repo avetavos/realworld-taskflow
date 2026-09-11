@@ -25,7 +25,7 @@ infra/
 - `docker compose up -d db redis` ได้ PostgreSQL + Redis ที่ใช้งานได้ภายในไม่กี่วินาที โดยไม่ต้องติดตั้งแบบ native
 - named volume คงข้อมูลไว้ข้าม container restart ทำให้คุณไม่เสียฐานข้อมูล local ทุกครั้งที่รัน `docker compose down`
 - healthcheck ทำให้เซอร์วิสที่พึ่งพา (เพิ่มในโมดูล 11) รอให้ "พร้อมรับ connection จริง ๆ" ได้ ไม่ใช่แค่ "container เริ่มทำงานแล้ว"
-- เวอร์ชันเดียวกันเป๊ะ (`postgres:16`, `redis:7`) สำหรับ developer ทุกคน — ไม่มีปัญหา "เครื่องผมมี Postgres 14"
+- เวอร์ชันเดียวกันเป๊ะ (`postgres:18`, `redis:8`) สำหรับ developer ทุกคน — ไม่มีปัญหา "เครื่องผมมี Postgres 14"
 
 **ข้อเสีย**
 
@@ -42,7 +42,7 @@ infra/
 ```yaml
 services:
   db:
-    image: postgres:16
+    image: postgres:18
     environment:
       POSTGRES_USER: taskflow
       POSTGRES_PASSWORD: taskflow
@@ -58,7 +58,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7
+    image: redis:8
     ports:
       - "6379:6379"
     healthcheck:
@@ -74,7 +74,7 @@ volumes:
 มีบางอย่างที่ควรพูดถึง:
 
 - `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` ตรงกับ credential ที่ฝังอยู่ใน `DATABASE_URL` ของ `.env.example` ที่ root อยู่แล้ว (`postgres://taskflow:taskflow@localhost:5432/taskflow`) — image ของ Postgres ใช้ตัวแปรทั้งสามนี้เพื่อสร้าง user, ฐานข้อมูล และรหัสผ่านตอน boot ครั้งแรก
-- `redis:7` ไม่ต้องการตัวแปร environment หรือ auth ใด ๆ สำหรับการพัฒนาบนเครื่อง local — ตรงกับ `REDIS_URL=redis://localhost:6379`
+- `redis:8` ไม่ต้องการตัวแปร environment หรือ auth ใด ๆ สำหรับการพัฒนาบนเครื่อง local — ตรงกับ `REDIS_URL=redis://localhost:6379`
 - ไม่มี key `version:` ระดับบนสุด — Docker Compose รุ่นใหม่อนุมานเวอร์ชัน schema จาก Compose spec ให้อัตโนมัติ และ key นี้ล้าสมัยไปแล้ว
 
 ### 2. เปิดใช้งาน
@@ -100,8 +100,8 @@ docker compose ps
 
 ```
 NAME              IMAGE          STATUS                    PORTS
-infra-db-1        postgres:16    Up 10 seconds (healthy)   0.0.0.0:5432->5432/tcp
-infra-redis-1     redis:7        Up 10 seconds (healthy)   0.0.0.0:6379->6379/tcp
+infra-db-1        postgres:18    Up 10 seconds (healthy)   0.0.0.0:5432->5432/tcp
+infra-redis-1     redis:8        Up 10 seconds (healthy)   0.0.0.0:6379->6379/tcp
 ```
 
 ถ้า container ไหนแสดง `unhealthy` ให้เช็ก log ด้วย `docker compose logs db` หรือ `docker compose logs redis`
@@ -150,4 +150,4 @@ PONG
 
 ## สรุป
 
-คุณเขียน `taskflow/infra/docker-compose.yml` ที่มีสองเซอร์วิส — `db` (`postgres:16`) และ `redis` (`redis:7`) — แต่ละตัวมี healthcheck (`pg_isready` / `redis-cli ping`) เพื่อให้เซอร์วิสที่พึ่งพารอ "พร้อมจริง" ไม่ใช่แค่ "container เริ่มแล้ว" ข้อมูลของ Postgres ถูกคงไว้ใน named volume `pgdata` จึงรอดจาก `docker compose down` (แต่ไม่รอดจาก `docker compose down -v` ที่ลบ volume ด้วย) `docker compose up -d db redis` เปิดทั้งสองขึ้นมา `docker compose ps` ยืนยันว่า `healthy` และคุณเชื่อมต่อแต่ละตัวด้วย `psql`/`redis-cli` ได้ทั้งแบบ native หรือผ่าน `docker compose exec` นี่คือจุดจบของโมดูล 1 — ตอนนี้คุณมี monorepo ที่วางโครงแล้ว, Rust workspace ที่ compile ได้, Astro dev server ที่รันอยู่ และ Postgres + Redis ที่ทำงานจริง ต่อไปคือโมดูล 2, การออกแบบฐานข้อมูล ที่เราจะออกแบบ schema และเขียน migration แรก
+คุณเขียน `taskflow/infra/docker-compose.yml` ที่มีสองเซอร์วิส — `db` (`postgres:18`) และ `redis` (`redis:8`) — แต่ละตัวมี healthcheck (`pg_isready` / `redis-cli ping`) เพื่อให้เซอร์วิสที่พึ่งพารอ "พร้อมจริง" ไม่ใช่แค่ "container เริ่มแล้ว" ข้อมูลของ Postgres ถูกคงไว้ใน named volume `pgdata` จึงรอดจาก `docker compose down` (แต่ไม่รอดจาก `docker compose down -v` ที่ลบ volume ด้วย) `docker compose up -d db redis` เปิดทั้งสองขึ้นมา `docker compose ps` ยืนยันว่า `healthy` และคุณเชื่อมต่อแต่ละตัวด้วย `psql`/`redis-cli` ได้ทั้งแบบ native หรือผ่าน `docker compose exec` นี่คือจุดจบของโมดูล 1 — ตอนนี้คุณมี monorepo ที่วางโครงแล้ว, Rust workspace ที่ compile ได้, Astro dev server ที่รันอยู่ และ Postgres + Redis ที่ทำงานจริง ต่อไปคือโมดูล 2, การออกแบบฐานข้อมูล ที่เราจะออกแบบ schema และเขียน migration แรก

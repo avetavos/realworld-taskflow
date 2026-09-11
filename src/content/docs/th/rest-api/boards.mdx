@@ -9,7 +9,7 @@ sidebar:
 
 module `boards`: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, และ `mod.rs` ใต้ `taskflow/backend/api/src/boards/` ห้า endpoint — list, create, read (เป็น tree เต็ม), rename, delete — บวกสอง function ที่ทุก module ในบทหลังของคอร์สนี้จะเรียก: `assert_member` และ `assert_owner`
 
-`model.rs` ในบทนี้มีมากกว่าแค่ `Board` เพราะยังนิยาม `Column`, `Card`, `ColumnWithCards` และ `BoardTree` ด้วย ทั้งที่ `columns` กับ `cards` ยังไม่มี module ของตัวเองเลย นี่คือความตั้งใจ ไม่ใช่ความผิดพลาด — `GET /boards/:id` คืน *tree ทั้งหมด* ดังนั้น `boards::model` ต้องรู้รูปร่างของ column-พร้อม-card ก่อนที่ resource เหล่านั้นจะมี endpoint CRUD ของตัวเองในสองบทถัดไป
+`model.rs` ในบทนี้มีมากกว่าแค่ `Board` เพราะยังนิยาม `Column`, `Card`, `ColumnWithCards` และ `BoardTree` ด้วย ทั้งที่ `columns` กับ `cards` ยังไม่มี module ของตัวเองเลย นี่คือความตั้งใจ ไม่ใช่ความผิดพลาด — `GET /boards/{id}` คืน *tree ทั้งหมด* ดังนั้น `boards::model` ต้องรู้รูปร่างของ column-พร้อม-card ก่อนที่ resource เหล่านั้นจะมี endpoint CRUD ของตัวเองในสองบทถัดไป
 
 ## ทำไม
 
@@ -21,12 +21,12 @@ module `boards`: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, และ `
 
 **`Column`/`Card` นิยามใน `boards::model`, re-export โดย `columns::model`/`cards::model` (ตัวที่เราใช้) เทียบกับนิยาม struct แต่ละตัวใน module resource ของตัวเอง แล้ว import เข้า `boards::model`**
 
-- ข้อดี: `BoardTree` มีอยู่ได้ตั้งแต่บทนี้ และนั่นคือสิ่งที่ทำให้ `GET /boards/:id` — อาจเป็น read ที่สำคัญที่สุดในทั้ง API — ออกได้ในบท 2 แทนที่จะรอจนกว่า `columns` กับ `cards` จะมีทั้งคู่ มีนิยาม `Column` แค่จุดเดียว และ `Card` แค่จุดเดียวในทั้ง codebase — `columns/model.rs` และ `cards/model.rs` เป็น re-export บรรทัดเดียว (`pub use crate::boards::model::Column;`) ไม่ใช่นิยาม struct ที่สองที่แยกกันและอาจ drift ไม่ตรงกับสิ่งที่ `BoardTree` มีจริง
+- ข้อดี: `BoardTree` มีอยู่ได้ตั้งแต่บทนี้ และนั่นคือสิ่งที่ทำให้ `GET /boards/{id}` — อาจเป็น read ที่สำคัญที่สุดในทั้ง API — ออกได้ในบท 2 แทนที่จะรอจนกว่า `columns` กับ `cards` จะมีทั้งคู่ มีนิยาม `Column` แค่จุดเดียว และ `Card` แค่จุดเดียวในทั้ง codebase — `columns/model.rs` และ `cards/model.rs` เป็น re-export บรรทัดเดียว (`pub use crate::boards::model::Column;`) ไม่ใช่นิยาม struct ที่สองที่แยกกันและอาจ drift ไม่ตรงกับสิ่งที่ `BoardTree` มีจริง
 - ข้อเสีย: `columns` กับ `cards` ต้องพึ่ง `boards` สำหรับ type หลักของตัวเอง ซึ่งกลับด้านความคาดหวังปกติที่ resource module เป็นเจ้าของ model ของตัวเอง — คนอ่าน `columns/model.rs` ครั้งแรกต้องตาม `pub use` หนึ่งจุดเพื่อไปหานิยามจริง นี่เป็น trade-off ที่ยุติธรรมสำหรับคอร์สที่สร้าง resource ตามลำดับการสอนแบบเฉพาะ — codebase ที่สร้างแบบ resource-first ตั้งแต่วันแรก (รู้ schema เต็มตั้งแต่ต้น) น่าจะเอา type แบบ read-model ที่ใช้ร่วมกันอย่าง `BoardTree` ไปไว้ใน `boards::model` เฉพาะ โดย*ไม่*เก็บนิยามหลักของ `Column`/`Card` ไว้ที่นั่นด้วย — แต่นั่นไม่ใช่ลำดับที่คอร์สนี้สร้าง
 
 **ประกอบ `BoardTree` ด้วย N+1 query — หนึ่งครั้งสำหรับ column และอีกหนึ่งครั้งต่อ column เพื่อดึง card ข้างใน (ตัวที่เราใช้) เทียบกับ query `JOIN` เดียวที่คืนแถวแบบ denormalized**
 
-- ข้อดี: `repo::find_columns` และ `repo::find_cards_for_column` เป็น function เล็ก ๆ ใช้ซ้ำได้อิสระ ทดสอบได้อิสระ — `find_cards_for_column` คือ query เดียวกับที่ endpoint `GET /columns/:id/cards` ในอนาคตจะใช้ ไม่ซ้ำซ้อนเลย ฝั่ง Rust (`service::get_tree`) ประกอบด้วย loop ธรรมดา ไม่ต้องเขียน logic การจัดกลุ่มแถวเองให้ถูกต้อง
+- ข้อดี: `repo::find_columns` และ `repo::find_cards_for_column` เป็น function เล็ก ๆ ใช้ซ้ำได้อิสระ ทดสอบได้อิสระ — `find_cards_for_column` คือ query เดียวกับที่ endpoint `GET /columns/{id}/cards` ในอนาคตจะใช้ ไม่ซ้ำซ้อนเลย ฝั่ง Rust (`service::get_tree`) ประกอบด้วย loop ธรรมดา ไม่ต้องเขียน logic การจัดกลุ่มแถวเองให้ถูกต้อง
 - ข้อเสีย: สำหรับ board ที่มี 10 column, `get_tree` รัน 11 query แทนที่จะเป็น 1 — ต้นทุน N+1 query จริง ๆ สำหรับขนาดของ TaskFlow (column ไม่กี่อันต่อ board, `cards(column_id, position)` มี index จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/) ทำให้แต่ละ per-column query เร็ว) นี่เป็น trade-off ที่ยอมรับได้และง่าย ระบบที่ board หนักมากในโปรดักชันอาจดึง card ทั้งหมดของ board ใน query เดียวที่มี index แล้วจัดกลุ่มด้วย `column_id` ใน Rust แทน แลก round trip น้อยลงหนึ่งครั้งกับขั้นตอนสร้าง `HashMap` เพิ่มขึ้นหนึ่งขั้น
 
 ## ลงมือสร้าง
@@ -373,7 +373,7 @@ pub fn routes() -> Router<AppState> {
             get(handlers::list_boards).post(handlers::create_board),
         )
         .route(
-            "/boards/:id",
+            "/boards/{id}",
             get(handlers::get_board)
                 .patch(handlers::update_board)
                 .delete(handlers::delete_board),
@@ -381,7 +381,7 @@ pub fn routes() -> Router<AppState> {
 }
 ```
 
-`.route("/boards", get(...).post(...))` และ `.route("/boards/:id", get(...).patch(...).delete(...))` — เรียก `.route()` ครั้งเดียวต่อ path โดยเชื่อทุก HTTP method ที่ path นั้นตอบสนองเข้ากับ `MethodRouter` ตัวเดียวกัน ตรงกับตารางใน [design](/taskflow/th/rest-api/design/) เป๊ะ: สอง path ห้า endpoint
+`.route("/boards", get(...).post(...))` และ `.route("/boards/{id}", get(...).patch(...).delete(...))` — เรียก `.route()` ครั้งเดียวต่อ path โดยเชื่อทุก HTTP method ที่ path นั้นตอบสนองเข้ากับ `MethodRouter` ตัวเดียวกัน ตรงกับตารางใน [design](/taskflow/th/rest-api/design/) เป๊ะ: สอง path ห้า endpoint
 
 ### 6. Mount `boards::routes()` ใน `main.rs`
 
@@ -403,7 +403,7 @@ let app = Router::new()
     .with_state(state);
 ```
 
-`.merge(boards::routes())` ไม่ใช่ `.nest(...)` — `boards::routes()` สร้าง path ของตัวเองเป็น absolute อยู่แล้ว (`/boards`, `/boards/:id`) ต่างจาก `auth::routes()` ที่สร้าง path แบบ relative (`/register`) ที่ต้องการ `.nest("/auth", ...)` เพื่อเติม prefix `Router::merge` รวมสอง router ที่ตกลง path เต็มของตัวเองอยู่แล้วเข้าด้วยกัน ทุก module ที่เหลือของคอร์สนี้ (`columns`, `cards`, `labels`) ตาม pattern ของ `boards` และถูก `.merge` แบบเดียวกัน
+`.merge(boards::routes())` ไม่ใช่ `.nest(...)` — `boards::routes()` สร้าง path ของตัวเองเป็น absolute อยู่แล้ว (`/boards`, `/boards/{id}`) ต่างจาก `auth::routes()` ที่สร้าง path แบบ relative (`/register`) ที่ต้องการ `.nest("/auth", ...)` เพื่อเติม prefix `Router::merge` รวมสอง router ที่ตกลง path เต็มของตัวเองอยู่แล้วเข้าด้วยกัน ทุก module ที่เหลือของคอร์สนี้ (`columns`, `cards`, `labels`) ตาม pattern ของ `boards` และถูก `.merge` แบบเดียวกัน
 
 ## ตรวจสอบผล
 

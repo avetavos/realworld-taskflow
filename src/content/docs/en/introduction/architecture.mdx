@@ -37,7 +37,7 @@ Splitting the system this way keeps each concern in the tool that's best at it: 
 
 This is the classic flow — read a board, move a card, create a column:
 
-1. The **browser** sends an HTTP request to the **Axum API** (e.g. `GET /boards/:id` or `PATCH /cards/:id`). The Preact island and the static shell both talk to the same REST endpoints.
+1. The **browser** sends an HTTP request to the **Axum API** (e.g. `GET /boards/{id}` or `PATCH /cards/{id}`). The Preact island and the static shell both talk to the same REST endpoints.
 2. Axum authenticates the request (JWT), then runs its handler.
 3. For a read, it first checks **Redis** for a cached copy. On a hit, it returns immediately. On a miss, it queries **PostgreSQL** with SQLx, stores the result in Redis, and returns it.
 4. For a write, it updates **PostgreSQL** (the source of truth), invalidates the relevant Redis cache entry, and — importantly — **publishes an event** to Redis describing what changed.

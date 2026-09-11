@@ -25,11 +25,11 @@ Add a nullable `due_at` column to `cards`, accept it in the create/update handle
 
 ### 3. Card comments with realtime (medium)
 
-Add a `comments` table keyed by card id, a `POST /cards/:id/comments` endpoint, and a `comment.created` event on the board channel so an open card detail view updates live — exactly the [ws-endpoint](/taskflow/en/realtime/ws-endpoint/) → [live-sync](/taskflow/en/kanban-island/live-sync/) path you built for card moves, applied to a second entity. Reuse the same reconcile-by-id idea from [live-sync](/taskflow/en/kanban-island/live-sync/).
+Add a `comments` table keyed by card id, a `POST /cards/{id}/comments` endpoint, and a `comment.created` event on the board channel so an open card detail view updates live — exactly the [ws-endpoint](/taskflow/en/realtime/ws-endpoint/) → [live-sync](/taskflow/en/kanban-island/live-sync/) path you built for card moves, applied to a second entity. Reuse the same reconcile-by-id idea from [live-sync](/taskflow/en/kanban-island/live-sync/).
 
 ### 4. Full-text search over cards (medium)
 
-Add a Postgres `tsvector` column (or a generated one) over card title and description, a GIN index, and a `GET /boards/:id/search?q=` endpoint that ranks matches with `ts_rank`. This is the natural next step from the indexing work in [indexes-ordering](/taskflow/en/database/indexes-ordering/) — same discipline, a new index type. Decide whether the result is cacheable through [cache-reads](/taskflow/en/caching/cache-reads/) or too query-specific to bother.
+Add a Postgres `tsvector` column (or a generated one) over card title and description, a GIN index, and a `GET /boards/{id}/search?q=` endpoint that ranks matches with `ts_rank`. This is the natural next step from the indexing work in [indexes-ordering](/taskflow/en/database/indexes-ordering/) — same discipline, a new index type. Decide whether the result is cacheable through [cache-reads](/taskflow/en/caching/cache-reads/) or too query-specific to bother.
 
 ### 5. Board roles and RBAC (medium–hard)
 

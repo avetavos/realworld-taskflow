@@ -1,13 +1,13 @@
 ---
 title: WebSocket Endpoint
-description: สร้าง realtime/handlers.rs — การ upgrade ของ GET /ws/boards/:id?token=, การยืนยันตัวตนผ่าน query parameter, การตรวจสอบสมาชิกภาพ และ tokio::select! loop ต่อ socket — พร้อมทั้ง Hub registry และฟิลด์บน AppState ที่ต้องพึ่งพา
+description: สร้าง realtime/handlers.rs — การ upgrade ของ GET /ws/boards/{id}?token=, การยืนยันตัวตนผ่าน query parameter, การตรวจสอบสมาชิกภาพ และ tokio::select! loop ต่อ socket — พร้อมทั้ง Hub registry และฟิลด์บน AppState ที่ต้องพึ่งพา
 sidebar:
   order: 2
 ---
 
 ## สิ่งที่จะสร้าง
 
-`realtime/handlers.rs`: `ws_upgrade` handler ที่อยู่เบื้องหลัง `GET /ws/boards/:id?token=<jwt>` และ `handle_socket` ฟังก์ชันที่ `ws_upgrade` ส่งต่อ connection ที่รับเข้ามาแต่ละอันไปให้ทำงาน ตัว `ws_upgrade` รันชุดตรวจสอบ signature, expiry และ Redis allowlist ชุดเดียวกับที่ `AuthUser` รันบนทุก REST request บวกกับการตรวจสอบสมาชิกภาพของบอร์ด ตั้งแต่ก่อน upgrade connection ด้วยซ้ำ — WebSocket ไปยังบอร์ดที่คุณอ่านไม่ได้จึงโดนปฏิเสธเข้มงวดพอ ๆ กับ `GET /boards/:id`
+`realtime/handlers.rs`: `ws_upgrade` handler ที่อยู่เบื้องหลัง `GET /ws/boards/{id}?token=<jwt>` และ `handle_socket` ฟังก์ชันที่ `ws_upgrade` ส่งต่อ connection ที่รับเข้ามาแต่ละอันไปให้ทำงาน ตัว `ws_upgrade` รันชุดตรวจสอบ signature, expiry และ Redis allowlist ชุดเดียวกับที่ `AuthUser` รันบนทุก REST request บวกกับการตรวจสอบสมาชิกภาพของบอร์ด ตั้งแต่ก่อน upgrade connection ด้วยซ้ำ — WebSocket ไปยังบอร์ดที่คุณอ่านไม่ได้จึงโดนปฏิเสธเข้มงวดพอ ๆ กับ `GET /boards/{id}`
 
 มีสองชิ้นเล็ก ๆ ที่มาด้วยกัน ทั้งคู่จำเป็นแค่เพื่อให้ `ws_upgrade` คอมไพล์ผ่าน: `realtime/hub.rs` มี struct `Hub` ที่เก็บ `tokio::sync::broadcast::Sender<String>` หนึ่งตัวต่อบอร์ดที่มี subscriber ที่ยังเชื่อมต่ออยู่อย่างน้อยหนึ่งราย และฟิลด์ใหม่หนึ่งฟิลด์บน `AppState` คือ `hub: Arc<realtime::hub::Hub>` เคียงข้างกับ `db`, `redis`, และ `config` เมื่อจบบทนี้ สองแท็บ browser ที่เชื่อมต่อ WebSocket ของบอร์ดเดียวกันจะเห็น event ของกันและกันได้แล้ว — ตราบใดที่ทั้งคู่คุยกับ backend process *เดียวกัน* [redis-backplane](/taskflow/th/realtime/redis-backplane/) จะเอาข้อจำกัดสุดท้ายนี้ออกไป
 
@@ -104,7 +104,7 @@ pub struct BoardEvent {
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/ws/boards/:id", get(handlers::ws_upgrade))
+    Router::new().route("/ws/boards/{id}", get(handlers::ws_upgrade))
 }
 ```
 
@@ -139,7 +139,7 @@ pub struct WsAuthQuery {
     pub token: String,
 }
 
-/// `GET /ws/boards/:id?token=<jwt>` — upgrades to a WebSocket after the
+/// `GET /ws/boards/{id}?token=<jwt>` — upgrades to a WebSocket after the
 /// same three checks `AuthUser` runs on every REST request (signature,
 /// expiry, Redis allowlist), plus board membership.
 pub async fn ws_upgrade(
@@ -184,7 +184,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, board_id: Uuid) {
             event = rx.recv() => {
                 match event {
                     Ok(json) => {
-                        if socket.send(Message::Text(json)).await.is_err() {
+                        if socket.send(Message::Text(json.into())).await.is_err() {
                             return;
                         }
                     }
@@ -229,6 +229,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, board_id: Uuid) {
 
 - **`rx.recv()`** — event ถัดไปที่ `Hub::subscribe` จะส่งให้บอร์ดนี้ เมื่อรับสำเร็จก็ส่งต่อไปยังไคลเอนต์เป็น `Message::Text` `RecvError::Lagged` (socket นี้ตามหลังเกิน `CHANNEL_CAPACITY` ข้อความ) *ไม่ใช่* ข้อผิดพลาดร้ายแรง — `continue` จะดึงข้อความถัดไปที่มีต่อ; socket ที่ตามหลัง event ที่มาถี่ยิบ 128 ครั้งบนบอร์ดที่คึกคักมากจะพลาด state ระหว่างทางไปบ้าง แต่ยังทำงานต่อได้ และ [reconnect](/taskflow/th/realtime/reconnect/) จะอธิบายว่าทำไมนี่ถึงเป็นช่องว่างที่ยอมรับได้และเยียวยาตัวเองได้ ไม่ใช่บั๊กที่ต้องกำจัด `RecvError::Closed` (ทุก `Sender` ของ channel นี้ถูก drop ไปแล้ว) จะจบ loop — สิ่งนี้เกิดขึ้นไม่ได้ในการออกแบบปัจจุบันของโมดูลนี้ เพราะ `Hub` เองถือ `Sender` ไว้ตลอด แต่ match ก็ต้องครอบคลุมทุกกรณีอยู่ดี
 - **`socket.recv()`** — อะไรก็ตามที่ไคลเอนต์ส่งมา frame `Close` หรือ connection ที่ปิดไปแล้ว (`None`) จะจบ loop อย่างอื่น (`Text`, `Binary`, `Ping`, `Pong`) ตอนนี้ไม่ทำอะไรเลย: socket นี้ push-only จากฝั่งเซิร์ฟเวอร์ ไคลเอนต์จึงไม่มีอะไรต้องบอกกลับมา — แค่ได้รับ *อะไรก็ได้* ก็เพียงพอที่จะรู้ว่า connection ยังมีชีวิตอยู่ ข้อผิดพลาดระดับ transport จะจบ loop
+- **`json.into()`** — `Message::Text` ของ Axum 0.8 ถือ `Utf8Bytes` (byte buffer ที่ตรวจแล้วว่าเป็น UTF-8 และ clone ถูก) แทน `String` ดังนั้น `String` ที่ได้จาก broadcast channel จึงถูกแปลงด้วย `.into()` ก่อนส่งออก ส่วน `Message::Binary` ก็ถือ `Bytes` ในทำนองเดียวกัน
 
 การ return จาก `handle_socket` — จาก branch ไหนก็ตาม — จะ drop `rx` ลดจำนวน receiver ของ `Sender` ของบอร์ดนั้นลงหนึ่ง ไม่มีขั้นตอนทำความสะอาดแยกต่างหากให้เขียนเพิ่ม: `broadcast::Receiver` ที่ถูก drop คือการยกเลิกการลงทะเบียนทั้งหมด
 
@@ -331,7 +332,7 @@ async fn health() -> Json<serde_json::Value> {
 }
 ```
 
-สามอย่างที่เปลี่ยนจากเวอร์ชันของ [rate-limit](/taskflow/th/caching/rate-limit/): `mod realtime;` เป็น module declaration ใหม่, literal ของ `AppState` ได้ฟิลด์ `hub: Arc::new(realtime::hub::Hub::new())` เพิ่มเข้ามา และ `.merge(realtime::routes())` เพิ่ม route `/ws/boards/:id` ใหม่เข้าไปใน `Router` เดียวกับที่ resource module อื่น ๆ ทุกตัว merge เข้าไป
+สามอย่างที่เปลี่ยนจากเวอร์ชันของ [rate-limit](/taskflow/th/caching/rate-limit/): `mod realtime;` เป็น module declaration ใหม่, literal ของ `AppState` ได้ฟิลด์ `hub: Arc::new(realtime::hub::Hub::new())` เพิ่มเข้ามา และ `.merge(realtime::routes())` เพิ่ม route `/ws/boards/{id}` ใหม่เข้าไปใน `Router` เดียวกับที่ resource module อื่น ๆ ทุกตัว merge เข้าไป
 
 ## ตรวจสอบผล
 

@@ -103,7 +103,7 @@ src/
 └── components/  # component .astro และ .tsx รวมถึง Preact island
 ```
 
-- **`src/pages/`** — router แบบ file-based ของ Astro; `src/pages/index.astro` กลายเป็น `/`, `src/pages/board/[id].astro` กลายเป็น `/board/:id` และต่อไปเรื่อย ๆ
+- **`src/pages/`** — router แบบ file-based ของ Astro; `src/pages/index.astro` กลายเป็น `/`, `src/pages/board/[id].astro` กลายเป็น `/board/{id}` และต่อไปเรื่อย ๆ
 - **`src/layouts/`** — โครงสร้างหน้าเพจที่ใช้ร่วมกัน (component `<Layout>` ที่มี `<html>`, `<head>` และ `<slot />`) ที่แต่ละหน้าห่อตัวเองด้วย
 - **`src/lib/`** — module TypeScript ธรรมดาที่ไม่มี logic การ render: fetch wrapper สำหรับ `PUBLIC_API_URL`, type ที่ใช้ร่วมกันของ board/column/card และ utility เล็ก ๆ ไม่มี component อยู่ในนี้เลย
 - **`src/components/`** — ชิ้นส่วน UI ที่ใช้ซ้ำได้ ส่วนใหญ่เป็น component `.astro` แบบ static; ตัว Kanban board เองจะเป็น Preact component `.tsx` อยู่ในนี้ ที่ hydrate เป็น island

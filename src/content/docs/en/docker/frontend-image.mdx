@@ -46,7 +46,7 @@ By the end, `docker build --build-arg PUBLIC_API_URL=http://localhost:8080 -f in
 # syntax=docker/dockerfile:1
 
 # ---- Builder ----
-FROM node:20 AS builder
+FROM node:24 AS builder
 WORKDIR /app/frontend
 
 # PUBLIC_ vars are inlined into the client bundle at build time by
@@ -62,7 +62,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---- Runtime ----
-FROM node:20-slim AS runtime
+FROM node:24-slim AS runtime
 WORKDIR /app/frontend
 
 ENV HOST=0.0.0.0
@@ -107,4 +107,4 @@ Expected: at least one match — some `_astro/*.js` chunk containing the literal
 
 ## Recap
 
-`taskflow/infra/frontend.Dockerfile` builds the same Node server [board-page](/taskflow/en/kanban-island/board-page/) ran locally with `npm run preview`, now inside a container: a `node:20` builder stage runs `npm ci` and `npm run build` with `PUBLIC_API_URL` passed in as a build `ARG` (re-exported as `ENV` so Vite's bundler can actually see it), and a `node:20-slim` runtime stage does its own `npm ci --omit=dev` before copying in just `dist/` and running `node ./dist/server/entry.mjs` on `HOST=0.0.0.0`, `PORT=4321`. The one idea worth carrying forward: `PUBLIC_` variables are a *build-time* concern for Astro, baked into the bundle the instant `npm run build` finishes, never a runtime lookup — get the URL wrong at build time and no amount of `docker run -e` afterward fixes it. Next, [compose-full](/taskflow/en/docker/compose-full/) wires both images — `backend` and `frontend` — into the same `docker-compose.yml` that already has `db` and `redis`, and walks the whole stack end to end: register, log in, create a board, and watch a drag-and-drop move sync live across two browser tabs.
+`taskflow/infra/frontend.Dockerfile` builds the same Node server [board-page](/taskflow/en/kanban-island/board-page/) ran locally with `npm run preview`, now inside a container: a `node:24` builder stage runs `npm ci` and `npm run build` with `PUBLIC_API_URL` passed in as a build `ARG` (re-exported as `ENV` so Vite's bundler can actually see it), and a `node:24-slim` runtime stage does its own `npm ci --omit=dev` before copying in just `dist/` and running `node ./dist/server/entry.mjs` on `HOST=0.0.0.0`, `PORT=4321`. The one idea worth carrying forward: `PUBLIC_` variables are a *build-time* concern for Astro, baked into the bundle the instant `npm run build` finishes, never a runtime lookup — get the URL wrong at build time and no amount of `docker run -e` afterward fixes it. Next, [compose-full](/taskflow/en/docker/compose-full/) wires both images — `backend` and `frontend` — into the same `docker-compose.yml` that already has `db` and `redis`, and walks the whole stack end to end: register, log in, create a board, and watch a drag-and-drop move sync live across two browser tabs.

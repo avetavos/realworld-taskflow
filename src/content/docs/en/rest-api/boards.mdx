@@ -9,7 +9,7 @@ sidebar:
 
 The `boards` module: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, and `mod.rs` under `taskflow/backend/api/src/boards/`. Five endpoints — list, create, read (as a full tree), rename, delete — plus the two functions every later module in this course calls: `assert_member` and `assert_owner`.
 
-`model.rs` in this lesson carries more than just `Board`: it also defines `Column`, `Card`, `ColumnWithCards`, and `BoardTree`, even though `columns` and `cards` don't have their own modules yet. That's deliberate, not a mistake — `GET /boards/:id` returns the *whole tree*, so `boards::model` has to know the shape of a column-with-its-cards before those resources get their own CRUD endpoints in the next two lessons.
+`model.rs` in this lesson carries more than just `Board`: it also defines `Column`, `Card`, `ColumnWithCards`, and `BoardTree`, even though `columns` and `cards` don't have their own modules yet. That's deliberate, not a mistake — `GET /boards/{id}` returns the *whole tree*, so `boards::model` has to know the shape of a column-with-its-cards before those resources get their own CRUD endpoints in the next two lessons.
 
 ## Why
 
@@ -21,12 +21,12 @@ The `boards` module: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, and `mo
 
 **`Column`/`Card` defined in `boards::model`, re-exported by `columns::model`/`cards::model` (what we're using) vs. defining each struct in its own resource's module and importing it into `boards::model`**
 
-- Pros: `BoardTree` can exist starting in *this* lesson, which is what lets `GET /boards/:id` — arguably the single most important read in the whole API — ship in lesson 2 instead of waiting until `columns` and `cards` both exist. There is exactly one definition of `Column` and one of `Card` anywhere in the codebase — `columns/model.rs` and `cards/model.rs` are one-line re-exports (`pub use crate::boards::model::Column;`), not second, divergent struct definitions that could drift out of sync with what `BoardTree` actually contains.
+- Pros: `BoardTree` can exist starting in *this* lesson, which is what lets `GET /boards/{id}` — arguably the single most important read in the whole API — ship in lesson 2 instead of waiting until `columns` and `cards` both exist. There is exactly one definition of `Column` and one of `Card` anywhere in the codebase — `columns/model.rs` and `cards/model.rs` are one-line re-exports (`pub use crate::boards::model::Column;`), not second, divergent struct definitions that could drift out of sync with what `BoardTree` actually contains.
 - Cons: `columns` and `cards` depend on `boards` for their own core type, which inverts the usual expectation that a resource module owns its own model — a reader skimming `columns/model.rs` for the first time has to follow one `pub use` to find the real definition. That's a fair trade for a course building resources in a specific teaching order; a codebase built resource-first from day one (with the full schema known up front) would more likely put shared read-model types like `BoardTree` in a dedicated `boards::model` *without* also housing `Column`/`Card`'s canonical definitions there — but that's not the order this course builds in.
 
 **Assembling `BoardTree` with N+1 queries — one for columns, one per column for its cards (what we're using) vs. a single `JOIN` query returning denormalized rows**
 
-- Pros: `repo::find_columns` and `repo::find_cards_for_column` are two small, independently reusable, independently testable functions — `find_cards_for_column` is exactly the query a future `GET /columns/:id/cards` endpoint would also use, with zero duplication. The Rust side (`service::get_tree`) does the assembly with a plain loop, no manual row-grouping logic to get right.
+- Pros: `repo::find_columns` and `repo::find_cards_for_column` are two small, independently reusable, independently testable functions — `find_cards_for_column` is exactly the query a future `GET /columns/{id}/cards` endpoint would also use, with zero duplication. The Rust side (`service::get_tree`) does the assembly with a plain loop, no manual row-grouping logic to get right.
 - Cons: for a board with 10 columns, `get_tree` runs 11 queries instead of 1 — real N+1 query cost. For TaskFlow's scale (a handful of columns per board, `cards(column_id, position)` indexed from [indexes-ordering](/taskflow/en/database/indexes-ordering/) making each per-column query fast) that's an acceptable, simple trade; a board-heavy production system might instead fetch all of a board's cards in one indexed query and group them by `column_id` in Rust, trading one extra `HashMap`-building step for one fewer round trip.
 
 ## Build it
@@ -373,7 +373,7 @@ pub fn routes() -> Router<AppState> {
             get(handlers::list_boards).post(handlers::create_board),
         )
         .route(
-            "/boards/:id",
+            "/boards/{id}",
             get(handlers::get_board)
                 .patch(handlers::update_board)
                 .delete(handlers::delete_board),
@@ -381,7 +381,7 @@ pub fn routes() -> Router<AppState> {
 }
 ```
 
-`.route("/boards", get(...).post(...))` and `.route("/boards/:id", get(...).patch(...).delete(...))` — one `.route()` call per path, with every HTTP method that path answers to chained onto the same `MethodRouter`, mirrors the table in [design](/taskflow/en/rest-api/design/) exactly: two paths, five endpoints.
+`.route("/boards", get(...).post(...))` and `.route("/boards/{id}", get(...).patch(...).delete(...))` — one `.route()` call per path, with every HTTP method that path answers to chained onto the same `MethodRouter`, mirrors the table in [design](/taskflow/en/rest-api/design/) exactly: two paths, five endpoints.
 
 ### 6. Mount `boards::routes()` in `main.rs`
 
@@ -403,7 +403,7 @@ let app = Router::new()
     .with_state(state);
 ```
 
-`.merge(boards::routes())`, not `.nest(...)` — `boards::routes()` already builds its paths as absolute (`/boards`, `/boards/:id`), unlike `auth::routes()`, which builds relative paths (`/register`) that need `.nest("/auth", ...)` to prefix them. `Router::merge` combines two routers that already agree on their own full paths; every module for the rest of this course (`columns`, `cards`, `labels`) follows `boards`'s pattern and gets `.merge`d the same way.
+`.merge(boards::routes())`, not `.nest(...)` — `boards::routes()` already builds its paths as absolute (`/boards`, `/boards/{id}`), unlike `auth::routes()`, which builds relative paths (`/register`) that need `.nest("/auth", ...)` to prefix them. `Router::merge` combines two routers that already agree on their own full paths; every module for the rest of this course (`columns`, `cards`, `labels`) follows `boards`'s pattern and gets `.merge`d the same way.
 
 ## Verify
 

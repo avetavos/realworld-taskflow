@@ -1,13 +1,13 @@
 ---
 title: Move & Reorder
-description: เพิ่ม move_card เข้า cards/service.rs และ PATCH /cards/:id/move เข้า cards/handlers.rs — เลขคณิต fractional-position จากเพื่อนบ้าน before/after การปฏิเสธข้าม-board และจุดต่อ realtime broadcast ของ Module 7
+description: เพิ่ม move_card เข้า cards/service.rs และ PATCH /cards/{id}/move เข้า cards/handlers.rs — เลขคณิต fractional-position จากเพื่อนบ้าน before/after การปฏิเสธข้าม-board และจุดต่อ realtime broadcast ของ Module 7
 sidebar:
   order: 6
 ---
 
 ## สิ่งที่จะสร้าง
 
-function ใหม่หนึ่งตัว `move_card` เพิ่มเข้า `cards/service.rs` บวก handler กับ DTO `MoveCardRequest` เพิ่มเข้า `cards/handlers.rs` บวก route ใหม่หนึ่งตัว `PATCH /cards/:id/move` เพิ่มเข้า `cards/mod.rs` นี่คือ endpoint ที่ทุกบทก่อนหน้าใน module นี้กำลังค่อย ๆ สร้างไปหา: ลาก card ไปตำแหน่งใหม่ — อาจเป็น column อื่นก็ได้ — แล้วบันทึกตำแหน่งที่ card ตกลงพอดีด้วยการเขียนแค่แถวเดียว โดยใช้กลยุทธ์ `position` แบบ fractional จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/)
+function ใหม่หนึ่งตัว `move_card` เพิ่มเข้า `cards/service.rs` บวก handler กับ DTO `MoveCardRequest` เพิ่มเข้า `cards/handlers.rs` บวก route ใหม่หนึ่งตัว `PATCH /cards/{id}/move` เพิ่มเข้า `cards/mod.rs` นี่คือ endpoint ที่ทุกบทก่อนหน้าใน module นี้กำลังค่อย ๆ สร้างไปหา: ลาก card ไปตำแหน่งใหม่ — อาจเป็น column อื่นก็ได้ — แล้วบันทึกตำแหน่งที่ card ตกลงพอดีด้วยการเขียนแค่แถวเดียว โดยใช้กลยุทธ์ `position` แบบ fractional จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/)
 
 `move_card` รับ `state: &AppState` ไม่ใช่ `db: &PgPool` เหมือน function อื่น ๆ ใน `service.rs` ของ module นี้ — ความต่างของ signature ที่ตั้งใจหนึ่งเดียวในทั้ง REST API module อธิบายด้านล่าง
 
@@ -161,14 +161,14 @@ pub async fn move_card(
 ```rust
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/columns/:id/cards", post(handlers::create_card))
+        .route("/columns/{id}/cards", post(handlers::create_card))
         .route(
-            "/cards/:id",
+            "/cards/{id}",
             get(handlers::get_card)
                 .patch(handlers::update_card)
                 .delete(handlers::delete_card),
         )
-        .route("/cards/:id/move", patch(handlers::move_card))
+        .route("/cards/{id}/move", patch(handlers::move_card))
 }
 ```
 

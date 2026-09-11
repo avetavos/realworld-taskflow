@@ -1,25 +1,25 @@
 ---
 title: Cache Reads
-description: Build api/src/cache.rs — generic get_json/set_json/invalidate helpers over deadpool_redis::Pool — and wire the cache-aside pattern into GET /boards/:id, with a 60-second TTL.
+description: Build api/src/cache.rs — generic get_json/set_json/invalidate helpers over deadpool_redis::Pool — and wire the cache-aside pattern into GET /boards/{id}, with a 60-second TTL.
 sidebar:
   order: 1
 ---
 
 ## What we're building
 
-`api/src/cache.rs`: three small, generic functions — `get_json`, `set_json`, `invalidate` — that read and write arbitrary `Serialize`/`DeserializeOwned` values as JSON strings in Redis, through the same `deadpool_redis::Pool` `AppState` already carries. Then we wire them into `boards::service::get_tree`, the function behind `GET /boards/:id`, so a repeated request for the same board's tree is served from Redis instead of re-running the six-or-more-query assembly from [boards](/taskflow/en/rest-api/boards/).
+`api/src/cache.rs`: three small, generic functions — `get_json`, `set_json`, `invalidate` — that read and write arbitrary `Serialize`/`DeserializeOwned` values as JSON strings in Redis, through the same `deadpool_redis::Pool` `AppState` already carries. Then we wire them into `boards::service::get_tree`, the function behind `GET /boards/{id}`, so a repeated request for the same board's tree is served from Redis instead of re-running the six-or-more-query assembly from [boards](/taskflow/en/rest-api/boards/).
 
 Three structs in `boards::model` — `Board`, `Column`, `Card`, `ColumnWithCards`, `BoardTree` — pick up a second derive, `Deserialize`, alongside their existing `Serialize`. They've only ever been serialized *out* to a JSON response body before now; reading a cached `BoardTree` back out of Redis means deserializing that same JSON *in*, so every type on the way needs both directions.
 
 ## Why
 
-`GET /boards/:id` is the single most-requested endpoint in TaskFlow — every board view, every page load, every reconnect after a dropped connection re-fetches the same tree — and [boards](/taskflow/en/rest-api/boards/)'s own Pros & cons already flagged its `get_tree` assembly as N+1 queries: one for the board's columns, one more per column for that column's cards. A board sitting open in three browser tabs re-runs that entire query set three times a minute for data that changed, at most, once. Caching the assembled `BoardTree` — not the individual `Board`/`Column`/`Card` rows, the *finished response body* — turns every one of those repeat reads into a single Redis `GET`, skipping the Postgres round trip (and the N+1 query cost) entirely until something actually changes.
+`GET /boards/{id}` is the single most-requested endpoint in TaskFlow — every board view, every page load, every reconnect after a dropped connection re-fetches the same tree — and [boards](/taskflow/en/rest-api/boards/)'s own Pros & cons already flagged its `get_tree` assembly as N+1 queries: one for the board's columns, one more per column for that column's cards. A board sitting open in three browser tabs re-runs that entire query set three times a minute for data that changed, at most, once. Caching the assembled `BoardTree` — not the individual `Board`/`Column`/`Card` rows, the *finished response body* — turns every one of those repeat reads into a single Redis `GET`, skipping the Postgres round trip (and the N+1 query cost) entirely until something actually changes.
 
 `cache.rs`'s three functions are deliberately generic over `T: Serialize`/`T: DeserializeOwned` rather than hardcoded to `BoardTree` — `get_json::<BoardTree>(...)` reads exactly like `get_json::<SomeOtherType>(...)` would if a later module ever wanted to cache a different resource the same way. The cache-*aside* pattern itself — check the cache first, fall through to the real query on a miss, populate the cache before returning — is the standard shape for any read this module (or a future one) wants to speed up: `cache.rs` is the reusable mechanism, `get_tree` is its first caller.
 
 ## Pros & cons
 
-**Caching `GET /boards/:id`'s assembled tree (what we're using) vs. leaving every read to hit Postgres directly**
+**Caching `GET /boards/{id}`'s assembled tree (what we're using) vs. leaving every read to hit Postgres directly**
 
 - Pros: a cache hit skips the entire N+1 query set — one Redis round trip instead of `1 + (number of columns)` Postgres round trips — which matters most exactly where TaskFlow's own usage pattern makes it common: the same board, refreshed repeatedly, by the same or different members, while nobody is actively editing it. Redis's in-memory `GET` is also simply faster per-call than even a single indexed Postgres query, so even a board with one column and one card benefits, just less dramatically than a board with twenty.
 - Cons: caching is the wrong tool for data that changes on every read or is read exactly once — the cache-population write (`set_json`) is pure overhead if nothing ever hits it again before the TTL expires, and a board under heavy concurrent editing (see [invalidation](/taskflow/en/caching/invalidation/)) pays for cache writes it barely gets to benefit from before the next invalidation clears them. Caching also adds a second data store that can (briefly) disagree with the source of truth — Postgres is always correct the instant a write commits; the cached copy is correct only until the next invalidation or TTL expiry, whichever comes first.

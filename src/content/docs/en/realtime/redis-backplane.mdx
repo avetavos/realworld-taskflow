@@ -29,7 +29,7 @@ A single `PSUBSCRIBE board:*`, not one `SUBSCRIBE board:{id}` per active board, 
 **Publishing from every mutation via a shared `AppState`-based `publish` function (what we're using) vs. a message queue (e.g., a Redis Stream or a dedicated job queue) between the write and the broadcast**
 
 - Pros: `realtime::publish` is a direct, synchronous-from-the-caller's-perspective function call, right next to the `cache::invalidate` call [invalidation](/taskflow/en/caching/invalidation/) already added to the same functions — one more `.await?` in an already-`async` request-handling path, no separate consumer process, no queue infrastructure to run, monitor, or reason about ordering guarantees for. A card move's broadcast happens within the same request that persisted the move, using a Redis connection the request already had reason to hold.
-- Cons: if the `PUBLISH` call itself fails (a momentary Redis blip), `realtime::publish` returns `Err`, and because it's called with `?` right after `cache::invalidate`, the whole request fails with `500` even though the underlying write to Postgres already committed successfully — a client could see an error for a mutation that, in fact, took effect. A queue-based design could decouple "did the write succeed" from "did the broadcast succeed," retrying the broadcast independently. TaskFlow accepts the coupling: a `PUBLISH` failing means only that *this one event* isn't broadcast live — a reconnecting or newly-loading client still sees the change correctly via the ordinary `GET /boards/:id`, which reads from cache-or-Postgres, not from any broadcast history. The realtime layer is a live-update convenience layered over a REST API that's independently correct; it was never the source of truth.
+- Cons: if the `PUBLISH` call itself fails (a momentary Redis blip), `realtime::publish` returns `Err`, and because it's called with `?` right after `cache::invalidate`, the whole request fails with `500` even though the underlying write to Postgres already committed successfully — a client could see an error for a mutation that, in fact, took effect. A queue-based design could decouple "did the write succeed" from "did the broadcast succeed," retrying the broadcast independently. TaskFlow accepts the coupling: a `PUBLISH` failing means only that *this one event* isn't broadcast live — a reconnecting or newly-loading client still sees the change correctly via the ordinary `GET /boards/{id}`, which reads from cache-or-Postgres, not from any broadcast history. The realtime layer is a live-update convenience layered over a REST API that's independently correct; it was never the source of truth.
 
 ## Build it
 
@@ -172,7 +172,7 @@ pub struct BoardEvent {
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/ws/boards/:id", get(handlers::ws_upgrade))
+    Router::new().route("/ws/boards/{id}", get(handlers::ws_upgrade))
 }
 
 /// Builds a `BoardEvent`, serializes it to JSON, and `PUBLISH`es it to

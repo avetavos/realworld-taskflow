@@ -13,7 +13,7 @@ The `labels` module: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, `mod.rs
 
 ## Why
 
-`repo::attach`'s `INSERT ... ON CONFLICT (card_id, label_id) DO NOTHING` makes attaching a label **idempotent**: calling `POST /cards/:id/labels/:label_id` twice in a row for the same pair succeeds both times with `204`, rather than the second call failing on the composite primary key's unique constraint. That matters specifically because attach/detach are the two endpoints in this whole module without a request body — a frontend retrying a dropped network response (did that click register or not?) can safely resend the exact same request and get the exact same end state, which is the entire point of the idempotency principle already applied to `PUT`/`DELETE` semantics elsewhere in this course.
+`repo::attach`'s `INSERT ... ON CONFLICT (card_id, label_id) DO NOTHING` makes attaching a label **idempotent**: calling `POST /cards/{id}/labels/{label_id}` twice in a row for the same pair succeeds both times with `204`, rather than the second call failing on the composite primary key's unique constraint. That matters specifically because attach/detach are the two endpoints in this whole module without a request body — a frontend retrying a dropped network response (did that click register or not?) can safely resend the exact same request and get the exact same end state, which is the entire point of the idempotency principle already applied to `PUT`/`DELETE` semantics elsewhere in this course.
 
 `attach_label`'s cross-board check — confirming the label's `board_id` matches the card's board before inserting into `card_labels` — exists because nothing in the schema itself prevents attaching a label from board A to a card on board B; `card_labels` only has foreign keys to `cards(id)` and `labels(id)` individually, not a constraint tying them to the *same* board. Without this check in `service.rs`, any member of board A could attach board A's labels onto a card they can also reach on board B (if they're a member of both), silently polluting one board's cards with another board's taxonomy. This is the same class of "child resource reached through the wrong parent" gap a security review checks for on any nested-resource API — the fix here is one `if label.board_id != card_board { ... }` check, applied before the `INSERT` ever runs.
 
@@ -295,7 +295,7 @@ pub async fn detach_label(
 }
 ```
 
-`attach_label` and `detach_label` both destructure `Path((card_id, label_id)): Path<(Uuid, Uuid)>` — Axum's `Path` extractor supports tuples for routes with more than one dynamic segment, matching `/cards/:id/labels/:label_id`'s two path parameters in URL order.
+`attach_label` and `detach_label` both destructure `Path((card_id, label_id)): Path<(Uuid, Uuid)>` — Axum's `Path` extractor supports tuples for routes with more than one dynamic segment, matching `/cards/{id}/labels/{label_id}`'s two path parameters in URL order.
 
 ### 5. `labels/mod.rs`
 
@@ -315,12 +315,12 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/boards/:id/labels",
+            "/boards/{id}/labels",
             post(handlers::create_label).get(handlers::list_labels),
         )
-        .route("/labels/:id", delete(handlers::delete_label))
+        .route("/labels/{id}", delete(handlers::delete_label))
         .route(
-            "/cards/:id/labels/:label_id",
+            "/cards/{id}/labels/{label_id}",
             post(handlers::attach_label).delete(handlers::detach_label),
         )
 }
@@ -432,4 +432,4 @@ curl -s -o /dev/null -w "%{http_code}\n" -X DELETE \
 
 ## Recap
 
-You built the `labels` module — the first module in the course with its own genuinely new `model.rs` struct rather than a re-export — covering plain label CRUD plus the two relationship endpoints, `attach_label` and `detach_label`, that operate on the `card_labels` join table instead of returning a resource. `repo::attach`'s `ON CONFLICT DO NOTHING` makes attaching idempotent, and `service::attach_label`'s cross-board check stops a label from one board being silently smuggled onto a card on another, rejecting the mismatch as `404` for the same "don't leak what exists" reasoning [design](/taskflow/en/rest-api/design/) established for every not-your-resource case in this module. That's every plain CRUD endpoint in the REST API done. Next, [move-reorder](/taskflow/en/rest-api/move-reorder/) builds the one endpoint this whole module has been leading up to — `PATCH /cards/:id/move`, and the fractional-position math from [indexes-ordering](/taskflow/en/database/indexes-ordering/) finally gets a real caller.
+You built the `labels` module — the first module in the course with its own genuinely new `model.rs` struct rather than a re-export — covering plain label CRUD plus the two relationship endpoints, `attach_label` and `detach_label`, that operate on the `card_labels` join table instead of returning a resource. `repo::attach`'s `ON CONFLICT DO NOTHING` makes attaching idempotent, and `service::attach_label`'s cross-board check stops a label from one board being silently smuggled onto a card on another, rejecting the mismatch as `404` for the same "don't leak what exists" reasoning [design](/taskflow/en/rest-api/design/) established for every not-your-resource case in this module. That's every plain CRUD endpoint in the REST API done. Next, [move-reorder](/taskflow/en/rest-api/move-reorder/) builds the one endpoint this whole module has been leading up to — `PATCH /cards/{id}/move`, and the fractional-position math from [indexes-ordering](/taskflow/en/database/indexes-ordering/) finally gets a real caller.

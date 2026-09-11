@@ -46,7 +46,7 @@ taskflow/
 # syntax=docker/dockerfile:1
 
 # ---- Builder ----
-FROM node:20 AS builder
+FROM node:24 AS builder
 WORKDIR /app/frontend
 
 # PUBLIC_ vars are inlined into the client bundle at build time by
@@ -62,7 +62,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---- Runtime ----
-FROM node:20-slim AS runtime
+FROM node:24-slim AS runtime
 WORKDIR /app/frontend
 
 ENV HOST=0.0.0.0
@@ -107,4 +107,4 @@ docker run --rm taskflow-frontend grep -r "localhost:8080" dist/client/_astro/ |
 
 ## สรุป
 
-`taskflow/infra/frontend.Dockerfile` build Node server ตัวเดียวกับที่ [board-page](/taskflow/th/kanban-island/board-page/) รันบนเครื่อง local ด้วย `npm run preview` ตอนนี้อยู่ใน container: builder stage แบบ `node:20` รัน `npm ci` และ `npm run build` โดยส่ง `PUBLIC_API_URL` เข้าไปเป็น build `ARG` (re-export เป็น `ENV` เพื่อให้ bundler ของ Vite มองเห็นได้จริง) และ runtime stage แบบ `node:20-slim` ทำ `npm ci --omit=dev` ของตัวเองก่อน copy เอาแค่ `dist/` เข้ามาแล้วรัน `node ./dist/server/entry.mjs` บน `HOST=0.0.0.0`, `PORT=4321` แนวคิดหนึ่งที่ควรจำไว้: ตัวแปร `PUBLIC_` เป็นเรื่องของ *build time* สำหรับ Astro ถูกฝังลง bundle ทันทีที่ `npm run build` จบ ไม่เคยเป็น runtime lookup เลย — ได้ URL ผิดตอน build แล้ว ไม่มี `docker run -e` ไหนแก้ได้ในภายหลัง ต่อไป [compose-full](/taskflow/th/docker/compose-full/) เชื่อม image ทั้งสอง — `backend` และ `frontend` — เข้ากับ `docker-compose.yml` เดียวกันที่มี `db` และ `redis` อยู่แล้ว และเดินผ่านทั้ง stack ตั้งแต่ต้นจนจบ: register, login, สร้าง board และดูการลาก-วางย้ายแบบ live sync กันระหว่าง browser tab สองแท็บ
+`taskflow/infra/frontend.Dockerfile` build Node server ตัวเดียวกับที่ [board-page](/taskflow/th/kanban-island/board-page/) รันบนเครื่อง local ด้วย `npm run preview` ตอนนี้อยู่ใน container: builder stage แบบ `node:24` รัน `npm ci` และ `npm run build` โดยส่ง `PUBLIC_API_URL` เข้าไปเป็น build `ARG` (re-export เป็น `ENV` เพื่อให้ bundler ของ Vite มองเห็นได้จริง) และ runtime stage แบบ `node:24-slim` ทำ `npm ci --omit=dev` ของตัวเองก่อน copy เอาแค่ `dist/` เข้ามาแล้วรัน `node ./dist/server/entry.mjs` บน `HOST=0.0.0.0`, `PORT=4321` แนวคิดหนึ่งที่ควรจำไว้: ตัวแปร `PUBLIC_` เป็นเรื่องของ *build time* สำหรับ Astro ถูกฝังลง bundle ทันทีที่ `npm run build` จบ ไม่เคยเป็น runtime lookup เลย — ได้ URL ผิดตอน build แล้ว ไม่มี `docker run -e` ไหนแก้ได้ในภายหลัง ต่อไป [compose-full](/taskflow/th/docker/compose-full/) เชื่อม image ทั้งสอง — `backend` และ `frontend` — เข้ากับ `docker-compose.yml` เดียวกันที่มี `db` และ `redis` อยู่แล้ว และเดินผ่านทั้ง stack ตั้งแต่ต้นจนจบ: register, login, สร้าง board และดูการลาก-วางย้ายแบบ live sync กันระหว่าง browser tab สองแท็บ

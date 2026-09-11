@@ -307,9 +307,9 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/columns/:id/cards", post(handlers::create_card))
+        .route("/columns/{id}/cards", post(handlers::create_card))
         .route(
-            "/cards/:id",
+            "/cards/{id}",
             get(handlers::get_card)
                 .patch(handlers::update_card)
                 .delete(handlers::delete_card),
@@ -317,7 +317,7 @@ pub fn routes() -> Router<AppState> {
 }
 ```
 
-route `/cards/:id/move` เข้าร่วม chain `.route()` เดียวกันนี้ในบทถัดไป เมื่อ `handlers::move_card` มีอยู่ให้ route ไปหา
+route `/cards/{id}/move` เข้าร่วม chain `.route()` เดียวกันนี้ในบทถัดไป เมื่อ `handlers::move_card` มีอยู่ให้ route ไปหา
 
 ### 6. Mount `cards::routes()` ใน `main.rs`
 

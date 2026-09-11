@@ -53,28 +53,28 @@ layering **handlers → service → repo** มีเหตุผลเดีย�
 |---|---|---|---|
 | `GET` | `/boards` | list board ที่ผู้เรียกเป็นสมาชิก | `200` |
 | `POST` | `/boards` | สร้าง board (ผู้เรียกกลายเป็น `owner`) | `201` |
-| `GET` | `/boards/:id` | board tree เต็ม — columns พร้อม card ของแต่ละอัน | `200` |
-| `PATCH` | `/boards/:id` | เปลี่ยนชื่อ board | `200` |
-| `DELETE` | `/boards/:id` | ลบ board (owner เท่านั้น) | `204` |
-| `POST` | `/boards/:id/columns` | สร้าง column บน board | `201` |
-| `PATCH` | `/columns/:id` | เปลี่ยนชื่อ column | `200` |
-| `DELETE` | `/columns/:id` | ลบ column | `204` |
-| `POST` | `/columns/:id/cards` | สร้าง card ใน column | `201` |
-| `GET` | `/cards/:id` | ดึง card ตัวเดียว | `200` |
-| `PATCH` | `/cards/:id` | อัปเดต title/description ของ card | `200` |
-| `DELETE` | `/cards/:id` | ลบ card | `204` |
-| `PATCH` | `/cards/:id/move` | ย้าย/จัดลำดับ card ใหม่ | `200` |
-| `POST` | `/boards/:id/labels` | สร้าง label บน board | `201` |
-| `GET` | `/boards/:id/labels` | list label ของ board | `200` |
-| `DELETE` | `/labels/:id` | ลบ label | `204` |
-| `POST` | `/cards/:id/labels/:label_id` | ติด label เข้ากับ card | `204` |
-| `DELETE` | `/cards/:id/labels/:label_id` | ถอด label ออกจาก card | `204` |
+| `GET` | `/boards/{id}` | board tree เต็ม — columns พร้อม card ของแต่ละอัน | `200` |
+| `PATCH` | `/boards/{id}` | เปลี่ยนชื่อ board | `200` |
+| `DELETE` | `/boards/{id}` | ลบ board (owner เท่านั้น) | `204` |
+| `POST` | `/boards/{id}/columns` | สร้าง column บน board | `201` |
+| `PATCH` | `/columns/{id}` | เปลี่ยนชื่อ column | `200` |
+| `DELETE` | `/columns/{id}` | ลบ column | `204` |
+| `POST` | `/columns/{id}/cards` | สร้าง card ใน column | `201` |
+| `GET` | `/cards/{id}` | ดึง card ตัวเดียว | `200` |
+| `PATCH` | `/cards/{id}` | อัปเดต title/description ของ card | `200` |
+| `DELETE` | `/cards/{id}` | ลบ card | `204` |
+| `PATCH` | `/cards/{id}/move` | ย้าย/จัดลำดับ card ใหม่ | `200` |
+| `POST` | `/boards/{id}/labels` | สร้าง label บน board | `201` |
+| `GET` | `/boards/{id}/labels` | list label ของ board | `200` |
+| `DELETE` | `/labels/{id}` | ลบ label | `204` |
+| `POST` | `/cards/{id}/labels/{label_id}` | ติด label เข้ากับ card | `204` |
+| `DELETE` | `/cards/{id}/labels/{label_id}` | ถอด label ออกจาก card | `204` |
 
 การตัดสินใจตั้งชื่อบางอย่างที่ควรพูดถึง:
 
-- **ใช้คำนาม ไม่ใช้คำกริยา** `POST /boards/:id/columns` สร้าง column — ไม่มีวันเป็น `POST /createColumn` URL บอกชื่อ resource, HTTP method บอกการกระทำ
-- **การซ้อนสะท้อนความเป็นเจ้าของ ลึกแค่ชั้นเดียว** เราสร้าง column ใต้ `/boards/:id/columns` เพราะ column อยู่ไม่ได้ถ้าไม่มี board — แต่พอมี `id` ของ column แล้ว การกระทำอื่นทุกอย่าง (`PATCH /columns/:id`, `DELETE /columns/:id`, `POST /columns/:id/cards`) เข้าถึงตรง ๆ ไม่ต้องผ่าน `/boards/:id/columns/:id` primary key แบบ `Uuid` (จาก [schema](/taskflow/th/database/schema/)) ทำให้เป็นไปได้: id เป็น unique ทั่วทั้งระบบ เลยไม่จำเป็นต้องมี parent อยู่ใน URL เพื่อแยกแยะเลย `/cards/:id/labels/:label_id` คือจุดเดียวใน path ที่เรามีสอง ID เพราะ attach/detach คือการกระทำต่อ *ความสัมพันธ์* ระหว่างสอง resource โดยธรรมชาติ ไม่ใช่ resource ใดตัวหนึ่งเดี่ยว ๆ
-- **`move` คือ path เดียวในทั้ง API ที่มีรูปร่างเหมือนคำกริยา** และตั้งใจทำแบบนั้น: การย้าย card ไม่ใช่การอัปเดต field บางส่วน (นั่นคือหน้าที่ของ `PATCH /cards/:id` ธรรมดา) แต่เป็นการกระทำที่แยกต่างหาก มีรูปแบบ request ของตัวเอง (`target_column_id`, `before_id`, `after_id`) และมี business rule ของตัวเอง (เลขคณิต fractional-position) การจำลองเป็น `PATCH /cards/:id/move` แทนที่จะยัดเข้าไปใน `PATCH /cards/:id` ทำให้ "อัปเดต title/description" กับ "จัดลำดับใหม่" ไม่ต้องแชร์ handler เดียวที่ต้องเดาว่าผู้เรียกหมายถึงอะไร
+- **ใช้คำนาม ไม่ใช้คำกริยา** `POST /boards/{id}/columns` สร้าง column — ไม่มีวันเป็น `POST /createColumn` URL บอกชื่อ resource, HTTP method บอกการกระทำ
+- **การซ้อนสะท้อนความเป็นเจ้าของ ลึกแค่ชั้นเดียว** เราสร้าง column ใต้ `/boards/{id}/columns` เพราะ column อยู่ไม่ได้ถ้าไม่มี board — แต่พอมี `id` ของ column แล้ว การกระทำอื่นทุกอย่าง (`PATCH /columns/{id}`, `DELETE /columns/{id}`, `POST /columns/{id}/cards`) เข้าถึงตรง ๆ ไม่ต้องผ่าน `/boards/{id}/columns/{id}` primary key แบบ `Uuid` (จาก [schema](/taskflow/th/database/schema/)) ทำให้เป็นไปได้: id เป็น unique ทั่วทั้งระบบ เลยไม่จำเป็นต้องมี parent อยู่ใน URL เพื่อแยกแยะเลย `/cards/{id}/labels/{label_id}` คือจุดเดียวใน path ที่เรามีสอง ID เพราะ attach/detach คือการกระทำต่อ *ความสัมพันธ์* ระหว่างสอง resource โดยธรรมชาติ ไม่ใช่ resource ใดตัวหนึ่งเดี่ยว ๆ
+- **`move` คือ path เดียวในทั้ง API ที่มีรูปร่างเหมือนคำกริยา** และตั้งใจทำแบบนั้น: การย้าย card ไม่ใช่การอัปเดต field บางส่วน (นั่นคือหน้าที่ของ `PATCH /cards/{id}` ธรรมดา) แต่เป็นการกระทำที่แยกต่างหาก มีรูปแบบ request ของตัวเอง (`target_column_id`, `before_id`, `after_id`) และมี business rule ของตัวเอง (เลขคณิต fractional-position) การจำลองเป็น `PATCH /cards/{id}/move` แทนที่จะยัดเข้าไปใน `PATCH /cards/{id}` ทำให้ "อัปเดต title/description" กับ "จัดลำดับใหม่" ไม่ต้องแชร์ handler เดียวที่ต้องเดาว่าผู้เรียกหมายถึงอะไร
 
 ### Status codes
 
@@ -106,8 +106,8 @@ layering **handlers → service → repo** มีเหตุผลเดีย�
 
 ไม่มีโค้ดให้รัน — ตรวจสอบความเข้าใจแทน:
 
-- `DELETE /boards/:id` คืน status code อะไรเมื่อผู้เรียกเป็นสมาชิกแต่ไม่ใช่ owner? (`403` — `assert_owner` fail ก่อนที่ delete จะรันด้วยซ้ำ)
-- `GET /cards/:id` คืน status code อะไรสำหรับ card id ที่ถูกลบไปแล้ว? (`404` — `repo::find_card` คืน `None` แปลงเป็น `AppError::NotFound` ก่อนจะเช็ค authorization)
+- `DELETE /boards/{id}` คืน status code อะไรเมื่อผู้เรียกเป็นสมาชิกแต่ไม่ใช่ owner? (`403` — `assert_owner` fail ก่อนที่ delete จะรันด้วยซ้ำ)
+- `GET /cards/{id}` คืน status code อะไรสำหรับ card id ที่ถูกลบไปแล้ว? (`404` — `repo::find_card` คืน `None` แปลงเป็น `AppError::NotFound` ก่อนจะเช็ค authorization)
 - ทำไม `repo.rs` ไม่เคยสร้าง `AppError` เลย? (เพราะ function ใน repo ไม่รู้ว่า *ทำไม* ถึงถูกเรียก — มีแค่ `service.rs` ที่รู้ context พอ เช่น "นี่คือ owner ไหม" เพื่อตัดสินใจว่า lookup ที่ fail หมายถึง `403` หรือ `404`)
 
 ถ้าสามคำตอบนี้เข้าใจได้ แผนที่ก็ชัดเจนแล้ว — ห้าบทถัดไปคือการสร้างตามแผนที่นี้ล้วน ๆ

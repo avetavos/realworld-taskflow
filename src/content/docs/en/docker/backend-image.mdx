@@ -31,7 +31,7 @@ Every earlier module ran the backend with `cargo run -p api` on your own machine
 
 ## Pros & cons
 
-**Multi-stage build — a `rust:1-bookworm` builder, a `debian:bookworm-slim` runtime (what we're using) vs. a single-stage image built on `rust:1-bookworm` throughout**
+**Multi-stage build — a `rust:1.98-bookworm` builder, a `debian:bookworm-slim` runtime (what we're using) vs. a single-stage image built on `rust:1.98-bookworm` throughout**
 
 - Pros: the image you actually deploy carries no compiler, no `cargo` registry cache, no `~/.rustup` toolchain — none of it is reachable at runtime, so none of it belongs in the image that's reachable at runtime. Concretely that's the difference between an image in the low hundreds of MB (`debian:bookworm-slim` plus one binary plus two shared libraries) and one in the multiple-GB range (the full Rust toolchain alone is well over a gigabyte). Fewer packages in the final image also means a smaller surface for a CVE scanner to flag, and nothing an attacker who gets code execution inside the container could use to compile and run arbitrary new code.
 - Cons: two base images to keep patched instead of one; the builder stage still has to fully compile the workspace before the `COPY --from=builder` line can run, so a from-scratch build isn't any faster than a single-stage one — the size and security win is entirely about what ships, not how long the build takes. The Dockerfile is also a few lines longer and requires understanding named stages (`AS builder`, `AS runtime`) and the `COPY --from=` syntax, one more piece of Docker's model to learn.
@@ -89,7 +89,7 @@ Without this, every `docker build` would first tar up `backend/target/` (which c
 # syntax=docker/dockerfile:1
 
 # ---- Builder ----
-FROM rust:1-bookworm AS builder
+FROM rust:1.98-bookworm AS builder
 WORKDIR /app
 
 # Copy the whole backend workspace and the migrations it embeds at compile
@@ -195,8 +195,8 @@ Confirm the image is actually small — this is the concrete payoff of the multi
 docker images taskflow-backend
 ```
 
-Expected: a `SIZE` well under 200MB — compare that mentally against `rust:1-bookworm` alone, which is over a gigabyte before a single line of `taskflow-api` code is even compiled.
+Expected: a `SIZE` well under 200MB — compare that mentally against `rust:1.98-bookworm` alone, which is over a gigabyte before a single line of `taskflow-api` code is even compiled.
 
 ## Recap
 
-`taskflow/infra/backend.Dockerfile` is a two-stage build: `rust:1-bookworm` compiles `taskflow-api` in release mode, `debian:bookworm-slim` runs the resulting binary with only `ca-certificates`, `curl`, and `libssl3` installed alongside it — no compiler, no source, no `sqlx-cli`. `main.rs` grew one line, `sqlx::migrate!("../../migrations").run(&db).await?`, so every container start brings the schema up to date itself, made possible because this codebase's runtime-checked `sqlx::query_as` style never needed a live database at `cargo build` time in the first place. You saw the `cargo-chef` variant as an optional layer-caching improvement, and why the runtime stage still copies `migrations/` in even though the macro already embedded it — a diagnostic convenience, not a requirement. Next, [frontend-image](/taskflow/en/docker/frontend-image/) does the same for the Astro frontend, where a build-time `ARG` for `PUBLIC_API_URL` replaces the compile-time migration embedding as the subtlety worth understanding.
+`taskflow/infra/backend.Dockerfile` is a two-stage build: `rust:1.98-bookworm` compiles `taskflow-api` in release mode, `debian:bookworm-slim` runs the resulting binary with only `ca-certificates`, `curl`, and `libssl3` installed alongside it — no compiler, no source, no `sqlx-cli`. `main.rs` grew one line, `sqlx::migrate!("../../migrations").run(&db).await?`, so every container start brings the schema up to date itself, made possible because this codebase's runtime-checked `sqlx::query_as` style never needed a live database at `cargo build` time in the first place. You saw the `cargo-chef` variant as an optional layer-caching improvement, and why the runtime stage still copies `migrations/` in even though the macro already embedded it — a diagnostic convenience, not a requirement. Next, [frontend-image](/taskflow/en/docker/frontend-image/) does the same for the Astro frontend, where a build-time `ARG` for `PUBLIC_API_URL` replaces the compile-time migration embedding as the subtlety worth understanding.

@@ -7,13 +7,13 @@ sidebar:
 
 ## What we're building
 
-`frontend/src/components/Board.tsx` — the Preact island [board-page](/taskflow/en/kanban-island/board-page/) mounts with `client:only="preact"`. This lesson takes it from nothing to a fully working board: fetch the tree, render columns and their cards, and let a user drag a card to a new position — anywhere in the same column, or into a different one — with the move applied to the screen immediately and persisted with one `PATCH /cards/:id/move` call ([move-reorder](/taskflow/en/rest-api/move-reorder/)).
+`frontend/src/components/Board.tsx` — the Preact island [board-page](/taskflow/en/kanban-island/board-page/) mounts with `client:only="preact"`. This lesson takes it from nothing to a fully working board: fetch the tree, render columns and their cards, and let a user drag a card to a new position — anywhere in the same column, or into a different one — with the move applied to the screen immediately and persisted with one `PATCH /cards/{id}/move` call ([move-reorder](/taskflow/en/rest-api/move-reorder/)).
 
 What it doesn't do yet is hear about anyone *else's* moves. Two tabs open on the same board, or two people editing it at once, won't see each other's changes until a manual reload — [live-sync](/taskflow/en/kanban-island/live-sync/), next, wires in the WebSocket side that closes that gap.
 
 ## Why
 
-`Board` mounts, checks `getToken()` — redirecting to `/login` immediately if it's missing, the same guard [boards-list](/taskflow/en/frontend/boards-list/) already runs — and then calls `apiFetch<BoardTree>('/boards/:id')` ([boards](/taskflow/en/rest-api/boards/)) exactly once to get the whole tree in one round trip, the same reasoning that made `get_tree` assemble one response server-side in the first place rather than making this component fetch columns and cards separately.
+`Board` mounts, checks `getToken()` — redirecting to `/login` immediately if it's missing, the same guard [boards-list](/taskflow/en/frontend/boards-list/) already runs — and then calls `apiFetch<BoardTree>('/boards/{id}')` ([boards](/taskflow/en/rest-api/boards/)) exactly once to get the whole tree in one round trip, the same reasoning that made `get_tree` assemble one response server-side in the first place rather than making this component fetch columns and cards separately.
 
 The drag itself is native HTML5 drag-and-drop — `draggable`, `dragstart`, `dragover`, `drop` — not a pointer-events-based library. A card's `dragstart` handler stashes its id in `event.dataTransfer`; a column's `dragover` handler calls `event.preventDefault()` (the one line the browser requires before it will ever fire a `drop` event on that element at all); and the column's `drop` handler reads the id back out, measures where the pointer landed relative to the column's existing cards, and turns that into the same `before_id`/`after_id` shape `move_card` ([move-reorder](/taskflow/en/rest-api/move-reorder/)) already expects — the server does the fractional-position math, the client's only job is naming two neighbor ids correctly.
 
@@ -21,9 +21,9 @@ Applying the move to `board` state *before* the `PATCH` resolves — not after �
 
 ## Pros & cons
 
-**Optimistic update — apply the move locally, then call `PATCH /cards/:id/move`, roll back on failure (what we're using) vs. waiting for the server's response before touching the screen**
+**Optimistic update — apply the move locally, then call `PATCH /cards/{id}/move`, roll back on failure (what we're using) vs. waiting for the server's response before touching the screen**
 
-- Pros: dragging a card and dropping it feels instant, which is close to the entire reason a Kanban board's drag-and-drop exists in the first place. Waiting for `PATCH /cards/:id/move`'s round trip before showing the card in its new position would mean every drag visibly "snaps back and then jumps" even on a fast connection, and stalls or hangs on a slow one — the opposite of what dragging is supposed to feel like.
+- Pros: dragging a card and dropping it feels instant, which is close to the entire reason a Kanban board's drag-and-drop exists in the first place. Waiting for `PATCH /cards/{id}/move`'s round trip before showing the card in its new position would mean every drag visibly "snaps back and then jumps" even on a fast connection, and stalls or hangs on a slow one — the opposite of what dragging is supposed to feel like.
 - Cons: it requires an explicit, deliberately-tracked rollback path — `previousBoard` captured right before the optimistic `setBoard` call, restored verbatim in the `catch` block — because local state has already diverged from the server's the instant the card drops, and a failed `PATCH` (a `403` from a target column on a different board, a `404` from a neighbor card someone else already deleted, a plain network error) has to have that divergence undone explicitly rather than left for some later refetch to eventually correct. It also means that, for the brief window between drop and the `PATCH` resolving, the screen shows something that isn't true on the server yet — a small, normally invisible risk that [live-sync](/taskflow/en/kanban-island/live-sync/)'s conflict-handling section names directly: another client's own move landing during that exact window.
 
 **Computing `before_id`/`after_id` from `getBoundingClientRect()` at drop time (what we're using) vs. tracking a "currently hovered index" in component state while dragging**

@@ -25,7 +25,7 @@ Every later module — schema design, backend queries, caching, realtime pub/sub
 - `docker compose up -d db redis` gets a working PostgreSQL + Redis in seconds, with no native install.
 - Named volumes persist data across container restarts, so you don't lose your local database every time you run `docker compose down`.
 - Healthchecks mean dependent services (added in Module 11) can wait for "actually ready to accept connections," not just "the container started."
-- Identical versions (`postgres:16`, `redis:7`) for every developer — no "works on my Postgres 14."
+- Identical versions (`postgres:18`, `redis:8`) for every developer — no "works on my Postgres 14."
 
 **Cons**
 
@@ -42,7 +42,7 @@ Create `taskflow/infra/docker-compose.yml`:
 ```yaml
 services:
   db:
-    image: postgres:16
+    image: postgres:18
     environment:
       POSTGRES_USER: taskflow
       POSTGRES_PASSWORD: taskflow
@@ -58,7 +58,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7
+    image: redis:8
     ports:
       - "6379:6379"
     healthcheck:
@@ -74,7 +74,7 @@ volumes:
 A few things worth calling out:
 
 - `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` match the credentials already baked into `DATABASE_URL` in the root `.env.example` (`postgres://taskflow:taskflow@localhost:5432/taskflow`) — the Postgres image uses these three variables to create the user, database, and password on first boot.
-- `redis:7` needs no environment variables or auth for local development — it matches `REDIS_URL=redis://localhost:6379`.
+- `redis:8` needs no environment variables or auth for local development — it matches `REDIS_URL=redis://localhost:6379`.
 - No top-level `version:` key — modern Docker Compose infers the schema version from the Compose spec automatically and the key is obsolete.
 
 ### 2. Bring it up
@@ -100,8 +100,8 @@ Expected output — both `STATUS` columns should say `healthy` (it may briefly s
 
 ```
 NAME              IMAGE          STATUS                    PORTS
-infra-db-1        postgres:16    Up 10 seconds (healthy)   0.0.0.0:5432->5432/tcp
-infra-redis-1     redis:7        Up 10 seconds (healthy)   0.0.0.0:6379->6379/tcp
+infra-db-1        postgres:18    Up 10 seconds (healthy)   0.0.0.0:5432->5432/tcp
+infra-redis-1     redis:8        Up 10 seconds (healthy)   0.0.0.0:6379->6379/tcp
 ```
 
 If a container shows `unhealthy`, check its logs with `docker compose logs db` or `docker compose logs redis`.
@@ -150,4 +150,4 @@ PONG
 
 ## Recap
 
-You wrote `taskflow/infra/docker-compose.yml` with two services — `db` (`postgres:16`) and `redis` (`redis:7`) — each with a healthcheck (`pg_isready` / `redis-cli ping`) so dependents can wait for real readiness, not just container start. Postgres's data is persisted in the named volume `pgdata`, so it survives `docker compose down` (though not `docker compose down -v`, which removes volumes too). `docker compose up -d db redis` brought both up, `docker compose ps` confirmed `healthy`, and you connected to each with `psql`/`redis-cli` — either natively or via `docker compose exec`. That's the end of Module 1 — you now have a scaffolded monorepo, a compiling Rust workspace, a running Astro dev server, and a live Postgres + Redis. Next up is Module 2, Database Design, where we design the schema and write the first migrations.
+You wrote `taskflow/infra/docker-compose.yml` with two services — `db` (`postgres:18`) and `redis` (`redis:8`) — each with a healthcheck (`pg_isready` / `redis-cli ping`) so dependents can wait for real readiness, not just container start. Postgres's data is persisted in the named volume `pgdata`, so it survives `docker compose down` (though not `docker compose down -v`, which removes volumes too). `docker compose up -d db redis` brought both up, `docker compose ps` confirmed `healthy`, and you connected to each with `psql`/`redis-cli` — either natively or via `docker compose exec`. That's the end of Module 1 — you now have a scaffolded monorepo, a compiling Rust workspace, a running Astro dev server, and a live Postgres + Redis. Next up is Module 2, Database Design, where we design the schema and write the first migrations.

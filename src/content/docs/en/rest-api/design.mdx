@@ -53,28 +53,28 @@ The **handlers → service → repo** layering exists for the same reason `AppEr
 |---|---|---|---|
 | `GET` | `/boards` | List boards the caller is a member of | `200` |
 | `POST` | `/boards` | Create a board (caller becomes `owner`) | `201` |
-| `GET` | `/boards/:id` | Full board tree — columns, each with its cards | `200` |
-| `PATCH` | `/boards/:id` | Rename a board | `200` |
-| `DELETE` | `/boards/:id` | Delete a board (owner only) | `204` |
-| `POST` | `/boards/:id/columns` | Create a column on a board | `201` |
-| `PATCH` | `/columns/:id` | Rename a column | `200` |
-| `DELETE` | `/columns/:id` | Delete a column | `204` |
-| `POST` | `/columns/:id/cards` | Create a card in a column | `201` |
-| `GET` | `/cards/:id` | Fetch one card | `200` |
-| `PATCH` | `/cards/:id` | Update a card's title/description | `200` |
-| `DELETE` | `/cards/:id` | Delete a card | `204` |
-| `PATCH` | `/cards/:id/move` | Move/reorder a card | `200` |
-| `POST` | `/boards/:id/labels` | Create a label on a board | `201` |
-| `GET` | `/boards/:id/labels` | List a board's labels | `200` |
-| `DELETE` | `/labels/:id` | Delete a label | `204` |
-| `POST` | `/cards/:id/labels/:label_id` | Attach a label to a card | `204` |
-| `DELETE` | `/cards/:id/labels/:label_id` | Detach a label from a card | `204` |
+| `GET` | `/boards/{id}` | Full board tree — columns, each with its cards | `200` |
+| `PATCH` | `/boards/{id}` | Rename a board | `200` |
+| `DELETE` | `/boards/{id}` | Delete a board (owner only) | `204` |
+| `POST` | `/boards/{id}/columns` | Create a column on a board | `201` |
+| `PATCH` | `/columns/{id}` | Rename a column | `200` |
+| `DELETE` | `/columns/{id}` | Delete a column | `204` |
+| `POST` | `/columns/{id}/cards` | Create a card in a column | `201` |
+| `GET` | `/cards/{id}` | Fetch one card | `200` |
+| `PATCH` | `/cards/{id}` | Update a card's title/description | `200` |
+| `DELETE` | `/cards/{id}` | Delete a card | `204` |
+| `PATCH` | `/cards/{id}/move` | Move/reorder a card | `200` |
+| `POST` | `/boards/{id}/labels` | Create a label on a board | `201` |
+| `GET` | `/boards/{id}/labels` | List a board's labels | `200` |
+| `DELETE` | `/labels/{id}` | Delete a label | `204` |
+| `POST` | `/cards/{id}/labels/{label_id}` | Attach a label to a card | `204` |
+| `DELETE` | `/cards/{id}/labels/{label_id}` | Detach a label from a card | `204` |
 
 A few naming decisions worth calling out:
 
-- **Nouns, not verbs.** `POST /boards/:id/columns` creates a column — never `POST /createColumn`. The URL names the resource; the HTTP method names the action.
-- **Nesting reflects ownership, only one level deep.** A column is created under `/boards/:id/columns` because it doesn't exist without a board — but once you have a column's `id`, every other operation on it (`PATCH /columns/:id`, `DELETE /columns/:id`, `POST /columns/:id/cards`) addresses it directly, not as `/boards/:id/columns/:id`. `Uuid` primary keys (from [schema](/taskflow/en/database/schema/)) make this possible: an id is globally unique, so it never needs a parent in the URL to disambiguate it. `/cards/:id/labels/:label_id` is the one place we keep two IDs in a path — attaching/detaching is inherently an operation on the *relationship* between two specific resources, not on either resource alone.
-- **`move` is the one verb-shaped path in the whole API**, and it's deliberate: moving a card isn't a partial update to its fields (that's what plain `PATCH /cards/:id` is for) — it's a distinct operation with its own request shape (`target_column_id`, `before_id`, `after_id`) and its own business rule (the fractional-position math). Modeling it as `PATCH /cards/:id/move` rather than overloading `PATCH /cards/:id` keeps "update title/description" and "reorder" from sharing one handler that has to guess which the caller meant.
+- **Nouns, not verbs.** `POST /boards/{id}/columns` creates a column — never `POST /createColumn`. The URL names the resource; the HTTP method names the action.
+- **Nesting reflects ownership, only one level deep.** A column is created under `/boards/{id}/columns` because it doesn't exist without a board — but once you have a column's `id`, every other operation on it (`PATCH /columns/{id}`, `DELETE /columns/{id}`, `POST /columns/{id}/cards`) addresses it directly, not as `/boards/{id}/columns/{id}`. `Uuid` primary keys (from [schema](/taskflow/en/database/schema/)) make this possible: an id is globally unique, so it never needs a parent in the URL to disambiguate it. `/cards/{id}/labels/{label_id}` is the one place we keep two IDs in a path — attaching/detaching is inherently an operation on the *relationship* between two specific resources, not on either resource alone.
+- **`move` is the one verb-shaped path in the whole API**, and it's deliberate: moving a card isn't a partial update to its fields (that's what plain `PATCH /cards/{id}` is for) — it's a distinct operation with its own request shape (`target_column_id`, `before_id`, `after_id`) and its own business rule (the fractional-position math). Modeling it as `PATCH /cards/{id}/move` rather than overloading `PATCH /cards/{id}` keeps "update title/description" and "reorder" from sharing one handler that has to guess which the caller meant.
 
 ### Status codes
 
@@ -106,8 +106,8 @@ Two layers, and they're deliberately different:
 
 There's no code to run — confirm your understanding instead:
 
-- Which status code does `DELETE /boards/:id` return when the caller is a member but not the owner? (`403` — `assert_owner` fails before the delete even runs.)
-- Which status code does `GET /cards/:id` return for a card id that was already deleted? (`404` — `repo::find_card` returns `None`, converted to `AppError::NotFound` before authorization is checked.)
+- Which status code does `DELETE /boards/{id}` return when the caller is a member but not the owner? (`403` — `assert_owner` fails before the delete even runs.)
+- Which status code does `GET /cards/{id}` return for a card id that was already deleted? (`404` — `repo::find_card` returns `None`, converted to `AppError::NotFound` before authorization is checked.)
 - Why does `repo.rs` never construct an `AppError`? (Because a repo function doesn't know *why* it's being called — only `service.rs` knows enough context, like "is this the owner," to decide that a failed lookup means `403` versus `404`.)
 
 If those three answers make sense, the map is clear — the next five lessons are pure construction against it.

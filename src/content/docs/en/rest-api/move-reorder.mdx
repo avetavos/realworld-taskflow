@@ -1,13 +1,13 @@
 ---
 title: Move & Reorder
-description: Add move_card to cards/service.rs and PATCH /cards/:id/move to cards/handlers.rs — the fractional-position math from before/after neighbors, cross-board rejection, and the Module 7 realtime broadcast hook.
+description: Add move_card to cards/service.rs and PATCH /cards/{id}/move to cards/handlers.rs — the fractional-position math from before/after neighbors, cross-board rejection, and the Module 7 realtime broadcast hook.
 sidebar:
   order: 6
 ---
 
 ## What we're building
 
-One new function, `move_card`, added to `cards/service.rs`, plus its handler and `MoveCardRequest` DTO added to `cards/handlers.rs`, plus one new route, `PATCH /cards/:id/move`, added to `cards/mod.rs`. This is the endpoint every earlier lesson in this module was quietly building toward: dragging a card to a new position — possibly in a different column — and persisting exactly where it landed with a single-row write, using the fractional `position` strategy from [indexes-ordering](/taskflow/en/database/indexes-ordering/).
+One new function, `move_card`, added to `cards/service.rs`, plus its handler and `MoveCardRequest` DTO added to `cards/handlers.rs`, plus one new route, `PATCH /cards/{id}/move`, added to `cards/mod.rs`. This is the endpoint every earlier lesson in this module was quietly building toward: dragging a card to a new position — possibly in a different column — and persisting exactly where it landed with a single-row write, using the fractional `position` strategy from [indexes-ordering](/taskflow/en/database/indexes-ordering/).
 
 `move_card` takes `state: &AppState`, not `db: &PgPool` like every other `service.rs` function in this module — the one deliberate signature difference in the whole REST API module, explained below.
 
@@ -161,14 +161,14 @@ Update `cards::routes()`:
 ```rust
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/columns/:id/cards", post(handlers::create_card))
+        .route("/columns/{id}/cards", post(handlers::create_card))
         .route(
-            "/cards/:id",
+            "/cards/{id}",
             get(handlers::get_card)
                 .patch(handlers::update_card)
                 .delete(handlers::delete_card),
         )
-        .route("/cards/:id/move", patch(handlers::move_card))
+        .route("/cards/{id}/move", patch(handlers::move_card))
 }
 ```
 

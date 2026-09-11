@@ -31,7 +31,7 @@ taskflow/
 
 ## ข้อดีข้อเสีย
 
-**Multi-stage build — builder เป็น `rust:1-bookworm`, runtime เป็น `debian:bookworm-slim` (แบบที่เราใช้) เทียบกับ single-stage image ที่สร้างบน `rust:1-bookworm` ตลอด**
+**Multi-stage build — builder เป็น `rust:1.98-bookworm`, runtime เป็น `debian:bookworm-slim` (แบบที่เราใช้) เทียบกับ single-stage image ที่สร้างบน `rust:1.98-bookworm` ตลอด**
 
 - ข้อดี: image ที่คุณ deploy จริงไม่มี compiler ไม่มี `cargo` registry cache ไม่มี `~/.rustup` toolchain — ไม่มีอันไหนที่ถูกเข้าถึงได้ตอน runtime เลย ดังนั้นไม่มีอันไหนควรอยู่ใน image ที่เข้าถึงได้ตอน runtime พูดให้เป็นรูปธรรม นั่นคือความต่างระหว่าง image ขนาดหลักร้อย MB (`debian:bookworm-slim` บวก binary หนึ่งตัวบวก shared library สองตัว) กับ image ขนาดหลาย GB (Rust toolchain เต็มรูปแบบเพียงอย่างเดียวก็เกินหนึ่ง GB แล้ว) แพ็กเกจที่น้อยลงใน image สุดท้ายยังหมายถึงพื้นที่ให้ CVE scanner ตรวจเจอน้อยลง และไม่มีอะไรที่ผู้โจมตีที่ได้ code execution ใน container จะใช้ compile และรันโค้ดใหม่ตามใจชอบได้
 - ข้อเสีย: มี base image สองตัวที่ต้อง patch แทนที่จะเป็นตัวเดียว builder stage ก็ยังต้อง compile workspace ทั้งหมดให้เสร็จก่อนที่บรรทัด `COPY --from=builder` จะรันได้ ดังนั้น build จากศูนย์ไม่ได้เร็วกว่า single-stage เลย — ข้อได้เปรียบเรื่องขนาดและความปลอดภัยอยู่ที่สิ่งที่ถูก ship ทั้งหมด ไม่ใช่เวลาที่ใช้ build Dockerfile ก็ยาวขึ้นอีกไม่กี่บรรทัด และต้องเข้าใจ named stage (`AS builder`, `AS runtime`) กับ syntax `COPY --from=` อีกส่วนหนึ่งของโมเดล Docker ที่ต้องเรียนรู้
@@ -89,7 +89,7 @@ frontend/.astro/
 # syntax=docker/dockerfile:1
 
 # ---- Builder ----
-FROM rust:1-bookworm AS builder
+FROM rust:1.98-bookworm AS builder
 WORKDIR /app
 
 # Copy the whole backend workspace and the migrations it embeds at compile
@@ -195,8 +195,8 @@ docker build -f infra/backend.Dockerfile -t taskflow-backend .
 docker images taskflow-backend
 ```
 
-ที่คาดหวัง: คอลัมน์ `SIZE` ต่ำกว่า 200MB มาก — ลองเทียบในใจกับ `rust:1-bookworm` เพียวๆ ซึ่งเกินหนึ่ง GB ก่อนที่โค้ด `taskflow-api` แม้แต่บรรทัดเดียวจะได้ compile ด้วยซ้ำ
+ที่คาดหวัง: คอลัมน์ `SIZE` ต่ำกว่า 200MB มาก — ลองเทียบในใจกับ `rust:1.98-bookworm` เพียวๆ ซึ่งเกินหนึ่ง GB ก่อนที่โค้ด `taskflow-api` แม้แต่บรรทัดเดียวจะได้ compile ด้วยซ้ำ
 
 ## สรุป
 
-`taskflow/infra/backend.Dockerfile` เป็น build สองสเตจ: `rust:1-bookworm` compile `taskflow-api` แบบ release mode, `debian:bookworm-slim` รัน binary ที่ได้พร้อมแค่ `ca-certificates`, `curl` และ `libssl3` ติดตั้งไปด้วย — ไม่มี compiler ไม่มี source ไม่มี `sqlx-cli` `main.rs` เพิ่มมาหนึ่งบรรทัด `sqlx::migrate!("../../migrations").run(&db).await?` ทุกครั้งที่ container เริ่มทำงาน binary จึงอัปเดต schema ให้ตัวเอง ทำแบบนี้ได้เพราะสไตล์ `sqlx::query_as` ที่ตรวจสอบตอน runtime ของ codebase นี้ไม่เคยต้องการฐานข้อมูลจริงตอน `cargo build` ตั้งแต่แรกอยู่แล้ว คุณเห็นตัวแปร `cargo-chef` เป็นการปรับปรุง layer-caching แบบ optional และเห็นว่าทำไม runtime stage ยังคง copy `migrations/` เข้าไปทั้งที่ macro ฝังไฟล์ไว้แล้ว — เป็นความสะดวกในการวินิจฉัย ไม่ใช่ข้อบังคับ ต่อไป [frontend-image](/taskflow/th/docker/frontend-image/) ทำแบบเดียวกันสำหรับ Astro frontend โดยมี `ARG` ตอน build สำหรับ `PUBLIC_API_URL` มาแทนที่การฝัง migration ตอน compile time ในฐานะจุดที่ต้องเข้าใจ
+`taskflow/infra/backend.Dockerfile` เป็น build สองสเตจ: `rust:1.98-bookworm` compile `taskflow-api` แบบ release mode, `debian:bookworm-slim` รัน binary ที่ได้พร้อมแค่ `ca-certificates`, `curl` และ `libssl3` ติดตั้งไปด้วย — ไม่มี compiler ไม่มี source ไม่มี `sqlx-cli` `main.rs` เพิ่มมาหนึ่งบรรทัด `sqlx::migrate!("../../migrations").run(&db).await?` ทุกครั้งที่ container เริ่มทำงาน binary จึงอัปเดต schema ให้ตัวเอง ทำแบบนี้ได้เพราะสไตล์ `sqlx::query_as` ที่ตรวจสอบตอน runtime ของ codebase นี้ไม่เคยต้องการฐานข้อมูลจริงตอน `cargo build` ตั้งแต่แรกอยู่แล้ว คุณเห็นตัวแปร `cargo-chef` เป็นการปรับปรุง layer-caching แบบ optional และเห็นว่าทำไม runtime stage ยังคง copy `migrations/` เข้าไปทั้งที่ macro ฝังไฟล์ไว้แล้ว — เป็นความสะดวกในการวินิจฉัย ไม่ใช่ข้อบังคับ ต่อไป [frontend-image](/taskflow/th/docker/frontend-image/) ทำแบบเดียวกันสำหรับ Astro frontend โดยมี `ARG` ตอน build สำหรับ `PUBLIC_API_URL` มาแทนที่การฝัง migration ตอน compile time ในฐานะจุดที่ต้องเข้าใจ

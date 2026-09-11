@@ -7,13 +7,13 @@ sidebar:
 
 ## สิ่งที่จะสร้าง
 
-`frontend/src/components/Board.tsx` — Preact island ที่ [board-page](/taskflow/th/kanban-island/board-page/) mount ด้วย `client:only="preact"` บทนี้พา component ตัวนั้นจากไฟล์เปล่าไปเป็นบอร์ดที่ทำงานได้เต็มรูปแบบ: fetch tree, render column พร้อม card ข้างใน และให้ user ลากการ์ดไปตำแหน่งใหม่ — ที่ไหนก็ได้ใน column เดิม หรือย้ายไป column อื่น — โดยการย้ายขึ้นหน้าจอทันที และ persist ด้วยการเรียก `PATCH /cards/:id/move` หนึ่งครั้ง ([move-reorder](/taskflow/th/rest-api/move-reorder/))
+`frontend/src/components/Board.tsx` — Preact island ที่ [board-page](/taskflow/th/kanban-island/board-page/) mount ด้วย `client:only="preact"` บทนี้พา component ตัวนั้นจากไฟล์เปล่าไปเป็นบอร์ดที่ทำงานได้เต็มรูปแบบ: fetch tree, render column พร้อม card ข้างใน และให้ user ลากการ์ดไปตำแหน่งใหม่ — ที่ไหนก็ได้ใน column เดิม หรือย้ายไป column อื่น — โดยการย้ายขึ้นหน้าจอทันที และ persist ด้วยการเรียก `PATCH /cards/{id}/move` หนึ่งครั้ง ([move-reorder](/taskflow/th/rest-api/move-reorder/))
 
 สิ่งที่บอร์ดนี้ยังทำไม่ได้คือรับรู้การย้ายของ *คนอื่น* สองแท็บที่เปิดบอร์ดเดียวกัน หรือสองคนที่แก้ไขพร้อมกัน จะไม่เห็นการเปลี่ยนแปลงของกันและกันจนกว่าจะ reload ด้วยมือ — [live-sync](/taskflow/th/kanban-island/live-sync/) บทถัดไป ต่อฝั่ง WebSocket ที่ปิดช่องว่างนั้น
 
 ## ทำไม
 
-`Board` mount แล้วเช็ค `getToken()` — redirect ไปที่ `/login` ทันทีถ้าไม่มี guard เดียวกับที่ [boards-list](/taskflow/th/frontend/boards-list/) รันอยู่แล้ว — จากนั้นเรียก `apiFetch<BoardTree>('/boards/:id')` ([boards](/taskflow/th/rest-api/boards/)) ครั้งเดียวเพื่อได้ tree ทั้งหมดใน round trip เดียว เหตุผลเดียวกับที่ทำให้ `get_tree` ประกอบ response เดียวฝั่ง server ตั้งแต่แรก แทนที่จะให้ component นี้ fetch column กับ card แยกกัน
+`Board` mount แล้วเช็ค `getToken()` — redirect ไปที่ `/login` ทันทีถ้าไม่มี guard เดียวกับที่ [boards-list](/taskflow/th/frontend/boards-list/) รันอยู่แล้ว — จากนั้นเรียก `apiFetch<BoardTree>('/boards/{id}')` ([boards](/taskflow/th/rest-api/boards/)) ครั้งเดียวเพื่อได้ tree ทั้งหมดใน round trip เดียว เหตุผลเดียวกับที่ทำให้ `get_tree` ประกอบ response เดียวฝั่ง server ตั้งแต่แรก แทนที่จะให้ component นี้ fetch column กับ card แยกกัน
 
 ตัวการลากเองเป็น native HTML5 drag-and-drop — `draggable`, `dragstart`, `dragover`, `drop` — ไม่ใช่ library ที่อิงกับ pointer events handler `dragstart` ของการ์ดเก็บ id การ์ดไว้ใน `event.dataTransfer`; handler `dragover` ของ column เรียก `event.preventDefault()` (บรรทัดเดียวที่ browser ต้องการก่อนจะยอม fire event `drop` บน element นั้น); และ handler `drop` ของ column อ่าน id กลับออกมา วัดว่า pointer ลงตรงไหนเทียบกับการ์ดที่มีอยู่แล้วใน column แล้วแปลงเป็นรูปแบบ `before_id`/`after_id` เดียวกับที่ `move_card` ([move-reorder](/taskflow/th/rest-api/move-reorder/)) คาดหวังอยู่แล้ว — server ทำเลขคณิตแบบ fractional position เอง งานของ client มีแค่ระบุ id ของเพื่อนบ้านสองตัวให้ถูกต้อง
 
@@ -21,9 +21,9 @@ sidebar:
 
 ## ข้อดีข้อเสีย
 
-**Optimistic update — apply การย้ายฝั่ง local ก่อน แล้วค่อยเรียก `PATCH /cards/:id/move`, rollback เมื่อล้มเหลว (ตัวที่เราใช้) เทียบกับรอ response จาก server ก่อนแตะหน้าจอ**
+**Optimistic update — apply การย้ายฝั่ง local ก่อน แล้วค่อยเรียก `PATCH /cards/{id}/move`, rollback เมื่อล้มเหลว (ตัวที่เราใช้) เทียบกับรอ response จาก server ก่อนแตะหน้าจอ**
 
-- ข้อดี: การลากการ์ดแล้วปล่อยรู้สึกเร็วทันที ซึ่งใกล้เคียงกับเหตุผลทั้งหมดที่ drag-and-drop ของ Kanban board มีอยู่ตั้งแต่แรก ถ้ารอ round trip ของ `PATCH /cards/:id/move` ก่อนที่จะโชว์การ์ดในตำแหน่งใหม่ ทุกการลากจะเห็นภาพ "เด้งกลับแล้วค่อยกระโดด" แม้บนการเชื่อมต่อที่เร็ว และจะค้างหรือหยุดชะงักบนการเชื่อมต่อที่ช้า — ตรงข้ามกับความรู้สึกที่การลากควรจะเป็น
+- ข้อดี: การลากการ์ดแล้วปล่อยรู้สึกเร็วทันที ซึ่งใกล้เคียงกับเหตุผลทั้งหมดที่ drag-and-drop ของ Kanban board มีอยู่ตั้งแต่แรก ถ้ารอ round trip ของ `PATCH /cards/{id}/move` ก่อนที่จะโชว์การ์ดในตำแหน่งใหม่ ทุกการลากจะเห็นภาพ "เด้งกลับแล้วค่อยกระโดด" แม้บนการเชื่อมต่อที่เร็ว และจะค้างหรือหยุดชะงักบนการเชื่อมต่อที่ช้า — ตรงข้ามกับความรู้สึกที่การลากควรจะเป็น
 - ข้อเสีย: ต้องมี rollback path ที่ track ไว้อย่างตั้งใจและชัดเจน — `previousBoard` ที่เก็บไว้ก่อน `setBoard` แบบ optimistic เพียงเสี้ยววินาที แล้วเอากลับมาคืนเป๊ะ ๆ ใน `catch` block — เพราะ local state ต่างจากของ server ไปแล้วตั้งแต่วินาทีที่ปล่อยการ์ด และ `PATCH` ที่ล้มเหลว (`403` จาก target column ที่อยู่คนละบอร์ด, `404` จากการ์ดเพื่อนบ้านที่คนอื่นลบไปแล้ว, network error ธรรมดา) ต้องยกเลิกความต่างนั้นอย่างชัดเจน ไม่ใช่ปล่อยให้ refetch ทีหลังค่อยแก้เอง อีกอย่างคือในช่วงสั้น ๆ ระหว่างที่ปล่อยการ์ดกับตอนที่ `PATCH` resolve หน้าจอกำลังโชว์สิ่งที่ยังไม่จริงบน server — ความเสี่ยงเล็ก ๆ ที่ปกติมองไม่เห็น ซึ่ง section conflict-handling ของ [live-sync](/taskflow/th/kanban-island/live-sync/) จะพูดถึงตรง ๆ: การย้ายของ client อื่นที่มาถึงในช่วงเวลาเดียวกันพอดี
 
 **คำนวณ `before_id`/`after_id` จาก `getBoundingClientRect()` ตอน drop (ตัวที่เราใช้) เทียบกับ track "index ที่ hover อยู่ตอนนี้" ใน component state ระหว่างลาก**

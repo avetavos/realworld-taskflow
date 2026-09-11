@@ -29,7 +29,7 @@ sidebar:
 **การ publish จาก mutation ทุกตัวผ่านฟังก์ชัน `publish` ที่อิง `AppState` ร่วมกัน (สิ่งที่เราใช้) เทียบกับ message queue (เช่น Redis Stream หรือ job queue เฉพาะทาง) ระหว่างการเขียนกับการกระจาย**
 
 - ข้อดี: `realtime::publish` เป็นการเรียกฟังก์ชันแบบตรงไปตรงมา (ดูเหมือน synchronous จากมุมมองผู้เรียก) อยู่ติดกับการเรียก `cache::invalidate` ที่ [invalidation](/taskflow/th/caching/invalidation/) เพิ่มเข้าไปในฟังก์ชันเดิมชุดเดียวกันแล้ว — เป็นแค่ `.await?` อีกหนึ่งตัวในเส้นทางจัดการ request ที่เป็น `async` อยู่แล้ว ไม่มี consumer process แยกต่างหาก ไม่มี queue infrastructure ให้ต้องรัน มอนิเตอร์ หรือคิดเรื่อง ordering guarantee การกระจาย event ของการย้ายการ์ดหนึ่งครั้งเกิดขึ้นภายใน request เดียวกับที่บันทึกการย้ายนั้นไว้ โดยใช้ Redis connection ที่ request มีเหตุผลจะถืออยู่แล้ว
-- ข้อเสีย: ถ้า `PUBLISH` call เองล้มเหลว (Redis สะดุดชั่วครู่) `realtime::publish` จะคืน `Err` และเพราะเรียกด้วย `?` ทันทีหลัง `cache::invalidate` ทั้ง request จะล้มเหลวด้วย `500` ทั้งที่การเขียนลง Postgres ที่อยู่ข้างใต้ commit สำเร็จไปแล้วจริง ๆ — ไคลเอนต์อาจเห็น error สำหรับ mutation ที่ในความเป็นจริงมีผลไปแล้ว การออกแบบแบบ queue สามารถแยก "write สำเร็จไหม" ออกจาก "broadcast สำเร็จไหม" แล้ว retry การ broadcast อย่างอิสระได้ TaskFlow ยอมรับการผูกติดกันนี้: `PUBLISH` ที่ล้มเหลวหมายความแค่ว่า *event ตัวนี้ตัวเดียว* ไม่ถูกกระจายแบบ live — ไคลเอนต์ที่ reconnect หรือโหลดใหม่ยังคงเห็นการเปลี่ยนแปลงถูกต้องผ่าน `GET /boards/:id` ธรรมดา ซึ่งอ่านจาก cache-หรือ-Postgres ไม่ใช่จากประวัติ broadcast ใด ๆ เลเยอร์ realtime เป็นชั้นความสะดวกสำหรับอัปเดตแบบ live ที่วางทับ REST API ที่ถูกต้องอยู่แล้วอย่างเป็นอิสระ เลเยอร์ realtime ไม่เคยเป็น source of truth
+- ข้อเสีย: ถ้า `PUBLISH` call เองล้มเหลว (Redis สะดุดชั่วครู่) `realtime::publish` จะคืน `Err` และเพราะเรียกด้วย `?` ทันทีหลัง `cache::invalidate` ทั้ง request จะล้มเหลวด้วย `500` ทั้งที่การเขียนลง Postgres ที่อยู่ข้างใต้ commit สำเร็จไปแล้วจริง ๆ — ไคลเอนต์อาจเห็น error สำหรับ mutation ที่ในความเป็นจริงมีผลไปแล้ว การออกแบบแบบ queue สามารถแยก "write สำเร็จไหม" ออกจาก "broadcast สำเร็จไหม" แล้ว retry การ broadcast อย่างอิสระได้ TaskFlow ยอมรับการผูกติดกันนี้: `PUBLISH` ที่ล้มเหลวหมายความแค่ว่า *event ตัวนี้ตัวเดียว* ไม่ถูกกระจายแบบ live — ไคลเอนต์ที่ reconnect หรือโหลดใหม่ยังคงเห็นการเปลี่ยนแปลงถูกต้องผ่าน `GET /boards/{id}` ธรรมดา ซึ่งอ่านจาก cache-หรือ-Postgres ไม่ใช่จากประวัติ broadcast ใด ๆ เลเยอร์ realtime เป็นชั้นความสะดวกสำหรับอัปเดตแบบ live ที่วางทับ REST API ที่ถูกต้องอยู่แล้วอย่างเป็นอิสระ เลเยอร์ realtime ไม่เคยเป็น source of truth
 
 ## ลงมือสร้าง
 
@@ -172,7 +172,7 @@ pub struct BoardEvent {
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/ws/boards/:id", get(handlers::ws_upgrade))
+    Router::new().route("/ws/boards/{id}", get(handlers::ws_upgrade))
 }
 
 /// Builds a `BoardEvent`, serializes it to JSON, and `PUBLISH`es it to

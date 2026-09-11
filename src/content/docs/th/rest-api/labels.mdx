@@ -13,7 +13,7 @@ module `labels`: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, `mod.rs` �
 
 ## ทำไม
 
-`INSERT ... ON CONFLICT (card_id, label_id) DO NOTHING` ของ `repo::attach` ทำให้การติด label เป็น **idempotent**: เรียก `POST /cards/:id/labels/:label_id` สองครั้งติดกันสำหรับคู่เดียวกันสำเร็จทั้งคู่ด้วย `204` แทนที่ครั้งที่สองจะ fail ที่ unique constraint ของ composite primary key นี่สำคัญโดยเฉพาะเพราะ attach/detach คือสอง endpoint เดียวในทั้ง module นี้ที่ไม่มี request body — frontend ที่ retry response ที่หลุด network (click นั้น register ไปหรือยัง?) ส่ง request เดิมเป๊ะซ้ำได้อย่างปลอดภัยและได้ end state เดิมเป๊ะ ที่เป็นจุดประสงค์ทั้งหมดของหลักการ idempotency ที่ถูกใช้กับ semantics ของ `PUT`/`DELETE` ที่อื่นในคอร์สนี้อยู่แล้ว
+`INSERT ... ON CONFLICT (card_id, label_id) DO NOTHING` ของ `repo::attach` ทำให้การติด label เป็น **idempotent**: เรียก `POST /cards/{id}/labels/{label_id}` สองครั้งติดกันสำหรับคู่เดียวกันสำเร็จทั้งคู่ด้วย `204` แทนที่ครั้งที่สองจะ fail ที่ unique constraint ของ composite primary key นี่สำคัญโดยเฉพาะเพราะ attach/detach คือสอง endpoint เดียวในทั้ง module นี้ที่ไม่มี request body — frontend ที่ retry response ที่หลุด network (click นั้น register ไปหรือยัง?) ส่ง request เดิมเป๊ะซ้ำได้อย่างปลอดภัยและได้ end state เดิมเป๊ะ ที่เป็นจุดประสงค์ทั้งหมดของหลักการ idempotency ที่ถูกใช้กับ semantics ของ `PUT`/`DELETE` ที่อื่นในคอร์สนี้อยู่แล้ว
 
 การเช็คข้าม-board ของ `attach_label` — ยืนยันว่า `board_id` ของ label ตรงกับ board ของ card ก่อนจะ insert เข้า `card_labels` — มีอยู่เพราะไม่มีอะไรใน schema เองที่กันการติด label จาก board A เข้ากับ card บน board B ได้ `card_labels` มีแค่ foreign key ไปที่ `cards(id)` และ `labels(id)` แยกกัน ไม่มี constraint ที่ผูกทั้งคู่เข้ากับ board *เดียวกัน* ถ้าไม่มี check นี้ใน `service.rs` สมาชิกคนไหนของ board A ก็ติด label ของ board A เข้ากับ card ที่ตัวเองเข้าถึงได้บน board B ได้เลย (ถ้าเป็นสมาชิกของทั้งคู่) ทำให้ taxonomy ของ board หนึ่งไปปนกับอีก board อย่างเงียบ ๆ นี่คือช่องโหว่ประเภทเดียวกับที่ security review ของ nested-resource API ไหนก็ตามต้องเช็ค — การแก้ที่นี่คือ check `if label.board_id != card_board { ... }` บรรทัดเดียว ก่อนที่ `INSERT` จะรันด้วยซ้ำ
 
@@ -295,7 +295,7 @@ pub async fn detach_label(
 }
 ```
 
-`attach_label` และ `detach_label` ทั้งคู่ destructure `Path((card_id, label_id)): Path<(Uuid, Uuid)>` — `Path` extractor ของ Axum รองรับ tuple สำหรับ route ที่มี dynamic segment มากกว่าหนึ่งตัว ตรงกับสอง path parameter ของ `/cards/:id/labels/:label_id` ตามลำดับใน URL
+`attach_label` และ `detach_label` ทั้งคู่ destructure `Path((card_id, label_id)): Path<(Uuid, Uuid)>` — `Path` extractor ของ Axum รองรับ tuple สำหรับ route ที่มี dynamic segment มากกว่าหนึ่งตัว ตรงกับสอง path parameter ของ `/cards/{id}/labels/{label_id}` ตามลำดับใน URL
 
 ### 5. `labels/mod.rs`
 
@@ -315,12 +315,12 @@ use crate::state::AppState;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
-            "/boards/:id/labels",
+            "/boards/{id}/labels",
             post(handlers::create_label).get(handlers::list_labels),
         )
-        .route("/labels/:id", delete(handlers::delete_label))
+        .route("/labels/{id}", delete(handlers::delete_label))
         .route(
-            "/cards/:id/labels/:label_id",
+            "/cards/{id}/labels/{label_id}",
             post(handlers::attach_label).delete(handlers::detach_label),
         )
 }
@@ -432,4 +432,4 @@ curl -s -o /dev/null -w "%{http_code}\n" -X DELETE \
 
 ## สรุป
 
-คุณสร้าง module `labels` — module แรกในคอร์สที่มี struct `model.rs` ใหม่จริง ๆ ของตัวเอง แทนที่จะเป็น re-export — ครอบคลุม label CRUD ธรรมดาบวกสอง endpoint ความสัมพันธ์ `attach_label` และ `detach_label` ที่ทำงานกับ join table `card_labels` แทนที่จะคืน resource `repo::attach`'s `ON CONFLICT DO NOTHING` ทำให้การติดเป็น idempotent และการเช็คข้าม-board ของ `service::attach_label` กัน label จาก board หนึ่งไม่ให้ถูกลักลอบติดกับ card บนอีก board อย่างเงียบ ๆ ปฏิเสธความไม่ตรงกันด้วย `404` ด้วยเหตุผล "อย่ารั่วว่ามีอะไรอยู่" เดียวกับที่ [design](/taskflow/th/rest-api/design/) กำหนดไว้สำหรับทุกกรณีที่ไม่ใช่ resource ของคุณใน module นี้ นั่นคือ endpoint CRUD ธรรมดาทั้งหมดใน REST API เสร็จแล้ว ถัดไป [move-reorder](/taskflow/th/rest-api/move-reorder/) สร้าง endpoint เดียวที่ทั้ง module นี้กำลังนำไปสู่ — `PATCH /cards/:id/move` และเลขคณิต fractional-position จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/) ในที่สุดก็ได้ผู้เรียกจริง
+คุณสร้าง module `labels` — module แรกในคอร์สที่มี struct `model.rs` ใหม่จริง ๆ ของตัวเอง แทนที่จะเป็น re-export — ครอบคลุม label CRUD ธรรมดาบวกสอง endpoint ความสัมพันธ์ `attach_label` และ `detach_label` ที่ทำงานกับ join table `card_labels` แทนที่จะคืน resource `repo::attach`'s `ON CONFLICT DO NOTHING` ทำให้การติดเป็น idempotent และการเช็คข้าม-board ของ `service::attach_label` กัน label จาก board หนึ่งไม่ให้ถูกลักลอบติดกับ card บนอีก board อย่างเงียบ ๆ ปฏิเสธความไม่ตรงกันด้วย `404` ด้วยเหตุผล "อย่ารั่วว่ามีอะไรอยู่" เดียวกับที่ [design](/taskflow/th/rest-api/design/) กำหนดไว้สำหรับทุกกรณีที่ไม่ใช่ resource ของคุณใน module นี้ นั่นคือ endpoint CRUD ธรรมดาทั้งหมดใน REST API เสร็จแล้ว ถัดไป [move-reorder](/taskflow/th/rest-api/move-reorder/) สร้าง endpoint เดียวที่ทั้ง module นี้กำลังนำไปสู่ — `PATCH /cards/{id}/move` และเลขคณิต fractional-position จาก [indexes-ordering](/taskflow/th/database/indexes-ordering/) ในที่สุดก็ได้ผู้เรียกจริง

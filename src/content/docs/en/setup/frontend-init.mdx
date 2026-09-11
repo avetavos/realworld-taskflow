@@ -103,7 +103,7 @@ src/
 └── components/  # .astro and .tsx components, including the Preact island
 ```
 
-- **`src/pages/`** — Astro's file-based router; `src/pages/index.astro` becomes `/`, `src/pages/board/[id].astro` becomes `/board/:id`, and so on.
+- **`src/pages/`** — Astro's file-based router; `src/pages/index.astro` becomes `/`, `src/pages/board/[id].astro` becomes `/board/{id}`, and so on.
 - **`src/layouts/`** — shared page structure (a `<Layout>` component with `<html>`, `<head>`, and a `<slot />`) that individual pages wrap themselves in.
 - **`src/lib/`** — plain TypeScript modules with no rendering logic: the fetch wrapper for `PUBLIC_API_URL`, shared types for boards/columns/cards, and small utilities. Nothing here is a component.
 - **`src/components/`** — reusable UI pieces. Most are static `.astro` components; the Kanban board itself will be a `.tsx` Preact component here, hydrated as an island.

@@ -1,19 +1,19 @@
 ---
 title: Cache Reads
-description: สร้าง api/src/cache.rs — generic get_json/set_json/invalidate helper เหนือ deadpool_redis::Pool — แล้วต่อ cache-aside pattern เข้ากับ GET /boards/:id ด้วย TTL 60 วินาที
+description: สร้าง api/src/cache.rs — generic get_json/set_json/invalidate helper เหนือ deadpool_redis::Pool — แล้วต่อ cache-aside pattern เข้ากับ GET /boards/{id} ด้วย TTL 60 วินาที
 sidebar:
   order: 1
 ---
 
 ## สิ่งที่จะสร้าง
 
-`api/src/cache.rs`: function เล็ก ๆ generic สามตัว — `get_json`, `set_json`, `invalidate` — ที่อ่านและเขียนค่าแบบ `Serialize`/`DeserializeOwned` ใด ๆ เป็น JSON string ใน Redis ผ่าน `deadpool_redis::Pool` ตัวเดียวกับที่ `AppState` มีอยู่แล้ว จากนั้นต่อ helper ชุดนี้เข้ากับ `boards::service::get_tree` — function เบื้องหลัง `GET /boards/:id` — เพื่อให้ request ที่ขอ tree ของ board เดิมซ้ำ ได้ค่าจาก Redis แทนที่จะรันขั้นตอนประกอบ tree ที่มี query หกครั้งขึ้นไปจาก [boards](/taskflow/th/rest-api/boards/) ใหม่ทุกครั้ง
+`api/src/cache.rs`: function เล็ก ๆ generic สามตัว — `get_json`, `set_json`, `invalidate` — ที่อ่านและเขียนค่าแบบ `Serialize`/`DeserializeOwned` ใด ๆ เป็น JSON string ใน Redis ผ่าน `deadpool_redis::Pool` ตัวเดียวกับที่ `AppState` มีอยู่แล้ว จากนั้นต่อ helper ชุดนี้เข้ากับ `boards::service::get_tree` — function เบื้องหลัง `GET /boards/{id}` — เพื่อให้ request ที่ขอ tree ของ board เดิมซ้ำ ได้ค่าจาก Redis แทนที่จะรันขั้นตอนประกอบ tree ที่มี query หกครั้งขึ้นไปจาก [boards](/taskflow/th/rest-api/boards/) ใหม่ทุกครั้ง
 
 struct สามตัวใน `boards::model` — `Board`, `Column`, `Card`, `ColumnWithCards`, `BoardTree` — ได้ derive ตัวที่สองเพิ่มมา คือ `Deserialize` คู่กับ `Serialize` ที่มีอยู่แล้ว ก่อนหน้านี้ struct พวกนี้ทำหน้าที่ serialize *ออก* ไปเป็น JSON response body อย่างเดียว แต่การอ่าน `BoardTree` ที่ cache ไว้กลับออกมาจาก Redis แปลว่าต้อง deserialize JSON ก้อนเดียวกันนั้น *เข้า* มาด้วย ดังนั้นทุก type ในเส้นทางนี้ต้องรองรับทั้งสองทิศทาง
 
 ## ทำไม
 
-`GET /boards/:id` คือ endpoint ที่โดนเรียกบ่อยที่สุดใน TaskFlow — ทุกครั้งที่เปิดดู board, ทุก page load, ทุกครั้งที่ reconnect หลัง connection หลุด ก็ดึง tree เดิมซ้ำ และหัวข้อข้อดีข้อเสียของ [boards](/taskflow/th/rest-api/boards/) ก็เคยชี้ไว้แล้วว่าการประกอบ `get_tree` เป็น N+1 query: หนึ่ง query สำหรับ column ของ board, อีกหนึ่ง query ต่อ column สำหรับ card ในนั้น
+`GET /boards/{id}` คือ endpoint ที่โดนเรียกบ่อยที่สุดใน TaskFlow — ทุกครั้งที่เปิดดู board, ทุก page load, ทุกครั้งที่ reconnect หลัง connection หลุด ก็ดึง tree เดิมซ้ำ และหัวข้อข้อดีข้อเสียของ [boards](/taskflow/th/rest-api/boards/) ก็เคยชี้ไว้แล้วว่าการประกอบ `get_tree` เป็น N+1 query: หนึ่ง query สำหรับ column ของ board, อีกหนึ่ง query ต่อ column สำหรับ card ในนั้น
 
 พอเปิด board เดิมค้างไว้สาม browser tab ก็เท่ากับรัน query ชุดนี้ซ้ำสามครั้งต่อนาที ทั้งที่ข้อมูลจริงเปลี่ยนอย่างมากแค่ครั้งเดียว การ cache `BoardTree` ที่ประกอบเสร็จแล้ว — ไม่ใช่แถว `Board`/`Column`/`Card` แยกชิ้น แต่เป็น *response body ที่เสร็จสมบูรณ์* — ทำให้ read ซ้ำพวกนั้นเหลือแค่ Redis `GET` ครั้งเดียว ข้าม round trip ไป Postgres (และต้นทุน N+1 query) ไปเลยจนกว่าจะมีอะไรเปลี่ยนจริง ๆ
 
@@ -21,7 +21,7 @@ function สามตัวใน `cache.rs` ตั้งใจทำให้ g
 
 ## ข้อดีข้อเสีย
 
-**Cache tree ที่ประกอบแล้วของ `GET /boards/:id` (ตัวที่เราใช้) เทียบกับปล่อยให้ทุก read ยิงเข้า Postgres โดยตรง**
+**Cache tree ที่ประกอบแล้วของ `GET /boards/{id}` (ตัวที่เราใช้) เทียบกับปล่อยให้ทุก read ยิงเข้า Postgres โดยตรง**
 
 - ข้อดี: cache hit ข้าม N+1 query set ทั้งชุด — Redis round trip ครั้งเดียวแทนที่จะเป็น `1 + (จำนวน column)` round trip ไป Postgres — และได้ผลมากที่สุดกับ pattern การใช้งานจริงของ TaskFlow ที่เจอบ่อย: member คนเดิมหรือคนอื่น refresh board เดิมซ้ำ ๆ ตอนที่ไม่มีใคร edit อยู่เลย นอกจากนี้ Redis `GET` แบบ in-memory ก็เร็วกว่าต่อครั้งอยู่แล้ว แม้จะเทียบกับ Postgres query ที่มี index ตัวเดียว ดังนั้นแม้แต่ board ที่มี column เดียว card เดียวก็ยังได้ประโยชน์ เพียงแต่ไม่มากเท่า board ที่มียี่สิบ column
 - ข้อเสีย: caching เป็นเครื่องมือที่ผิดสำหรับข้อมูลที่เปลี่ยนทุกครั้งที่อ่าน หรืออ่านแค่ครั้งเดียว — write ที่เติม cache (`set_json`) เป็น overhead ล้วน ๆ ถ้าไม่มีใครมาอ่านซ้ำอีกก่อน TTL หมดอายุ และ board ที่มีคน edit พร้อมกันหนัก ๆ (ดู [invalidation](/taskflow/th/caching/invalidation/)) ก็ต้องจ่ายค่า cache write ที่แทบไม่ได้ใช้ ก่อนที่ invalidation ครั้งถัดไปจะมาล้างทิ้ง อีกอย่างคือ caching เพิ่ม data store ตัวที่สองที่อาจไม่ตรงกับ source of truth ชั่วขณะหนึ่ง — Postgres ถูกต้องเสมอทันทีที่ write commit สำเร็จ ส่วนสำเนาใน cache ถูกต้องแค่จนกว่าจะโดน invalidate หรือ TTL หมดอายุ แล้วแต่อย่างไหนมาก่อน

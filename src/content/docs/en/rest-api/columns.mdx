@@ -21,7 +21,7 @@ Reusing `boards::service::assert_member` instead of writing a `columns::service:
 
 **`columns::service` resolving `board_id` via `repo::find_column` before delegating to `boards_service::assert_member` (what we're using) vs. requiring the caller to pass `board_id` explicitly on every column route**
 
-- Pros: `PATCH /columns/:id` and `DELETE /columns/:id` only need the column's own id in the URL — a client that already fetched a `BoardTree` and has a specific column's `id` in hand can act on it directly, with no need to also track and pass along which board it came from. This matches the "IDs don't need a parent in the URL to disambiguate them" reasoning from [design](/taskflow/en/rest-api/design/).
+- Pros: `PATCH /columns/{id}` and `DELETE /columns/{id}` only need the column's own id in the URL — a client that already fetched a `BoardTree` and has a specific column's `id` in hand can act on it directly, with no need to also track and pass along which board it came from. This matches the "IDs don't need a parent in the URL to disambiguate them" reasoning from [design](/taskflow/en/rest-api/design/).
 - Cons: every `PATCH`/`DELETE` on a column now costs one extra `SELECT` (`find_column`) purely to discover its `board_id`, before the authorization check's own `SELECT` even runs — two round trips where a `board_id`-in-the-URL design would only need one. That's the same "authorization convenience vs. round trips" trade [design](/taskflow/en/rest-api/design/) already made for `boards::service` itself, applied one level down.
 
 **`create_column`'s position via `MAX(position) + 1.0` in Rust (what we're using) vs. a SQL `COALESCE(MAX(position), 0) + 1` computed inside the `INSERT`**
@@ -172,7 +172,7 @@ pub async fn delete_column(db: &PgPool, user_id: Uuid, column_id: Uuid) -> AppRe
 }
 ```
 
-`create_column` already has `board_id` from the URL (`POST /boards/:id/columns`), so it calls `assert_member` directly. `update_column` and `delete_column` only have a `column_id`, so they call `repo::find_column` first — a missing column is `AppError::NotFound` before authorization is even attempted, matching the `404`-before-`403` ordering [design](/taskflow/en/rest-api/design/) established.
+`create_column` already has `board_id` from the URL (`POST /boards/{id}/columns`), so it calls `assert_member` directly. `update_column` and `delete_column` only have a `column_id`, so they call `repo::find_column` first — a missing column is `AppError::NotFound` before authorization is even attempted, matching the `404`-before-`403` ordering [design](/taskflow/en/rest-api/design/) established.
 
 ### 4. `columns/handlers.rs`
 
@@ -230,7 +230,7 @@ pub async fn delete_column(
 }
 ```
 
-`create_column`'s `Path(board_id)` extracts the `:id` segment from `/boards/:id/columns` — the same path parameter name, `:id`, that `update_column`/`delete_column` extract from `/columns/:id` as a `column_id`. Axum doesn't care that both routes use the literal segment name `:id`; each handler's own `Path<Uuid>` binding decides what to call the extracted value.
+`create_column`'s `Path(board_id)` extracts the `{id}` segment from `/boards/{id}/columns` — the same path parameter name, `{id}`, that `update_column`/`delete_column` extract from `/columns/{id}` as a `column_id`. Axum doesn't care that both routes use the literal segment name `{id}`; each handler's own `Path<Uuid>` binding decides what to call the extracted value.
 
 ### 5. `columns/mod.rs`
 
@@ -249,9 +249,9 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/boards/:id/columns", post(handlers::create_column))
+        .route("/boards/{id}/columns", post(handlers::create_column))
         .route(
-            "/columns/:id",
+            "/columns/{id}",
             patch(handlers::update_column).delete(handlers::delete_column),
         )
 }

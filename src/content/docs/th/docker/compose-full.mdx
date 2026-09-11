@@ -25,7 +25,7 @@ taskflow/
 
 ตอนนี้สี่ service เริ่มทำงานจาก `docker compose up` เดียว แต่จะปล่อยให้ทุกตัวเริ่มพร้อมกันแล้วหวังว่าจะรอดไม่ได้ การกระทำแรกสุดของ `backend` — ก่อนจะเปิด listening socket ด้วยซ้ำ — คือ `sqlx::migrate!(...).run(&db).await?` จาก [backend-image](/taskflow/th/docker/backend-image/) ซึ่งต้องการ Postgres ที่ไม่ใช่แค่ *รันอยู่* แต่ต้อง *รับ connection ได้จริง* เริ่ม `backend` ทันทีที่ container process ของ `db` เริ่มทำงาน และการเรียก migration จะไปชนกับ socket ที่ยังไม่มีใครฟังอยู่ — เป็นความล้มเหลวจริงและพบบ่อยกับ `depends_on` ธรรมดา (ซึ่งโดย default จะรอแค่ container *เริ่มทำงาน* ไม่ใช่รอให้สิ่งที่อยู่ข้างใน *พร้อม*) นี่คือเหตุผลที่ `db` และ `redis` มี healthcheck มาตั้งแต่ [compose-skeleton](/taskflow/th/setup/compose-skeleton/) แล้ว ทั้งที่ตอนนั้นยังไม่มีอะไรพึ่งพา healthcheck นั้นเลย — บทเรียนนี้คือจุดที่งานพื้นฐานนั้นได้ผลตอบแทนในที่สุด ผ่าน `depends_on: { condition: service_healthy }`
 
-`frontend` ที่พึ่งพา `backend` เป็นการพึ่งพาแบบที่ต่างออกไปและอ่อนกว่า *container* ของ `frontend` ไม่เคยเรียก `backend` โดยตรงเลย — [frontend-image](/taskflow/th/docker/frontend-image/) วางไว้แล้วว่า `PUBLIC_API_URL` ชี้ไปที่ `http://localhost:8080` ที่ browser เห็น และเป็น **browser** ไม่ใช่ Node server ใน container `frontend` ที่เรียก `/auth/register`, `/boards` และ `/ws/boards/:id` ทุกครั้ง `frontend` ที่มี `depends_on: backend` มีไว้เพื่อให้ log output และลำดับการเริ่มทำงานของ `docker compose up` อ่านแล้วสมเหตุสมผลสำหรับคนที่เฝ้าดูตอนเริ่มทำงาน — ไม่ใช่เพราะ container ของ frontend มีความจำเป็นทางเทคนิคใดๆ ที่ต้องให้ `backend` ตอบ request ได้
+`frontend` ที่พึ่งพา `backend` เป็นการพึ่งพาแบบที่ต่างออกไปและอ่อนกว่า *container* ของ `frontend` ไม่เคยเรียก `backend` โดยตรงเลย — [frontend-image](/taskflow/th/docker/frontend-image/) วางไว้แล้วว่า `PUBLIC_API_URL` ชี้ไปที่ `http://localhost:8080` ที่ browser เห็น และเป็น **browser** ไม่ใช่ Node server ใน container `frontend` ที่เรียก `/auth/register`, `/boards` และ `/ws/boards/{id}` ทุกครั้ง `frontend` ที่มี `depends_on: backend` มีไว้เพื่อให้ log output และลำดับการเริ่มทำงานของ `docker compose up` อ่านแล้วสมเหตุสมผลสำหรับคนที่เฝ้าดูตอนเริ่มทำงาน — ไม่ใช่เพราะ container ของ frontend มีความจำเป็นทางเทคนิคใดๆ ที่ต้องให้ `backend` ตอบ request ได้
 
 ## ข้อดีข้อเสีย
 
@@ -46,7 +46,7 @@ taskflow/
 ```yaml
 services:
   db:
-    image: postgres:16
+    image: postgres:18
     environment:
       POSTGRES_USER: taskflow
       POSTGRES_PASSWORD: taskflow
@@ -62,7 +62,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7
+    image: redis:8
     ports:
       - "6379:6379"
     healthcheck:
@@ -141,9 +141,9 @@ docker compose ps
 ```
 NAME              IMAGE               STATUS                    PORTS
 infra-backend-1   infra-backend       Up 20 seconds (healthy)   0.0.0.0:8080->8080/tcp
-infra-db-1        postgres:16         Up 30 seconds (healthy)   0.0.0.0:5432->5432/tcp
+infra-db-1        postgres:18         Up 30 seconds (healthy)   0.0.0.0:5432->5432/tcp
 infra-frontend-1  infra-frontend      Up 15 seconds             0.0.0.0:4321->4321/tcp
-infra-redis-1     redis:7             Up 30 seconds (healthy)   0.0.0.0:6379->6379/tcp
+infra-redis-1     redis:8             Up 30 seconds (healthy)   0.0.0.0:6379->6379/tcp
 ```
 
 ถ้า `backend` ไม่ยอมขึ้น `healthy` ให้เช็ก log ก่อนอย่างอื่น:

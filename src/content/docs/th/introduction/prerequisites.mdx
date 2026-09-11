@@ -14,7 +14,7 @@ sidebar:
 นี่คือเช็กลิสต์ที่เราจะทำไปด้วยกัน:
 
 - [ ] **Rust** (`rustup` + `cargo`) — compile และรัน backend
-- [ ] **Node 20+** — รัน frontend ที่ทำด้วย Astro พร้อมเครื่องมือรอบ ๆ
+- [ ] **Node 24+** — รัน frontend ที่ทำด้วย Astro พร้อมเครื่องมือรอบ ๆ
 - [ ] **Docker Desktop** — รัน PostgreSQL, Redis และท้ายที่สุดคือทั้งสแตก
 - [ ] **sqlx-cli** — สร้างฐานข้อมูลและรัน migration
 - [ ] **psql** — ตรวจสอบ PostgreSQL จาก terminal
@@ -64,9 +64,9 @@ rustc 1.79.0 (129f3b996 2024-06-10)
 cargo 1.79.0 (ffa9cf99a 2024-06-03)
 ```
 
-### 2. Node 20+
+### 2. Node 24+
 
-Node รัน dev server และเครื่องมือ build ของ frontend ที่ทำด้วย Astro โดย TaskFlow ต้องการ **Node 20 ขึ้นไป** ติดตั้งผ่าน Homebrew (หรือ [nodejs.org](https://nodejs.org) หรือ version manager อย่าง `nvm`):
+Node รัน dev server และเครื่องมือ build ของ frontend ที่ทำด้วย Astro โดย TaskFlow ต้องการ **Node 24 ขึ้นไป** ติดตั้งผ่าน Homebrew (หรือ [nodejs.org](https://nodejs.org) หรือ version manager อย่าง `nvm`):
 
 ```sh
 brew install node
@@ -176,6 +176,6 @@ psql --version && redis-cli --version
 
 ## สรุป
 
-toolchain บน macOS ของคุณติดตั้งครบและ **ตรวจสอบ** เรียบร้อย: Rust (`rustc`/`cargo`) สำหรับ backend, Node 20+ สำหรับ frontend ที่ทำด้วย Astro, Docker Desktop (engine + Compose) เพื่อรันเซอร์วิสต่าง ๆ, `sqlx-cli` สำหรับ migration และ `psql`/`redis-cli` เพื่อตรวจสอบ data store
+toolchain บน macOS ของคุณติดตั้งครบและ **ตรวจสอบ** เรียบร้อย: Rust (`rustc`/`cargo`) สำหรับ backend, Node 24+ สำหรับ frontend ที่ทำด้วย Astro, Docker Desktop (engine + Compose) เพื่อรันเซอร์วิสต่าง ๆ, `sqlx-cli` สำหรับ migration และ `psql`/`redis-cli` เพื่อตรวจสอบ data store
 
 จบโมดูล 0 แล้ว ต่อไปคือ [โมดูล 1 · Setup & Tooling](/taskflow/th/setup/) ที่เราจะสร้างโครงของโปรเจกต์จริง

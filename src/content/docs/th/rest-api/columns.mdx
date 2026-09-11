@@ -21,7 +21,7 @@ module `columns`: `model.rs`, `repo.rs`, `service.rs`, `handlers.rs`, `mod.rs` �
 
 **`columns::service` resolve `board_id` ผ่าน `repo::find_column` ก่อน delegate ไปยัง `boards_service::assert_member` (ตัวที่เราใช้) เทียบกับให้ผู้เรียกส่ง `board_id` มาตรง ๆ ทุก route ของ column**
 
-- ข้อดี: `PATCH /columns/:id` และ `DELETE /columns/:id` ต้องการแค่ id ของ column เองใน URL — client ที่ดึง `BoardTree` มาแล้วและมี `id` ของ column ตัวใดตัวหนึ่งอยู่ในมือ ทำงานกับ column นั้นได้ตรง ๆ ไม่ต้อง track และส่ง board ต้นทางมาด้วย ตรงกับเหตุผล "ID ไม่ต้องมี parent ใน URL เพื่อแยกแยะ" จาก [design](/taskflow/th/rest-api/design/)
+- ข้อดี: `PATCH /columns/{id}` และ `DELETE /columns/{id}` ต้องการแค่ id ของ column เองใน URL — client ที่ดึง `BoardTree` มาแล้วและมี `id` ของ column ตัวใดตัวหนึ่งอยู่ในมือ ทำงานกับ column นั้นได้ตรง ๆ ไม่ต้อง track และส่ง board ต้นทางมาด้วย ตรงกับเหตุผล "ID ไม่ต้องมี parent ใน URL เพื่อแยกแยะ" จาก [design](/taskflow/th/rest-api/design/)
 - ข้อเสีย: ทุก `PATCH`/`DELETE` บน column ตอนนี้จ่ายค่า `SELECT` เพิ่มหนึ่งครั้ง (`find_column`) แค่เพื่อหา `board_id` ก่อนที่ `SELECT` ของ authorization check เองจะรันด้วยซ้ำ — สอง round trip ในที่ที่ออกแบบแบบมี `board_id` ใน URL จะต้องการแค่หนึ่ง นี่คือ trade-off "ความสะดวกของ authorization กับ round trip" เดียวกับที่ [design](/taskflow/th/rest-api/design/) ตัดสินใจไปแล้วสำหรับ `boards::service` เอง เพียงแค่ใช้ลึกลงไปอีกชั้น
 
 **position ของ `create_column` ผ่าน `MAX(position) + 1.0` ใน Rust (ตัวที่เราใช้) เทียบกับ `COALESCE(MAX(position), 0) + 1` ใน SQL ที่คำนวณข้างใน `INSERT`**
@@ -172,7 +172,7 @@ pub async fn delete_column(db: &PgPool, user_id: Uuid, column_id: Uuid) -> AppRe
 }
 ```
 
-`create_column` มี `board_id` จาก URL อยู่แล้ว (`POST /boards/:id/columns`) เลยเรียก `assert_member` ตรง ๆ `update_column` กับ `delete_column` มีแค่ `column_id` เลยเรียก `repo::find_column` ก่อน — column ที่หายไปคือ `AppError::NotFound` ก่อนจะเริ่มเช็ค authorization ด้วยซ้ำ ตรงกับลำดับ `404`-ก่อน-`403` ที่ [design](/taskflow/th/rest-api/design/) กำหนดไว้
+`create_column` มี `board_id` จาก URL อยู่แล้ว (`POST /boards/{id}/columns`) เลยเรียก `assert_member` ตรง ๆ `update_column` กับ `delete_column` มีแค่ `column_id` เลยเรียก `repo::find_column` ก่อน — column ที่หายไปคือ `AppError::NotFound` ก่อนจะเริ่มเช็ค authorization ด้วยซ้ำ ตรงกับลำดับ `404`-ก่อน-`403` ที่ [design](/taskflow/th/rest-api/design/) กำหนดไว้
 
 ### 4. `columns/handlers.rs`
 
@@ -230,7 +230,7 @@ pub async fn delete_column(
 }
 ```
 
-`Path(board_id)` ของ `create_column` ดึงส่วน `:id` จาก `/boards/:id/columns` — ชื่อ path parameter เดียวกันตัวอักษร `:id` ที่ `update_column`/`delete_column` ดึงจาก `/columns/:id` ในชื่อ `column_id` Axum ไม่สนว่าทั้งสอง route ใช้ชื่อ segment ตัวอักษร `:id` เหมือนกัน — การ bind `Path<Uuid>` ของแต่ละ handler เองที่ตัดสินใจว่าจะเรียกค่าที่ดึงมาว่าอะไร
+`Path(board_id)` ของ `create_column` ดึงส่วน `{id}` จาก `/boards/{id}/columns` — ชื่อ path parameter เดียวกันตัวอักษร `{id}` ที่ `update_column`/`delete_column` ดึงจาก `/columns/{id}` ในชื่อ `column_id` Axum ไม่สนว่าทั้งสอง route ใช้ชื่อ segment ตัวอักษร `{id}` เหมือนกัน — การ bind `Path<Uuid>` ของแต่ละ handler เองที่ตัดสินใจว่าจะเรียกค่าที่ดึงมาว่าอะไร
 
 ### 5. `columns/mod.rs`
 
@@ -249,9 +249,9 @@ use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/boards/:id/columns", post(handlers::create_column))
+        .route("/boards/{id}/columns", post(handlers::create_column))
         .route(
-            "/columns/:id",
+            "/columns/{id}",
             patch(handlers::update_column).delete(handlers::delete_column),
         )
 }

@@ -39,7 +39,6 @@ Axum รันการ extract ก่อน body ของ handler จะทำ
 
 ```rust
 use axum::{
-    async_trait,
     extract::FromRequestParts,
     http::{header::AUTHORIZATION, request::Parts, HeaderMap},
 };
@@ -70,7 +69,6 @@ pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
     header.strip_prefix("Bearer ").ok_or(AppError::Unauthorized)
 }
 
-#[async_trait]
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = AppError;
 
@@ -111,7 +109,7 @@ impl FromRequestParts<AppState> for AuthUser {
 มีรายละเอียดสองสามอย่างที่ควรพูดถึง:
 
 - `FromRequestParts<AppState>` — ไม่ใช่ `FromRequestParts<S>` แบบ generic ที่ docs ของ Axum เองแสดงไว้ — เพราะ `AuthUser` ต้องการ `state.config.jwt_secret` และ `state.redis` โดยเฉพาะ การผูก impl เข้ากับ `AppState` ที่เป็นรูปธรรมของเรา (แทนที่จะ generic ข้าม `S` ไหนก็ได้) เหมาะเป๊ะสำหรับ extractor เฉพาะแอปแบบนี้ ตรงข้ามกับ extractor แบบ library ที่ใช้ซ้ำได้
-- `#[async_trait]` จำเป็นต้องมีตรงนี้: trait `FromRequestParts` ของ Axum 0.7 เองถูกนิยามด้วย macro `async_trait` ดังนั้น `impl` ที่เขียนมือ (ตรงข้ามกับ helper สไตล์ `#[derive(FromRequestParts)]` ซึ่งใช้ไม่ได้กับ extractor ที่เขียนมือแบบนี้) ต้องใช้ macro เดียวกันเพื่อสร้าง signature ที่ตรงกัน
+- ไม่ต้องใช้ macro `#[async_trait]` — ตั้งแต่ Axum 0.8 เป็นต้นมา `FromRequestParts` เป็น trait ธรรมดาที่มี `async fn from_request_parts` แบบ native ดังนั้น `impl` ที่เขียนมือก็แค่ `async fn` ใน `impl` block ถ้าเจอ `#[async_trait]` ในตัวอย่างรุ่นเก่า (0.7) ให้ลบทิ้ง เพราะ Axum 0.8 ไม่ re-export มันแล้วและ attribute นั้นจะ compile ไม่ผ่าน
 - `bearer_token` เป็นฟังก์ชันเล็ก ๆ แยกออกมา ไม่ได้ inline เข้าไปใน `from_request_parts` — [handlers](/taskflow/th/auth/handlers/) ใช้ซ้ำเป๊ะ ๆ ใน `logout` ที่ต้องการ token ดิบด้วยเหตุผลเดียวกัน (เพื่อกู้ `jti`) โดยไม่ต้อง duplicate logic การ parse header
 - การเช็ค Redis query ที่ key `auth:token:{jti}` — key เป๊ะ ๆ ที่ `register` และ `login` จะเขียนในบทเรียนถัดไป — และถือว่า key ที่หายไปคือ `Unauthorized` ไม่ใช่ "fail open" token ที่มี signature valid สมบูรณ์แบบก็ยังโดนปฏิเสธตรงนี้ได้ และนั่นคือประเด็นทั้งหมด: นี่คือการเช็ค revocation ที่ JWT เปล่า ๆ ทำเองไม่ได้
 - `state.redis.get()` คืน `deadpool_redis::Connection` แบบ pooled สังเกตว่า import คือ `deadpool_redis::redis::AsyncCommands` ไม่ใช่ crate `redis` ระดับบนสุดที่แยก version ต่างหาก — `deadpool-redis` re-export `redis` เวอร์ชันเป๊ะที่ type `Connection` implement ไว้ ถ้าดึง command trait มาจากที่อื่น trait bound จะไม่ครบและ compile ไม่ผ่านแบบงง ๆ

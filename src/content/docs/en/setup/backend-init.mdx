@@ -70,12 +70,12 @@ Replace the generated `api/Cargo.toml` with:
 [package]
 name = "taskflow-api"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-axum = { version = "0.7", features = ["ws", "macros"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -109,6 +109,15 @@ What each dependency is for:
 - **`thiserror`** — derives `std::error::Error` and `Display` for our domain error enum, which we'll later convert into HTTP responses.
 - **`tracing`** — structured, leveled logging/instrumentation across the whole server.
 - **`tracing-subscriber`** (`env-filter`) — wires up `tracing`'s output; `env-filter` lets us control verbosity via the `RUST_LOG` environment variable.
+
+### Axum 0.8 and the 2024 edition
+
+`edition = "2024"` is the current Rust edition (stable since Rust 1.85); nothing in TaskFlow's code hits its breaking changes (`unsafe extern` blocks, `gen` becoming a reserved keyword, return-position `impl Trait` capturing every in-scope lifetime), so it's a free upgrade. `axum = "0.8"` is the current major release. If you're coming from tutorials written for Axum 0.7, four things changed that this guide already accounts for:
+
+- Path parameters use braces: `/boards/{id}` instead of `/boards/:id`, and wildcards are `/{*rest}`.
+- `FromRequestParts` / `FromRequest` are native `async fn` traits — no `#[async_trait]` attribute.
+- WebSocket `Message::Text` carries `Utf8Bytes` (not `String`) and `Message::Binary` carries `Bytes`.
+- `Option<Path<T>>` no longer swallows extraction errors, and handlers must be `Sync`.
 
 ### 4. A minimal `main.rs`
 

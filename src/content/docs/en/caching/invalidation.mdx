@@ -7,7 +7,7 @@ sidebar:
 
 ## What we're building
 
-One new line, `cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;`, added to every `boards`/`columns`/`cards`/`labels` service function that changes what `GET /boards/:id` returns: `update_board`, `create_column`, `update_column`, `delete_column`, `create_card`, `update_card`, `delete_card`, `move_card`, `attach_label`, `detach_label`. Each one needs the same small plumbing change first — its first parameter becomes `state: &AppState` instead of `db: &PgPool`, with `let db = &state.db;` as its new first line — so the function has `state.redis` available to invalidate with.
+One new line, `cache::invalidate(&state.redis, &format!("cache:board:{board_id}")).await?;`, added to every `boards`/`columns`/`cards`/`labels` service function that changes what `GET /boards/{id}` returns: `update_board`, `create_column`, `update_column`, `delete_column`, `create_card`, `update_card`, `delete_card`, `move_card`, `attach_label`, `detach_label`. Each one needs the same small plumbing change first — its first parameter becomes `state: &AppState` instead of `db: &PgPool`, with `let db = &state.db;` as its new first line — so the function has `state.redis` available to invalidate with.
 
 Ten functions, one line of real behavior each. Nothing about *what* they write to Postgres changes — only that, right after a successful write, they now also delete the cached tree for the board that write affected.
 

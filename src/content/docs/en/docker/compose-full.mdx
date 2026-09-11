@@ -25,7 +25,7 @@ taskflow/
 
 Four services now start from one `docker compose up`, but they can't all start at once and expect things to work. `backend`'s very first action — before it even opens a listening socket — is `sqlx::migrate!(...).run(&db).await?` from [backend-image](/taskflow/en/docker/backend-image/), which needs Postgres not just *running* but actually accepting connections. Start `backend` the instant `db`'s container process begins, and the migration call hits a socket nobody's listening on yet — a real, common failure mode with plain `depends_on` (which by default only waits for a container to *start*, not for whatever's inside it to be *ready*). This is exactly why `db` and `redis` got healthchecks all the way back in [compose-skeleton](/taskflow/en/setup/compose-skeleton/), even though nothing depended on them yet at the time — this lesson is where that groundwork finally pays off, via `depends_on: { condition: service_healthy }`.
 
-`frontend` depending on `backend` is a different, weaker kind of dependency. The `frontend` *container* never calls `backend` directly — [frontend-image](/taskflow/en/docker/frontend-image/) already established that `PUBLIC_API_URL` points browsers at `http://localhost:8080`, and it's the **browser**, not the Node server inside the `frontend` container, that makes every `/auth/register`, `/boards`, and `/ws/boards/:id` call. `frontend`'s `depends_on: backend` exists purely so `docker compose up`'s log output and startup order read sensibly to a human watching it boot — not because the frontend container has any technical need for `backend` to answer requests.
+`frontend` depending on `backend` is a different, weaker kind of dependency. The `frontend` *container* never calls `backend` directly — [frontend-image](/taskflow/en/docker/frontend-image/) already established that `PUBLIC_API_URL` points browsers at `http://localhost:8080`, and it's the **browser**, not the Node server inside the `frontend` container, that makes every `/auth/register`, `/boards`, and `/ws/boards/{id}` call. `frontend`'s `depends_on: backend` exists purely so `docker compose up`'s log output and startup order read sensibly to a human watching it boot — not because the frontend container has any technical need for `backend` to answer requests.
 
 ## Pros & cons
 
@@ -46,7 +46,7 @@ Four services now start from one `docker compose up`, but they can't all start a
 ```yaml
 services:
   db:
-    image: postgres:16
+    image: postgres:18
     environment:
       POSTGRES_USER: taskflow
       POSTGRES_PASSWORD: taskflow
@@ -62,7 +62,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7
+    image: redis:8
     ports:
       - "6379:6379"
     healthcheck:
@@ -141,9 +141,9 @@ Expected — `db`, `redis`, and `backend` all show `healthy`; `frontend` has no 
 ```
 NAME              IMAGE               STATUS                    PORTS
 infra-backend-1   infra-backend       Up 20 seconds (healthy)   0.0.0.0:8080->8080/tcp
-infra-db-1        postgres:16         Up 30 seconds (healthy)   0.0.0.0:5432->5432/tcp
+infra-db-1        postgres:18         Up 30 seconds (healthy)   0.0.0.0:5432->5432/tcp
 infra-frontend-1  infra-frontend      Up 15 seconds             0.0.0.0:4321->4321/tcp
-infra-redis-1     redis:7             Up 30 seconds (healthy)   0.0.0.0:6379->6379/tcp
+infra-redis-1     redis:8             Up 30 seconds (healthy)   0.0.0.0:6379->6379/tcp
 ```
 
 If `backend` never reaches `healthy`, check its logs before anything else:

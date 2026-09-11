@@ -25,11 +25,11 @@ TaskFlow ใช้งานได้ แต่จงใจยังไม่เ�
 
 ### 3. คอมเมนต์บน card แบบเรียลไทม์ (ปานกลาง)
 
-เพิ่มตาราง `comments` ที่ key ด้วย card id, endpoint `POST /cards/:id/comments` และ event `comment.created` บน channel ของบอร์ด เพื่อให้หน้ารายละเอียด card ที่เปิดอยู่อัปเดตแบบสด — ก็คือเส้นทาง [ws-endpoint](/taskflow/th/realtime/ws-endpoint/) → [live-sync](/taskflow/th/kanban-island/live-sync/) ที่คุณสร้างไว้สำหรับการย้าย card นั่นเอง เอามาใช้กับ entity ตัวที่สอง นำแนวคิด reconcile-by-id จาก [live-sync](/taskflow/th/kanban-island/live-sync/) กลับมาใช้ซ้ำ
+เพิ่มตาราง `comments` ที่ key ด้วย card id, endpoint `POST /cards/{id}/comments` และ event `comment.created` บน channel ของบอร์ด เพื่อให้หน้ารายละเอียด card ที่เปิดอยู่อัปเดตแบบสด — ก็คือเส้นทาง [ws-endpoint](/taskflow/th/realtime/ws-endpoint/) → [live-sync](/taskflow/th/kanban-island/live-sync/) ที่คุณสร้างไว้สำหรับการย้าย card นั่นเอง เอามาใช้กับ entity ตัวที่สอง นำแนวคิด reconcile-by-id จาก [live-sync](/taskflow/th/kanban-island/live-sync/) กลับมาใช้ซ้ำ
 
 ### 4. Full-text search ทั่วทุก card (ปานกลาง)
 
-เพิ่มคอลัมน์ `tsvector` ของ Postgres (หรือแบบ generated) ที่คร่อม title และ description ของ card, index แบบ GIN และ endpoint `GET /boards/:id/search?q=` ที่จัดอันดับผลลัพธ์ด้วย `ts_rank` นี่คือก้าวถัดไปตามธรรมชาติจากงาน indexing ใน [indexes-ordering](/taskflow/th/database/indexes-ordering/) — วินัยเดิม index ชนิดใหม่ ตัดสินใจว่าผลลัพธ์ควร cache ผ่าน [cache-reads](/taskflow/th/caching/cache-reads/) ได้ หรือเฉพาะเจาะจงกับ query เกินกว่าจะคุ้ม
+เพิ่มคอลัมน์ `tsvector` ของ Postgres (หรือแบบ generated) ที่คร่อม title และ description ของ card, index แบบ GIN และ endpoint `GET /boards/{id}/search?q=` ที่จัดอันดับผลลัพธ์ด้วย `ts_rank` นี่คือก้าวถัดไปตามธรรมชาติจากงาน indexing ใน [indexes-ordering](/taskflow/th/database/indexes-ordering/) — วินัยเดิม index ชนิดใหม่ ตัดสินใจว่าผลลัพธ์ควร cache ผ่าน [cache-reads](/taskflow/th/caching/cache-reads/) ได้ หรือเฉพาะเจาะจงกับ query เกินกว่าจะคุ้ม
 
 ### 5. Role ของ board และ RBAC (ปานกลาง–ยาก)
 

@@ -12,7 +12,7 @@ In this lesson we get your **macOS** machine ready to build TaskFlow. No applica
 Here's the checklist we'll work through:
 
 - [ ] **Rust** (`rustup` + `cargo`) — compile and run the backend
-- [ ] **Node 20+** — run the Astro frontend and its tooling
+- [ ] **Node 24+** — run the Astro frontend and its tooling
 - [ ] **Docker Desktop** — run PostgreSQL, Redis, and eventually the whole stack
 - [ ] **sqlx-cli** — create the database and run migrations
 - [ ] **psql** — inspect PostgreSQL from the terminal
@@ -62,9 +62,9 @@ rustc 1.79.0 (129f3b996 2024-06-10)
 cargo 1.79.0 (ffa9cf99a 2024-06-03)
 ```
 
-### 2. Node 20+
+### 2. Node 24+
 
-Node runs the Astro frontend's dev server and build tooling. TaskFlow needs **Node 20 or newer**. Install via Homebrew (or [nodejs.org](https://nodejs.org), or a version manager like `nvm`):
+Node runs the Astro frontend's dev server and build tooling. TaskFlow needs **Node 24 or newer**. Install via Homebrew (or [nodejs.org](https://nodejs.org), or a version manager like `nvm`):
 
 ```sh
 brew install node
@@ -174,4 +174,4 @@ If every command answers with a version string — and Node is 20+ — your mach
 
 ## Recap
 
-Your macOS toolchain is installed and, crucially, **verified**: Rust (`rustc`/`cargo`) for the backend, Node 20+ for the Astro frontend, Docker Desktop (engine + Compose) to run the services, `sqlx-cli` for migrations, and `psql`/`redis-cli` to inspect the data stores. That's the end of Module 0. Next up is [Module 1 · Setup & Tooling](/taskflow/en/setup/), where we scaffold the actual project.
+Your macOS toolchain is installed and, crucially, **verified**: Rust (`rustc`/`cargo`) for the backend, Node 24+ for the Astro frontend, Docker Desktop (engine + Compose) to run the services, `sqlx-cli` for migrations, and `psql`/`redis-cli` to inspect the data stores. That's the end of Module 0. Next up is [Module 1 · Setup & Tooling](/taskflow/en/setup/), where we scaffold the actual project.

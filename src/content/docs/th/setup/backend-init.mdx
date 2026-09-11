@@ -70,12 +70,12 @@ resolver = "2"
 [package]
 name = "taskflow-api"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
-axum = { version = "0.7", features = ["ws", "macros"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+tower-http = { version = "0.7", features = ["cors", "trace"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -109,6 +109,15 @@ dependency แต่ละตัวมีไว้ทำอะไร:
 - **`thiserror`** — derive `std::error::Error` และ `Display` ให้ enum error ของ domain เรา ซึ่งภายหลังเราจะแปลงเป็น HTTP response
 - **`tracing`** — logging/instrumentation แบบมีโครงสร้างและมีระดับ (level) ครอบคลุมทั้ง server
 - **`tracing-subscriber`** (`env-filter`) — ต่อสาย output ของ `tracing`; `env-filter` ให้เราควบคุมความละเอียดของ log ผ่านตัวแปร environment `RUST_LOG`
+
+### Axum 0.8 กับ edition 2024
+
+`edition = "2024"` คือ Rust edition ปัจจุบัน (stable ตั้งแต่ Rust 1.85) โค้ดของ TaskFlow ไม่โดน breaking change ของมันเลย (`unsafe extern` block, `gen` กลายเป็น keyword สงวน, `impl Trait` ในตำแหน่ง return จับทุก lifetime ใน scope) จึงอัปเกรดได้ฟรี ๆ ส่วน `axum = "0.8"` คือ major release ปัจจุบัน ถ้าคุณมาจาก tutorial ที่เขียนสำหรับ Axum 0.7 มีสี่อย่างที่เปลี่ยนไปและคู่มือนี้ปรับให้แล้ว:
+
+- path parameter ใช้วงเล็บปีกกา: `/boards/{id}` แทน `/boards/:id` และ wildcard เป็น `/{*rest}`
+- `FromRequestParts` / `FromRequest` เป็น trait ที่มี `async fn` แบบ native — ไม่ต้องมี attribute `#[async_trait]`
+- `Message::Text` ของ WebSocket ถือ `Utf8Bytes` (ไม่ใช่ `String`) และ `Message::Binary` ถือ `Bytes`
+- `Option<Path<T>>` ไม่กลืน error ของการ extract อีกต่อไป และ handler ต้องเป็น `Sync`
 
 ### 4. `main.rs` แบบขั้นต่ำ
 
