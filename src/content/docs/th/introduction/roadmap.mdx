@@ -1,53 +1,60 @@
 ---
 title: แผนงาน Real-World Projects
-description: TaskFlow คือโปรเจกต์ที่ 1 ของซีรีส์ 6 โปรเจกต์ที่นำเนื้อหาทั้งหมดใน Learn Hub มาปรับเป็นแอปพลิเคชันจริง นี่คือสิ่งที่กำลังจะตามมา
+description: TaskFlow คือโปรเจกต์ที่ 1 ของซีรีส์ 7 โปรเจกต์ที่นำเนื้อหาทั้งหมดใน Learn Hub มาปรับเป็นแอปพลิเคชันจริง นี่คือสิ่งที่โปรเจกต์ที่เหลือในซีรีส์สร้างขึ้น
 sidebar:
   order: 4
 ---
 
 ## TaskFlow อยู่ตรงไหนของภาพรวม
 
-TaskFlow คือ **โปรเจกต์ที่ 1** ของซีรีส์ **Real-World Projects** ทั้งหมด 6 โปรเจกต์ แต่ละโปรเจกต์หยิบแอปพลิเคชันจริงคนละแบบมาสร้างใหม่ตั้งแต่ repo เปล่า ๆ โดยตั้งใจดึงเนื้อหาจากคอร์สใน Learn Hub คนละส่วนกัน รวมทั้ง 6 โปรเจกต์แล้วจึงครอบคลุมคอร์สเกือบทั้งแคตตาล็อก
+TaskFlow คือ **โปรเจกต์ที่ 1** ของซีรีส์ **Real-World Projects** ทั้งหมด 7 โปรเจกต์ แต่ละโปรเจกต์หยิบแอปพลิเคชันจริงคนละแบบมาสร้างใหม่ตั้งแต่ repo เปล่า ๆ โดยตั้งใจดึงเนื้อหาจากคอร์สใน Learn Hub คนละส่วนกัน รวมทั้ง 7 โปรเจกต์แล้วจึงครอบคลุมคอร์สเกือบทั้งแคตตาล็อก
 
-TaskFlow ให้คุณได้ backend ด้วย Rust, PostgreSQL, Redis, เลเยอร์เรียลไทม์ด้วย WebSocket, ฟรอนต์เอนด์ด้วย Astro และ Docker Compose ส่วนโปรเจกต์ด้านล่างจะพาคุณไปยังส่วนที่เหลือของแผนที่ — ภาษาอื่น ๆ, ฐานข้อมูลแบบอื่น, message queue, มือถือ, เว็บแบบ offline และโครงสร้างพื้นฐานบนคลาวด์จริง
+TaskFlow ให้คุณได้ backend ด้วย Rust, PostgreSQL, Redis, เลเยอร์เรียลไทม์ด้วย WebSocket, ฟรอนต์เอนด์ด้วย Astro และ Docker Compose ส่วนโปรเจกต์ด้านล่างจะพาคุณไปยังส่วนที่เหลือของแผนที่ — ภาษาอื่น ๆ, ฐานข้อมูลแบบอื่น, message queue, มือถือ, micro-frontend, เว็บแบบ offline และโครงสร้างพื้นฐานบนคลาวด์จริง
 
-ห้าโปรเจกต์ด้านล่างกำลังจะตามมา ตอนนี้ถือเป็นแผนงานไว้ก่อน — เริ่มที่ TaskFlow ซึ่งเสร็จสมบูรณ์และพร้อมให้ลงมือสร้างได้แล้ววันนี้
+ทั้ง 7 โปรเจกต์เปิดให้เรียนแล้ว TaskFlow คือจุดเริ่มต้น ส่วนอีก 6 โปรเจกต์ด้านล่างคือที่ที่คุณจะไปต่อ
 
-## DevBlog — headless CMS + บล็อก
+## DevBlog — headless CMS + บล็อก ✅ live
 
 แพลตฟอร์มคอนเทนต์: ผู้เขียนเขียนโพสต์ใน headless CMS และเว็บบล็อกสาธารณะที่โหลดเร็วจะเรนเดอร์ออกมา คุณจะได้ออกแบบโมเดลของคอนเทนต์ เปิดให้เข้าถึงผ่าน API แบบ **GraphQL** และเรนเดอร์ด้วย server-side rendering กับ incremental static regeneration
 
 - **Stack:** Node/NestJS + MongoDB + GraphQL + Next.js
 - **ปรับใช้จาก:** Node.js Deep Dive, MongoDB, GraphQL, Next.js, React, Design Patterns, Refactoring
 
-## ShopMicro — e-commerce microservices
+## ShopMicro — e-commerce microservices ✅ live
 
 ร้านค้าออนไลน์ที่แยกออกเป็นหลายเซอร์วิสอิสระ (แคตตาล็อก, ออเดอร์, ชำระเงิน, แจ้งเตือน) ที่สื่อสารกันผ่าน **gRPC** และประสานงานกระบวนการสั่งซื้อผ่าน **event streaming** คุณจะได้แยกโดเมนออกเป็นเซอร์วิสและรันบน Kubernetes
 
 - **Stack:** Go + gRPC + PostgreSQL + Kafka + RabbitMQ + Kubernetes
 - **ปรับใช้จาก:** Go Deep Dive, Go for TypeScript Developers, gRPC, Microservices, Kafka, RabbitMQ, Kubernetes
 
-## FitTrack — แอปฟิตเนสแบบ mobile-first
+## FitTrack — แอปฟิตเนสแบบ mobile-first ✅ live
 
 แอปติดตามการออกกำลังกายที่มีทั้งแอปมือถือแบบเนทีฟและเว็บคู่กัน โดยมี Python API กับแพลตฟอร์ม Postgres/auth แบบ managed อยู่เบื้องหลัง คุณจะได้สร้างผลิตภัณฑ์เดียวกันสำหรับสองไคลเอนต์โดยใช้ backend ร่วมกัน
 
 - **Stack:** Python/FastAPI + Supabase + Flutter + Svelte
 - **ปรับใช้จาก:** Python Deep Dive, Python for TypeScript Developers, Supabase, Flutter (×2), Svelte
 
-## OfflineNotes — PWA แบบ offline-first
+## Mosaic — storefront แบบ micro-frontend ✅ live
+
+storefront ที่ประกอบขึ้นจาก micro-frontend ที่ deploy แยกกันอิสระ: React shell จะ compose remote ของ React, Svelte และ Astro ตอน runtime ด้วย Module Federation, Web Components เป็นขอบเขตกลางที่เชื่อมทุก framework เข้าหากัน และแต่ละ slice เป็นเจ้าของ UI กับ BFF บาง ๆ ของตัวเอง คุณจะได้สร้าง design system ที่ใช้ร่วมกัน, การสื่อสารข้าม slice, routing ที่ host เป็นเจ้าของ, ความทนทานเมื่อ remote ตัวใดตัวหนึ่งล่ม และการ deploy แยกราย slice — ShopMicro แยก backend ออกเป็น service อิสระ ส่วน Mosaic แยก frontend ออกเป็น app อิสระ
+
+- **Stack:** Module Federation 2.0 + React + Svelte + Astro + Web Components + Hono
+- **ปรับใช้จาก:** Astro Deep Dive, Astro for React Developers, React Deep Dive, Svelte Deep Dive, Svelte for React Developers, Web Components
+
+## OfflineNotes — PWA แบบ offline-first ✅ live
 
 แอปจดโน้ตที่ทำงานได้แม้ไม่มีเน็ตเลย: โน้ตเก็บอยู่ใน browser และจะ sync เมื่อกลับมาออนไลน์ คุณจะได้สร้าง **Web Components** ที่นำกลับมาใช้ซ้ำได้ เก็บข้อมูลใน **IndexedDB** เร่งความเร็วเส้นทางที่ร้อนแรงด้วย **WebAssembly** และส่งมอบเป็น PWA ที่ติดตั้งได้
 
 - **Stack:** TypeScript + Web Components + IndexedDB + WebAssembly + Astro
 - **ปรับใช้จาก:** TypeScript, Web Components, Browser Storage, PWA, WebAssembly, Web for Designers
 
-## CloudDeploy — โปรเจกต์ปิดท้ายด้านโครงสร้างพื้นฐาน
+## CloudDeploy — โปรเจกต์ปิดท้ายด้านโครงสร้างพื้นฐาน ✅ live
 
-โปรเจกต์ปิดท้าย: นำโปรเจกต์ที่ 1–5 มา **deploy จริง** คุณจะได้ provision โครงสร้างพื้นฐานบนคลาวด์แบบ infrastructure as code ข้ามสามคลาวด์ รันบน Kubernetes เพิ่มระบบ authentication, feature flag และ observability
+โปรเจกต์ปิดท้าย: นำ **ShopMicro** ระบบ microservices จากโปรเจกต์ที่ 3 มา **deploy จริง** คุณจะได้ provision โครงสร้างพื้นฐานบนคลาวด์แบบ infrastructure as code ข้ามสามคลาวด์ รันบน Kubernetes เพิ่มระบบ authentication, feature flag และ observability
 
 - **Stack:** Terraform/Terragrunt (AWS/GCP/Azure) + Kubernetes + Datadog + Keycloak + GrowthBook
 - **ปรับใช้จาก:** Terraform (×3), Kubernetes, Datadog, Keycloak, GrowthBook
 
 ## เริ่มที่นี่
 
-ห้าโปรเจกต์นี้กำลังจะตามมา วันนี้โปรเจกต์ที่ควรลงมือสร้างคือ **TaskFlow** — ไปที่หน้า [ภาพรวม](/taskflow/th/introduction/overview/) แล้วเริ่มจาก repo เปล่า ๆ ได้เลย
+ทั้ง 7 โปรเจกต์เปิดให้เรียนแล้ว จะสร้างตัวไหนก่อนก็ได้ — แต่ถ้าคุณเพิ่งเริ่มซีรีส์นี้ ให้เริ่มที่ **TaskFlow**: ไปที่หน้า [ภาพรวม](/taskflow/th/introduction/overview/) แล้วเริ่มจาก repo เปล่า ๆ ได้เลย

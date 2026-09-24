@@ -1,6 +1,6 @@
 ---
 title: ก้าวต่อไป
-description: TaskFlow รันได้ในเครื่องบน Docker Compose — การพาขึ้น production (Terraform/Terragrunt, Kubernetes, Datadog, Keycloak, GrowthBook) คือโปรเจกต์ CloudDeploy และ Real-World Projects อื่น ๆ ของ Learn Hub (DevBlog, ShopMicro, FitTrack, OfflineNotes) แต่ละตัวก็สร้างระบบคนละแบบแบบครบวงจร
+description: TaskFlow รันได้ในเครื่องบน Docker Compose — การพาขึ้น production (Terraform/Terragrunt, Kubernetes, Datadog, Keycloak, GrowthBook) คือโปรเจกต์ CloudDeploy และ Real-World Projects อื่น ๆ ของ Learn Hub (DevBlog, ShopMicro, FitTrack, Mosaic, OfflineNotes) แต่ละตัวก็สร้างระบบคนละแบบแบบครบวงจร
 sidebar:
   order: 3
 ---
@@ -34,6 +34,7 @@ TaskFlow เป็นหนึ่งใน **Real-World Projects** ของ Lea
 - **DevBlog** — แพลตฟอร์มบล็อกที่ขับเคลื่อนด้วยคอนเทนต์: CRUD, การ render และ SEO ในรูปแบบที่ต่างออกไป ส่วน TaskFlow เน้น realtime-และ-อินเทอร์แอกทีฟ
 - **ShopMicro** — ระบบ e-commerce ที่สร้างเป็น microservices ทำให้คุณได้เจอ service boundary, การสื่อสารระหว่างบริการ และ distributed data แทนที่จะเป็น backend เดียวของ TaskFlow
 - **FitTrack** — แอปติดตามการออกกำลังกายที่มี frontend แบบ mobile-first และข้อมูลแบบ time-series ที่เป็นเรื่องราวของ data model และ client ที่ต่างออกไปโดยสิ้นเชิง
+- **Mosaic** — storefront ที่สร้างเป็น micro-frontend: React shell ที่ compose remote ของ React, Svelte และ Astro ตอน runtime ทำให้ไอเดีย "service อิสระ" จาก ShopMicro มาลงที่ฝั่ง frontend แทน
 - **OfflineNotes** — แอปโน้ตที่สร้างแบบ offline-first โดยมีโจทย์ยากอยู่ที่ local storage และการ sync/แก้ conflict บน *client* — เป็นความต่างที่น่าสนใจกับ realtime แบบ server-authoritative ของ TaskFlow
 
 แต่ละตัวคือการสร้างที่จบในตัวเองเหมือนกับคอร์สนี้ เลือกตัวที่โจทย์ฟังดูคุ้นเคยน้อยที่สุด — นั่นคือที่ที่คุณจะได้เรียนรู้มากที่สุด
@@ -44,4 +45,4 @@ TaskFlow เป็นหนึ่งใน **Real-World Projects** ของ Lea
 
 ## สรุป
 
-TaskFlow รันบน Docker Compose ส่วนการพาขึ้น production — Terraform/Terragrunt, Kubernetes, Datadog, Keycloak, GrowthBook — คือโปรเจกต์ **CloudDeploy** ภาคต่อตามธรรมชาติที่นำ healthcheck, tracing และ auth ของคุณกลับมาใช้เป็นเรื่อง production สำหรับระบบชนิดที่ต่างออกไปโดยสิ้นเชิง Real-World Projects อื่น ๆ ของ Learn Hub — **DevBlog**, **ShopMicro**, **FitTrack** และ **OfflineNotes** — แต่ละตัวสร้างขึ้นแบบครบวงจร นี่คือจุดจบของ TaskFlow คุณสร้างขึ้นมาเองทั้งหมด ตอนนี้ก็เอาไปรัน ต่อยอด หรือลงมือสร้างตัวถัดไปได้เลย
+TaskFlow รันบน Docker Compose ส่วนการพาขึ้น production — Terraform/Terragrunt, Kubernetes, Datadog, Keycloak, GrowthBook — คือโปรเจกต์ **CloudDeploy** ภาคต่อตามธรรมชาติที่นำ healthcheck, tracing และ auth ของคุณกลับมาใช้เป็นเรื่อง production สำหรับระบบชนิดที่ต่างออกไปโดยสิ้นเชิง Real-World Projects อื่น ๆ ของ Learn Hub — **DevBlog**, **ShopMicro**, **FitTrack**, **Mosaic** และ **OfflineNotes** — แต่ละตัวสร้างขึ้นแบบครบวงจร นี่คือจุดจบของ TaskFlow คุณสร้างขึ้นมาเองทั้งหมด ตอนนี้ก็เอาไปรัน ต่อยอด หรือลงมือสร้างตัวถัดไปได้เลย
