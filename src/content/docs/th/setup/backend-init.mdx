@@ -9,7 +9,7 @@ sidebar:
 
 **Cargo workspace** ของ Rust จริง ๆ ภายใน `taskflow/backend/` โดยมี member crate ตัวเดียวคือ `api` (ชื่อ package `taskflow-api`) ที่จะเติบโตกลายเป็น Axum server เต็มรูปแบบในโมดูลถัดไป เมื่อจบบทเรียนนี้ `cargo run` จะพิมพ์ `TaskFlow API` ออกทาง terminal — เป็นหลักฐานว่า workspace, crate และทุก dependency คอมไพล์เข้าด้วยกันได้ ก่อนที่เราจะเขียน handler สักตัว
 
-```
+```text
 backend/
 ├── Cargo.toml          # workspace root
 └── api/

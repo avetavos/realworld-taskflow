@@ -9,7 +9,7 @@ sidebar:
 
 `taskflow/infra/frontend.Dockerfile` — Dockerfile แบบ multi-stage สำหรับ Astro frontend สะท้อนรูปแบบเดียวกับที่ [backend-image](/taskflow/th/docker/backend-image/) เพิ่งสร้างไป: builder stage ที่ติดตั้ง dependency แล้วรัน `npm run build` และ runtime stage ที่บางเบาซึ่งรันแค่ output ที่ build แล้ว จุดที่ต่างออกไปจริงๆ ที่นี่ไม่เกี่ยวกับ Docker เองเลย — คือ `PUBLIC_API_URL` ตัวแปรที่ [board-page](/taskflow/th/kanban-island/board-page/) และส่วนที่เหลือของ frontend ใช้เพื่อรู้ว่า API อยู่ที่ไหน จะ *ฝังลงใน JavaScript ที่ build แล้ว* ทันทีที่ `npm run build` รัน ไม่ใช่ถูกอ่านใหม่ทุกครั้งที่ container เริ่มทำงาน ข้อเท็จจริงเดียวนี้กำหนดโครงสร้างเกือบทั้งหมดของ Dockerfile นี้
 
-```
+```text
 taskflow/
 ├── frontend/
 │   ├── astro.config.mjs   # from board-page: @astrojs/node, mode: 'standalone'

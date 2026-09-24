@@ -294,6 +294,8 @@ pub async fn delete_card(
 ### 4. `labels/service.rs` — `attach_label`, `detach_label`
 
 ```rust
+use crate::{cache, state::AppState};
+
 pub async fn attach_label(
     state: &AppState,
     user_id: Uuid,

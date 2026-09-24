@@ -9,7 +9,7 @@ sidebar:
 
 ครึ่งหนึ่งของ monorepo ที่เป็น `frontend/`: โปรเจกต์ **Astro** ใหม่เอี่ยมที่ติดตั้ง integration ของ **Preact** ไว้แล้ว พร้อมสำหรับโฮสต์ shell ของ Kanban board ที่เป็น static เกือบทั้งหมด และในภายหลังคือ island ที่โต้ตอบได้หนึ่งตัว เมื่อจบบทเรียนนี้ `npm run dev` จะเสิร์ฟหน้าเว็บที่ใช้งานได้ที่ `http://localhost:4321`
 
-```
+```text
 frontend/
 ├── astro.config.mjs
 ├── package.json
@@ -95,7 +95,7 @@ PUBLIC_API_URL=http://localhost:8080
 
 ### 4. โครงสร้างโฟลเดอร์
 
-```
+```text
 src/
 ├── pages/       # routing แบบ file-based — ไฟล์ .astro แต่ละไฟล์ในนี้คือหนึ่ง route
 ├── layouts/     # โครงหน้าเพจที่ใช้ร่วมกัน (header, nav, <slot />) ที่ page ต่าง ๆ ห่อตัวเองด้วย

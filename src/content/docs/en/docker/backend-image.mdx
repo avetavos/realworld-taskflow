@@ -9,7 +9,7 @@ sidebar:
 
 `taskflow/infra/backend.Dockerfile` — a multi-stage Dockerfile that turns the Rust workspace built across [backend-foundations](/taskflow/en/backend-foundations/app-skeleton/), [auth](/taskflow/en/auth/handlers/), [rest-api](/taskflow/en/rest-api/design/), [caching](/taskflow/en/caching/rate-limit/), and [realtime](/taskflow/en/realtime/redis-backplane/) into a single container image running the compiled `taskflow-api` binary. Alongside it: a `.dockerignore` at the repo root, and one addition to `main.rs` — an embedded `sqlx::migrate!` call so a freshly started container brings the database schema up to date itself, with no separate migration step and no `sqlx-cli` anywhere near production.
 
-```
+```text
 taskflow/
 ├── .dockerignore
 ├── backend/

@@ -76,3 +76,23 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
     This is a build-along guide: you write the code yourself, step by step, not just read about it.
   </Card>
 </CardGrid>
+
+## Versions verified (September 2026)
+
+Every crate, package, and image version below was checked against the official docs and, where the code runs locally, against a real `cargo build`/`cargo test`/`npm run build`/`docker compose config` on this exact course:
+
+| Layer | Version |
+| --- | --- |
+| Rust | 1.96, edition 2024 |
+| Axum | 0.8 |
+| Tokio | 1 (full features) |
+| SQLx | 0.8 |
+| tower-http | 0.7 |
+| redis / deadpool-redis | 0.27 / 0.16 |
+| jsonwebtoken | 9 |
+| argon2 | 0.5 |
+| PostgreSQL image | postgres:18 |
+| Redis image | redis:8 |
+| Astro | 6 |
+| Preact | 10 |
+| Node | 24+ |

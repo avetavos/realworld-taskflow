@@ -9,7 +9,7 @@ sidebar:
 
 `taskflow/infra/docker-compose.yml` ฉบับสมบูรณ์ — service `db` และ `redis` จาก [compose-skeleton](/taskflow/th/setup/compose-skeleton/) ตอนนี้มี `backend` (build จาก [backend-image](/taskflow/th/docker/backend-image/)) และ `frontend` (build จาก [frontend-image](/taskflow/th/docker/frontend-image/)) มาร่วมด้วย คำสั่งเดียว `docker compose up --build` เปิด container ทั้งสี่ตัวตามลำดับการพึ่งพากันจริงๆ และผลิตภัณฑ์ทั้งหมด — register, login, สร้าง board, ลากการ์ด, ดูการ์ดย้ายแบบ live ในอีกแท็บ — รันอยู่ใน Docker ทั้งหมด ไม่ต้องมี `cargo run` หรือ `npm run dev` แบบ native ที่ไหนเลย
 
-```
+```text
 taskflow/
 ├── .env
 ├── backend/

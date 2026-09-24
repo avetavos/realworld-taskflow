@@ -9,7 +9,7 @@ sidebar:
 
 `taskflow/infra/backend.Dockerfile` — Dockerfile แบบ multi-stage ที่แปลง Rust workspace ที่สร้างมาตลอดโมดูล [backend-foundations](/taskflow/th/backend-foundations/app-skeleton/), [auth](/taskflow/th/auth/handlers/), [rest-api](/taskflow/th/rest-api/design/), [caching](/taskflow/th/caching/rate-limit/) และ [realtime](/taskflow/th/realtime/redis-backplane/) ให้กลายเป็น container image เดียวที่รัน binary `taskflow-api` ที่ compile แล้ว พร้อมกันนั้นก็มี `.dockerignore` ที่ root ของ repo และการเพิ่มโค้ดหนึ่งบรรทัดใน `main.rs` — เรียก `sqlx::migrate!` แบบฝังไว้ในตัว ทำให้ container ที่เพิ่งเริ่มทำงานอัปเดต schema ฐานข้อมูลให้ตัวเองได้เลย ไม่ต้องมีขั้นตอน migration แยก และไม่ต้องมี `sqlx-cli` อยู่ใกล้ๆ production เลย
 
-```
+```text
 taskflow/
 ├── .dockerignore
 ├── backend/

@@ -8,6 +8,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",
+    "check": "node tools/check-parity.mjs",
     "deploy": "astro build && rm -rf .cf-assets && mkdir -p .cf-assets/taskflow && cp -R dist/. .cf-assets/taskflow/ && npx wrangler deploy",
     "deploy:projects": "./deploy-projects.sh"
   },

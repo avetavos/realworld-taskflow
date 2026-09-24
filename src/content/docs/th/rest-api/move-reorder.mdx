@@ -159,6 +159,8 @@ pub async fn move_card(
 อัปเดต `cards::routes()`:
 
 ```rust
+use axum::routing::patch;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/columns/{id}/cards", post(handlers::create_card))

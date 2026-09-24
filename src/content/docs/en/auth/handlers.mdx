@@ -127,10 +127,10 @@ pub async fn register(
     .execute(&state.db)
     .await;
 
-    if let Err(sqlx::Error::Database(db_err)) = &insert {
-        if db_err.is_unique_violation() {
-            return Err(AppError::Conflict("email already registered".to_string()));
-        }
+    if let Err(sqlx::Error::Database(db_err)) = &insert
+        && db_err.is_unique_violation()
+    {
+        return Err(AppError::Conflict("email already registered".to_string()));
     }
     insert?;
 

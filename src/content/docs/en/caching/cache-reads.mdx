@@ -161,6 +161,8 @@ pub struct BoardTree {
 Update `get_tree` in `taskflow/backend/api/src/boards/service.rs` — it needs `crate::{cache, state::AppState}` imported at the top of the file too:
 
 ```rust
+use crate::{cache, state::AppState};
+
 pub async fn get_tree(state: &AppState, user_id: Uuid, board_id: Uuid) -> AppResult<BoardTree> {
     let db = &state.db;
 
